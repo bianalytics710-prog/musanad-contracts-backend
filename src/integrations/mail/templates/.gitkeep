@@ -1,0 +1,4 @@
+# Bilingual EN/AR email templates live here.
+# Naming: <name>.<locale>.html and optional <name>.<locale>.txt.
+# Locale: 'en' or 'ar'. Variable substitution: {{varName}}.
+# Feature modules add templates as needed (M1+).

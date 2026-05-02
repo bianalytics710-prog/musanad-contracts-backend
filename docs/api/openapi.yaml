@@ -1,0 +1,887 @@
+openapi: 3.0.3
+info:
+  title: Musanad Contracts Hub - M0 Foundation API
+  description: |
+    M0 Foundation API for the Musanad Contracts Hub platform. Covers authentication
+    (login, refresh, logout, UAE Pass federated entry), user CRUD, role catalog,
+    permission catalog, and the operational health probe.
+
+    All routes are prefixed with `/api/v1` except `/api/health` (infrastructural).
+
+    Architecture: thin HTTP controllers call PostgreSQL `fn_*` functions
+    (Database Objects First). RLS is enforced server-side via the
+    `app.current_user_id` session GUC, set by middleware before every fn_ call.
+
+    Every response carries an `X-Request-ID` correlation header.
+  version: 0.1.0
+  contact:
+    name: Musanad Technologies FZ-LLC
+servers:
+  - url: http://localhost:4000/api/v1
+    description: Local development backend
+  - url: http://localhost:4000
+    description: Local development backend (root - for /api/health only)
+
+tags:
+  - name: Auth
+    description: Authentication endpoints (login, logout, refresh)
+  - name: UAE Pass
+    description: UAE Pass federated identity (mocked in M0; real provider stubbed)
+  - name: Users
+    description: User CRUD (admin)
+  - name: Roles
+    description: Role catalog (read-only in M0)
+  - name: Permissions
+    description: Permission catalog (read-only in M0)
+  - name: Health
+    description: Liveness / readiness probes
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT access token (15-minute TTL). Validated claims: `aud`, `iss`, `exp`.
+        Issued by `POST /api/v1/auth/login`.
+        Refreshed via `POST /api/v1/auth/refresh` (rotation: both access AND
+        refresh tokens are rotated; old refresh is blacklisted server-side).
+        Logout blacklists the supplied refresh token via `fn_auth_blacklist_token`.
+
+  parameters:
+    PageQuery:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    LimitQuery:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+
+  headers:
+    X-Request-ID:
+      description: Correlation UUID. Propagated through controller, fn_ calls, and Pino logs.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    PaginationMeta:
+      type: object
+      required: [total, page, limit, totalPages]
+      properties:
+        total: { type: integer, example: 42 }
+        page: { type: integer, example: 1 }
+        limit: { type: integer, example: 20 }
+        totalPages: { type: integer, example: 3 }
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code (e.g. VALIDATION_ERROR, UNAUTHENTICATED).
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              description: Human-readable, sanitized message. Raw PG errors are NEVER passed through.
+              example: Email is required
+            requestId:
+              type: string
+              format: uuid
+              description: Correlation id, also returned in the X-Request-ID header.
+            fields:
+              type: object
+              description: Optional per-field validation errors (Zod issues mapped here).
+              additionalProperties:
+                type: array
+                items: { type: string }
+      example:
+        success: false
+        error:
+          code: VALIDATION_ERROR
+          message: Invalid request body
+          requestId: 7d0c1d2e-7c0f-4d6f-9b6c-9b9b1f7c2d3e
+          fields:
+            email: ["Required"]
+
+    RoleRef:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: Super Admin }
+
+    Role:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description:
+          type: string
+          nullable: true
+        permissionCount: { type: integer, example: 4 }
+
+    Permission:
+      type: object
+      required: [id, code, module, action]
+      properties:
+        id: { type: integer }
+        code:
+          type: string
+          example: user.read.all
+          description: Canonical permission identifier (dot-notation). NOT a name.
+        module: { type: string, example: user }
+        action: { type: string, example: read.all }
+        description:
+          type: string
+          nullable: true
+
+    User:
+      type: object
+      required: [id, email, firstName, lastName, isActive, createdAt, updatedAt, role, permissions]
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        isActive: { type: boolean }
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        role:
+          $ref: "#/components/schemas/RoleRef"
+        permissions:
+          type: array
+          items: { type: string }
+          description: Array of permission CODES held by this user (via role).
+          example: ["audit.read", "role.manage", "user.manage", "user.read.all"]
+
+    AuthUser:
+      type: object
+      description: User shape stored in frontend auth state. Strict subset of User; never contains passwordHash.
+      required: [id, email, firstName, lastName, role, permissions]
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        role:
+          $ref: "#/components/schemas/RoleRef"
+        permissions:
+          type: array
+          items: { type: string }
+
+    UserListItem:
+      type: object
+      required: [id, email, firstName, lastName, role, isActive, createdAt]
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        role:
+          $ref: "#/components/schemas/RoleRef"
+        isActive: { type: boolean }
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt: { type: string, format: date-time }
+
+    LoginDto:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1 }
+
+    LoginResponse:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        user:
+          $ref: "#/components/schemas/AuthUser"
+
+    RefreshTokenDto:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
+    RefreshResponse:
+      type: object
+      required: [accessToken, refreshToken]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+
+    LogoutDto:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+
+    LogoutResponse:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean, enum: [true] }
+        message: { type: string }
+
+    CreateUserDto:
+      type: object
+      required: [email, password, firstName, lastName, roleId]
+      properties:
+        email: { type: string, format: email }
+        password:
+          type: string
+          minLength: 8
+          description: Plaintext on the wire only. BE bcrypt-hashes (12 rounds) before fn_user_create. Pino-redacted.
+        firstName: { type: string, minLength: 1, maxLength: 100 }
+        lastName: { type: string, minLength: 1, maxLength: 100 }
+        roleId: { type: integer, minimum: 1 }
+
+    UpdateUserDto:
+      type: object
+      properties:
+        email: { type: string, format: email }
+        firstName: { type: string }
+        lastName: { type: string }
+        roleId: { type: integer, minimum: 1 }
+
+    DeleteUserResponse:
+      type: object
+      required: [success, message]
+      properties:
+        success: { type: boolean, enum: [true] }
+        message: { type: string, example: User deactivated }
+
+    HealthResponse:
+      type: object
+      required: [status, db, timestamp, requestId]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        db:
+          type: string
+          enum: [reachable, unreachable]
+        uptime:
+          type: number
+          description: Process uptime in seconds.
+        version:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        requestId:
+          type: string
+          format: uuid
+
+    UaePassInitiateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        redirectAfter:
+          type: string
+          format: uri
+          description: Optional client redirect target after callback completes.
+
+    UaePassInitiateResponse:
+      type: object
+      required: [authorizeUrl, state]
+      properties:
+        authorizeUrl: { type: string, format: uri }
+        state:
+          type: string
+          minLength: 32
+          description: Random hex (>= 32 chars). Single-use, 5-minute TTL. Echo unchanged into /callback.
+
+    UaePassCallbackRequest:
+      type: object
+      additionalProperties: false
+      required: [code, state]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          description: Authorization code from the UAE Pass IdP.
+        state:
+          type: string
+          minLength: 1
+          description: Echo of the state issued by /initiate. Single-use, 5-min TTL. (CRX-3)
+
+    UaePassCallbackResponse:
+      type: object
+      required: [success, provider, identity]
+      properties:
+        success: { type: boolean, enum: [true] }
+        provider:
+          type: string
+          enum: [mock, live]
+        identity:
+          type: object
+          required: [sub, trustLevel]
+          properties:
+            sub: { type: string }
+            fullNameEn: { type: string, nullable: true }
+            fullNameAr: { type: string, nullable: true }
+            email: { type: string, format: email, nullable: true }
+            trustLevel: { type: string, example: SOP2 }
+
+  responses:
+    Unauthenticated:
+      description: UNAUTHENTICATED - missing or invalid access token.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: FORBIDDEN - caller lacks required permission.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    ValidationError:
+      description: VALIDATION_ERROR - request body / query params failed Zod validation.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: Resource not found.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    RateLimited:
+      description: RATE_LIMITED - too many requests.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: authLogin
+      summary: Authenticate with email + password
+      description: |
+        Authenticate the caller and issue a JWT access token (15m) + refresh
+        token (7d) plus the AuthUser profile.
+
+        - Lockout: 5 failed attempts within 15 minutes locks the account.
+        - Email enumeration prevention (CRX-2): unknown emails still run a dummy
+          bcrypt to equalize timing; response is always a generic 401.
+        - Rate limit: 5 requests per 15 minutes per IP.
+
+        DB functions used: `fn_auth_get_user_for_login`, `fn_auth_record_login_failure`, `fn_auth_record_login_success`.
+      x-rateLimit: 5 requests per 15 minutes per IP
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginDto" }
+            example:
+              email: admin@musanad.local
+              password: ChangeMe@123
+      responses:
+        "200":
+          description: Login successful. Tokens + user returned.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+              example:
+                accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6...
+                refreshToken: eyJhbGciOiJIUzI1NiIsInR5cCI6...
+                user:
+                  id: 1
+                  email: admin@musanad.local
+                  firstName: System
+                  lastName: Admin
+                  role: { id: 1, name: Super Admin }
+                  permissions: [audit.read, role.manage, user.manage, user.read.all]
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: INVALID_CREDENTIALS - generic to prevent enumeration.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "423":
+          description: ACCOUNT_LOCKED - too many failed attempts; account locked until lockedUntil.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: authLogout
+      summary: Blacklist the supplied refresh token
+      description: |
+        Blacklist the supplied refresh token so future refresh attempts return 401.
+        The access token is verified for authentication only.
+        Rate limit: 10 requests per 5 minutes per IP.
+        DB function used: `fn_auth_blacklist_token`.
+      x-rateLimit: 10 requests per 5 minutes per IP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LogoutDto" }
+      responses:
+        "200":
+          description: Logged out successfully.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogoutResponse" }
+              example:
+                success: true
+                message: Logged out
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthenticated"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: authRefresh
+      summary: Rotate access + refresh tokens
+      description: |
+        Exchange a non-blacklisted refresh token for a NEW access token (15m)
+        AND a NEW refresh token (7d). The old refresh token is blacklisted
+        atomically inside this call (`fn_auth_blacklist_if_absent`, CRX-1 fix).
+
+        Clients MUST replace BOTH stored tokens. Reusing the old refresh after
+        a successful rotation returns 401 (refresh-token-rotation pattern;
+        OWASP / RFC 6749).
+
+        Rate limit: 10 requests per 15 minutes per IP.
+        DB functions used: `fn_auth_check_token_blacklist`, `fn_user_get_by_id`, `fn_auth_blacklist_if_absent`.
+      x-rateLimit: 10 requests per 15 minutes per IP
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshTokenDto" }
+      responses:
+        "200":
+          description: Refresh successful.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RefreshResponse" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: INVALID_REFRESH_TOKEN - expired, blacklisted, or user inactive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/uae-pass/initiate:
+    post:
+      tags: [Auth, UAE Pass]
+      operationId: authUaePassInitiate
+      summary: Begin UAE Pass federated login flow
+      description: |
+        Generates a server-side CSRF state value (32 random hex bytes), stores
+        it in the state-store with a 5-minute TTL, and returns the authorize
+        URL. The client must redirect the user agent there and echo the state
+        unchanged in `/callback` (CRX-3 fix).
+
+        State store: in-memory Map for dev (mock provider). MUST swap to Redis
+        or a `uae_pass_state` DB table before multi-replica production deploy.
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UaePassInitiateRequest" }
+      responses:
+        "200":
+          description: Authorize URL + state nonce.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UaePassInitiateResponse" }
+
+  /auth/uae-pass/callback:
+    post:
+      tags: [Auth, UAE Pass]
+      operationId: authUaePassCallback
+      summary: Complete UAE Pass federated login (exchange code + state)
+      description: |
+        Validates `state` against the server-side store (single-use, 5-min TTL),
+        then exchanges `code` with the UAE Pass provider for an identity payload.
+
+        - Mock provider returns a synthetic identity (deterministic; dev only).
+        - Live provider stub throws NotImplementedError until real UAE Pass
+          credentials and SAML/PKCE wiring are completed (see
+          `docs/uae-pass-integration.md`).
+
+        CRX-3: missing, expired, or already-consumed state returns 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UaePassCallbackRequest" }
+      responses:
+        "200":
+          description: Identity payload (mock provider).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UaePassCallbackResponse" }
+        "401":
+          description: Invalid or expired state parameter (CRX-3).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "501":
+          description: NOT_IMPLEMENTED - live provider not yet wired in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /users:
+    get:
+      tags: [Users]
+      operationId: userList
+      summary: List users (paginated)
+      description: |
+        Paginated user list, optionally filtered by `search` (email / firstName / lastName)
+        and `roleId`. Requires `user.read.all`.
+        Rate limit: 60 requests per minute per authenticated user.
+      x-rateLimit: 60 requests per minute per user
+      x-authorisedRoles: [Super Admin, Admin]
+      x-requiredPermissions: [user.read.all]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: roleId
+          in: query
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Paginated user list.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/UserListItem" }
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Users]
+      operationId: userCreate
+      summary: Create a new user
+      description: |
+        Admin-only. BE bcrypts the password (12 rounds) before passing to
+        `fn_user_create`. The plaintext password never reaches the DB or the logs.
+        Requires `user.manage`.
+        Rate limit: 60 requests per minute per authenticated user.
+      x-rateLimit: 60 requests per minute per user
+      x-authorisedRoles: [Super Admin, Admin]
+      x-requiredPermissions: [user.manage]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserDto" }
+            example:
+              email: new.user@musanad.local
+              password: Initial@Pass1
+              firstName: New
+              lastName: User
+              roleId: 3
+      responses:
+        "201":
+          description: User created.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: EMAIL_IN_USE - an active user already exists with this email.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: INVALID_ROLE - roleId references missing or inactive role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    get:
+      tags: [Users]
+      operationId: userGetById
+      summary: Get a user profile
+      description: Caller must be the user themselves OR have `user.read.all`.
+      x-rateLimit: 60 requests per minute per user
+      x-authorisedRoles: [self, Super Admin, Admin]
+      responses:
+        "200":
+          description: User profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Users]
+      operationId: userUpdate
+      summary: Update user fields (partial)
+      description: |
+        Partial update of email / firstName / lastName / roleId.
+        Self-updates restricted to firstName / lastName at controller level;
+        admin updates may change all four. Password updates are NOT handled here
+        (reserved for M1+ password reset flow).
+      x-rateLimit: 60 requests per minute per user
+      x-authorisedRoles: [self (limited fields), Super Admin, Admin]
+      x-requiredPermissions: [user.manage (or self for firstName/lastName only)]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserDto" }
+      responses:
+        "200":
+          description: User updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: EMAIL_IN_USE - new email already in use by another active user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: INVALID_ROLE - roleId references missing or inactive role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [Users]
+      operationId: userDelete
+      summary: Soft-delete a user
+      description: |
+        Sets `is_active = false`. Self-protection: caller cannot deactivate their
+        own account. Requires `user.manage`.
+      x-rateLimit: 60 requests per minute per user
+      x-authorisedRoles: [Super Admin, Admin]
+      x-requiredPermissions: [user.manage]
+      responses:
+        "200":
+          description: User deactivated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteUserResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: FORBIDDEN - caller lacks user.manage or attempted self-deactivation.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /roles:
+    get:
+      tags: [Roles]
+      operationId: roleList
+      summary: List active roles (paginated)
+      description: |
+        Paginated list of active roles with `permissionCount`. Used to populate
+        role-select dropdowns. Authenticated users only.
+        Rate limit: 120 requests per minute per authenticated user.
+      x-rateLimit: 120 requests per minute per user
+      x-authorisedRoles: ["*"]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Paginated role list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Role" }
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /permissions:
+    get:
+      tags: [Permissions]
+      operationId: permissionList
+      summary: List permissions (paginated; optional roleId filter)
+      description: |
+        Paginated permission catalog. If `roleId` is provided, returns only
+        permissions held by that role. Authenticated users only.
+        Rate limit: 120 requests per minute per authenticated user.
+      x-rateLimit: 120 requests per minute per user
+      x-authorisedRoles: ["*"]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: roleId
+          in: query
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Paginated permission list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Permission" }
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+# Note: /api/health lives at the root, NOT under /api/v1. Documented as an
+# absolute path here so generators emit it correctly.
+x-paths-root:
+  /api/health:
+    get:
+      tags: [Health]
+      operationId: healthCheck
+      summary: Liveness / readiness probe
+      description: |
+        Returns 200 with `{status, db, uptime, version, timestamp, requestId}` when the
+        database is reachable. Suitable for k8s liveness AND readiness probes.
+        Returns 503 if the DB is unreachable.
+
+        NB: this endpoint lives at `/api/health` (no `/v1` prefix) per M0 spec.
+      x-rateLimit: unlimited (no auth)
+      security: []
+      responses:
+        "200":
+          description: Service healthy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example:
+                status: ok
+                db: reachable
+                uptime: 1234.56
+                version: 0.1.0
+                timestamp: 2026-05-02T12:34:56.000Z
+                requestId: 7d0c1d2e-7c0f-4d6f-9b6c-9b9b1f7c2d3e
+        "503":
+          description: UNHEALTHY - database or critical dependency unreachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }

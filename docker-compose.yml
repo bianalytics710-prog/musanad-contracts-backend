@@ -1,0 +1,42 @@
+# =============================================================================
+# Musanad Contracts Backend — local dev compose
+# - Postgres is NOT included: this project uses Neon (cloud). The DATABASE_URL
+#   in .env.local already points at the m0-foundation Neon branch.
+# - Mailpit is included so the Nodemailer SMTP transport has a local catcher.
+#   UI: http://localhost:8025  SMTP: localhost:1025
+# =============================================================================
+version: '3.9'
+
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: musanad-mailpit
+    restart: unless-stopped
+    ports:
+      - '1025:1025' # SMTP
+      - '8025:8025' # Web UI
+    environment:
+      MP_MAX_MESSAGES: '5000'
+      MP_DATA_FILE: /data/mailpit.db
+    volumes:
+      - mailpit_data:/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: musanad-backend
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: development
+      SMTP_HOST: mailpit
+      SMTP_PORT: '1025'
+    ports:
+      - '4000:4000'
+    depends_on:
+      - mailpit
+
+volumes:
+  mailpit_data:
