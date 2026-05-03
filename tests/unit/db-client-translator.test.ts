@@ -219,6 +219,39 @@ describe('callFunction — STRUCTURED_RAISE_RE translator branches', () => {
     }
   });
 
+  it('BE-M1b-005: SQLSTATE 23514 (check_violation) → 400 VALIDATION_ERROR', async () => {
+    const { db } = await importClient();
+    await setQueryImpl(async (sql) => {
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] };
+      if (sql.startsWith('SELECT set_config')) return { rows: [] };
+      if (sql.startsWith('SELECT fn_x')) {
+        // Simulate the chk_payment_schedule_paid_at_status CHECK violation
+        // pg surfaces when paid_at is set but status != 'paid'.
+        throw makePgError(
+          'new row for relation "payment_schedule" violates check constraint "chk_payment_schedule_paid_at_status"',
+          '23514',
+        );
+      }
+      return { rows: [] };
+    });
+    try {
+      await db.callFunction('fn_x', [1], { actorId: 1 });
+      expect.fail('expected throw');
+    } catch (err: unknown) {
+      const e = err as {
+        statusCode: number;
+        code: string;
+        message: string;
+        fields?: Record<string, string>;
+      };
+      expect(e.statusCode).toBe(400);
+      expect(e.code).toBe('VALIDATION_ERROR');
+      // Generic message — must NOT echo the raw constraint name.
+      expect(e.message).not.toContain('chk_payment_schedule_paid_at_status');
+      expect(e.fields?.check).toBe('invalid');
+    }
+  });
+
   it('Invalid fnName → InternalError before connection', async () => {
     const { db } = await importClient();
     try {

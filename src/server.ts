@@ -45,6 +45,7 @@ import { NotFoundError } from './utils/errors.util';
 import topRouter from './routes';
 import { closePool, pool } from './database/config';
 import { telemetry } from './utils/telemetry.util';
+import { closeBrowser as closePuppeteerBrowser } from './services/export/puppeteer-pool.service';
 
 const app = express();
 
@@ -135,6 +136,10 @@ const shutdown = async (signal: string): Promise<void> => {
 
     await closePool();
     logger.info({ action: 'server.pool_closed' }, 'pg pool closed');
+
+    // Codex BE-M1b-003: close shared Puppeteer browser if it was started.
+    await closePuppeteerBrowser();
+    logger.info({ action: 'server.puppeteer_closed' }, 'Puppeteer browser closed');
 
     await telemetry.shutdown();
     logger.info({ action: 'server.telemetry_closed' }, 'Telemetry shut down');

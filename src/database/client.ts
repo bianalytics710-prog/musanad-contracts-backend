@@ -89,6 +89,14 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
         return new UnprocessableEntityError(`${fnName}: foreign key violation`);
       case '23502': // not_null_violation
         return new ValidationError(`${fnName}: required field missing`);
+      case '23514': // check_violation — Codex BE-M1b-005
+        // The Zod schemas allow combinations the DB rejects via CHECK
+        // (e.g., paid_at set when status != 'paid' on payment_schedule).
+        // Surface as a 400 so the client knows it is a request-shape
+        // problem, not a server fault. We deliberately do NOT echo
+        // err.constraint — it leaks raw constraint names — but keep the
+        // message generic.
+        return new ValidationError('Data violates database constraint', { check: 'invalid' });
       case '22P02': // invalid_text_representation
         return new ValidationError(`${fnName}: invalid value type`);
       case '42883': // undefined_function
@@ -170,13 +178,28 @@ export const callFunction = async <T = unknown>(
   const placeholders = args.map((_, i) => `$${i + 1}`).join(', ');
   const sql = `SELECT ${fnName}(${placeholders}) AS result`;
 
-  // Pre-serialise plain objects to JSONB. pg.Pool serialises JS objects
-  // via JSON.stringify by default — we make this explicit so we control
-  // the wire shape.
+  // Pre-serialise plain objects (and arrays of objects) to JSONB. pg.Pool
+  // serialises JS objects via JSON.stringify by default — we make this
+  // explicit so we control the wire shape. Arrays of primitives (string[],
+  // number[]) are passed through so pg can bind them as Postgres array
+  // literals (e.g. TEXT[] for fn_contract_set_tags).
   const boundArgs = args.map((v) => {
     if (v === undefined) return null;
     if (v === null) return null;
-    if (typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)) {
+    if (v instanceof Date) return v;
+    if (Array.isArray(v)) {
+      // Empty arrays are ambiguous; treat as Postgres array (caller can
+      // wrap in JSON.stringify for JSONB). Arrays containing objects must
+      // be JSONB — pg will not auto-stringify those.
+      const containsObject = v.some(
+        (el) => el !== null && typeof el === 'object' && !(el instanceof Date),
+      );
+      if (containsObject) {
+        return JSON.stringify(v);
+      }
+      return v;
+    }
+    if (typeof v === 'object') {
       return JSON.stringify(v);
     }
     return v;

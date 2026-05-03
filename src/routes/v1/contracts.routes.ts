@@ -1,21 +1,32 @@
 /**
- * /api/v1/contracts routes — M1a Core CRUD & Lifecycle.
+ * /api/v1/contracts routes — M1a Core CRUD & Lifecycle + M1b Payment Schedules & Exports.
  *
- * Permission codes (per api-contracts.json + db-design CMSW-2):
+ * Permission codes (per api-contracts.json + db-design CMSW-2 + M1b CMW-2):
  *   - contract.read.all | contract.read.department | contract.read.own
- *     (any of) — list, getById, getTree, listVersions, listActivity
- *   - contract.draft           — create
- *   - contract.edit            — update, createVersion
+ *     (any of) — list, getById, getTree, listVersions, listActivity, payment-schedules read, exports
+ *   - contract.draft           — create, payment-schedules write (drafter own-draft branch)
+ *   - contract.edit            — update, createVersion, payment-schedules write
  *   - contract.delete          — delete
  *   - contract.status.update   — updateStatus
  *   - contract.tag.manage      — setTags
+ *   - contract.export          — PDF export, XLSX export (M1b — granted to drafter via CMW-2)
  *
- * Role-aware ownership/department/own filtering inside fn_ implementations
- * (RLS policy contract_select_role_aware) handles the per-row visibility;
- * authorisation here only gates "may attempt this kind of operation".
+ * Route ordering (W1 — qa-stage1-report critical):
+ *   Express matches in declaration order. Literal-path routes MUST appear
+ *   BEFORE any ':id'-prefixed routes that could match the same shape.
+ *     1. GET /export.xlsx                  — M1b list-level literal — DECLARE FIRST
+ *     2. GET /:id/payment-schedules         — M1b
+ *     3. PUT /:id/payment-schedules         — M1b
+ *     4. GET /:id/export.pdf                — M1b
+ *     5. existing M1a /:id routes (list, get, update, delete, /status, /tree, /tags, /versions, /activity)
+ *   If '/contracts/:id' was declared before '/contracts/export.xlsx', the
+ *   request /contracts/export.xlsx would bind :id='export.xlsx' and 400 on
+ *   PositiveBigIntSchema.
  *
- * Rate limits: GETs use authedReadRateLimiter, writes (POST/PUT/PATCH/DELETE)
- * use authedWriteRateLimiter.
+ * Rate limits:
+ *   - GETs:   authedReadRateLimiter (120/min/user)
+ *   - Writes: authedWriteRateLimiter (60/min/user)
+ *   - PDF/XLSX exports: exportRateLimiter (30/min/user) — Puppeteer/exceljs are heavy
  */
 import { Router } from 'express';
 import { contractsController } from '../../controllers/contracts.controller';
@@ -25,6 +36,7 @@ import {
   authedReadRateLimiter,
   authedWriteRateLimiter,
 } from '../../middleware/rate-limit.middleware';
+import { exportRateLimiter } from '../../middleware/export-rate-limit.middleware';
 import {
   ContractActivityListQuerySchema,
   ContractIdParamSchema,
@@ -36,6 +48,12 @@ import {
   UpdateContractDtoSchema,
   UpdateContractStatusDtoSchema,
 } from '../../schemas/contracts.schemas';
+import {
+  ContractExportPdfQuerySchema,
+  ContractExportXlsxQuerySchema,
+  PaymentScheduleBulkReplaceSchema,
+  PaymentScheduleListQuerySchema,
+} from '../../schemas/payment-schedule.schemas';
 
 const router = Router();
 
@@ -43,6 +61,27 @@ const READ_ANY = ['contract.read.all', 'contract.read.department', 'contract.rea
 
 // All endpoints require authentication
 router.use(authenticate);
+
+// ============================================================
+// M1b literal-path routes — MUST be declared BEFORE any :id-prefixed routes
+// (W1 — Express matches in declaration order; '/contracts/:id' would
+// otherwise bind :id='export.xlsx' for a request to /contracts/export.xlsx
+// and produce 400 from PositiveBigIntSchema).
+// ============================================================
+
+// GET /api/v1/contracts/export.xlsx — list-level XLSX export (M1b S5)
+router.get(
+  '/export.xlsx',
+  exportRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  authorise(['contract.export']),
+  validate(ContractExportXlsxQuerySchema, 'query'),
+  contractsController.exportXlsx,
+);
+
+// ============================================================
+// M1a / M1b collection-level routes
+// ============================================================
 
 // GET /api/v1/contracts — list
 router.get(
@@ -61,6 +100,49 @@ router.post(
   validate(CreateContractDtoSchema, 'body'),
   contractsController.create,
 );
+
+// ============================================================
+// M1b :id-prefixed routes
+// ============================================================
+
+// GET /api/v1/contracts/:id/payment-schedules — list milestones (M1b S2)
+router.get(
+  '/:id/payment-schedules',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  validate(PaymentScheduleListQuerySchema, 'query'),
+  contractsController.listPaymentSchedules,
+);
+
+// PUT /api/v1/contracts/:id/payment-schedules — bulk replace milestones (M1b S3)
+//   contract.edit (full editors) OR contract.draft (drafter on own-draft);
+//   the fn_payment_schedule_create_bulk RLS policy enforces own-draft scope
+//   for drafters. authoriseAnyOf grants the route gate either way.
+router.put(
+  '/:id/payment-schedules',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(PaymentScheduleBulkReplaceSchema, 'body'),
+  contractsController.replacePaymentSchedules,
+);
+
+// GET /api/v1/contracts/:id/export.pdf — single-contract PDF export (M1b S4)
+router.get(
+  '/:id/export.pdf',
+  exportRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  authorise(['contract.export']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(ContractExportPdfQuerySchema, 'query'),
+  contractsController.exportPdf,
+);
+
+// ============================================================
+// M1a :id-prefixed routes (declared after M1b literal /export.xlsx
+// per W1; relative ordering among M1a routes preserved)
+// ============================================================
 
 // GET /api/v1/contracts/:id — get (S2 — 403/404 layered in controller)
 router.get(

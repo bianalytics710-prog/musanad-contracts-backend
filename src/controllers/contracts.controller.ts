@@ -43,16 +43,32 @@ import type {
   CreateContractVersionDtoInferred,
 } from '../schemas/contracts.schemas';
 import type {
+  ContractExportPdfQueryInferred,
+  ContractExportXlsxQueryInferred,
+  PaymentScheduleBulkReplaceInferred,
+  PaymentScheduleListQueryInferred,
+} from '../schemas/payment-schedule.schemas';
+import type {
   Contract,
   ContractListResponse,
   ContractTreeResponse,
   ContractVersionListResponse,
   ContractActivityListResponse,
+  ContractActivityCreated,
   ContractVersionCreated,
   DeleteContractResponse,
   SetContractTagsResponse,
   UpdateContractStatusResponse,
 } from '../types/contracts.types';
+import type {
+  AuditLogRecordResult,
+  ContractExportPdfResponse,
+  ContractExportXlsxResponse,
+  PaymentScheduleBulkReplaceResponse,
+  PaymentScheduleListResponse,
+} from '../types/payment-schedule.types';
+import { renderContractPdf } from '../services/export/contract-pdf.service';
+import { renderContractXlsx } from '../services/export/contract-xlsx.service';
 
 const READ_PERMISSION_CODES: ReadonlyArray<string> = [
   'contract.read.all',
@@ -599,6 +615,361 @@ export const contractsController = {
       req.logger.error(
         {
           action: 'contract.listActivity',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  // ============================================================
+  // M1b — Compose Wizard, Payment Schedules & Exports
+  // ============================================================
+
+  /**
+   * GET /api/v1/contracts/:id/payment-schedules → fn_payment_schedule_list (S2)
+   *
+   * Returns the active milestone schedule for a contract, ordered by due_date
+   * ASC NULLS LAST then id ASC. Not paginated. Optional ?status= filter.
+   *
+   * 404 mapping: fn_payment_schedule_list returns NULL when the parent
+   * contract is invisible (RLS) or soft-deleted — controller maps to 404.
+   */
+  async listPaymentSchedules(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'paymentSchedule.list',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const q = req.query as unknown as PaymentScheduleListQueryInferred;
+      const result = await db.callFunction<PaymentScheduleListResponse | null>(
+        'fn_payment_schedule_list',
+        [id, req.user!.id, req.user!.role, q.status ?? null],
+        { actorId: req.user!.id },
+      );
+      if (!result) {
+        throw new NotFoundError('Contract not found', { id: 'Contract not found' });
+      }
+      req.logger.info(
+        {
+          action: 'paymentSchedule.list',
+          userId: req.user?.id,
+          targetId: id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          resultCount: result.data?.length ?? 0,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'paymentSchedule.list',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /**
+   * PUT /api/v1/contracts/:id/payment-schedules → fn_payment_schedule_create_bulk (S3)
+   *
+   * Atomic bulk replace. Soft-deletes existing active rows then inserts the
+   * new set in a single transaction. p_replace_existing is hardcoded to TRUE
+   * regardless of body value (AC-S3-01). SELECT FOR UPDATE on parent contract
+   * head row inside the fn_ provides AC-S3-11 serialisation (Codex BE-001).
+   *
+   * fn_ raises 'id:Contract not found' when contract missing/inactive — the
+   * error translator maps this to 404 via NOT_FOUND_FIELD_PREFIXES.
+   */
+  async replacePaymentSchedules(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'paymentSchedule.replace',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const body = req.body as PaymentScheduleBulkReplaceInferred;
+      const result = await db.callFunction<PaymentScheduleBulkReplaceResponse>(
+        'fn_payment_schedule_create_bulk',
+        [id, body.rows, true /* AC-S3-01: replace-by-default */, req.user!.id],
+        { actorId: req.user!.id },
+      );
+      req.logger.info(
+        {
+          action: 'paymentSchedule.replace',
+          userId: req.user?.id,
+          targetId: id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          inserted: result?.inserted ?? 0,
+          softDeleted: result?.softDeleted ?? 0,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'paymentSchedule.replace',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/contracts/:id/export.pdf → fn_contract_export_pdf (S4)
+   *
+   * Single-contract PDF export. fn_contract_export_pdf both prepares the
+   * data AND emits a 'exported' contract_activity row inside the same
+   * transaction (AC-S4-06). Controller hands the JSONB to the Puppeteer
+   * renderer and pipes binary back.
+   *
+   * NULL fn_ return → 404 (contract missing or RLS-hidden — AC-S4-03).
+   * body_en / body_ar reach the renderer in the JSONB payload but pino
+   * redaction (logger.util.ts) strips them from any log line that
+   * incidentally references the object (AC-S4-08).
+   */
+  async exportPdf(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'contract.exportPdf',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const q = req.query as unknown as ContractExportPdfQueryInferred;
+      const data = await db.callFunction<ContractExportPdfResponse | null>(
+        'fn_contract_export_pdf',
+        [
+          id,
+          req.user!.id,
+          req.user!.role,
+          q.language ?? 'bilingual',
+          q.includeAttachments === true,
+        ],
+        { actorId: req.user!.id },
+      );
+      if (!data) {
+        throw new NotFoundError('Contract not found', { id: 'Contract not found' });
+      }
+
+      // Codex BE-M1b-004 fix: render FIRST, then emit activity, then send.
+      // Migration 015 stripped the activity-emit from fn_contract_export_pdf,
+      // so the controller is now the sole source of the 'exported' activity
+      // row. We emit BEFORE res.send (but AFTER the buffer is materialised in
+      // memory) so the activity row's commit synchronises with the response —
+      // if Puppeteer throws, the catch block runs and no activity row is
+      // ever written. A failed activity emit is non-fatal once the buffer
+      // exists; we warn-log and serve the file.
+      const pdfBuffer = await renderContractPdf(data);
+
+      try {
+        const lang = q.language ?? 'bilingual';
+        await db.callFunction<ContractActivityCreated>(
+          'fn_contract_activity_create',
+          [
+            id,
+            'exported',
+            req.user!.id,
+            `Exported contract to PDF (language=${lang})`,
+            null,
+            { format: 'pdf', language: lang, includeAttachments: q.includeAttachments === true },
+          ],
+          { actorId: req.user!.id },
+        );
+      } catch (activityErr) {
+        req.logger.warn(
+          {
+            action: 'contract.exportPdf.activity',
+            userId: req.user?.id,
+            targetId: id,
+            errorType: activityErr instanceof Error ? activityErr.name : 'UNKNOWN',
+          },
+          'fn_contract_activity_create emission failed (non-fatal)',
+        );
+      }
+
+      const filename = `${data.contract.contractNumber}-${q.language ?? 'bilingual'}.pdf`;
+
+      req.logger.info(
+        {
+          action: 'contract.exportPdf',
+          userId: req.user?.id,
+          targetId: id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          bytes: pdfBuffer.length,
+          language: q.language ?? 'bilingual',
+        },
+        'Controller exit',
+      );
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', String(pdfBuffer.length));
+      res.status(200).send(pdfBuffer);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'contract.exportPdf',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/contracts/export.xlsx → fn_contract_export_xlsx (S5)
+   *
+   * List-level XLSX export — same filter set as M1a fn_contract_list, no
+   * pagination, max_rows hard-clamped 1..50000 (default 10000). Renders via
+   * exceljs WorkbookWriter (memory-bounded). Per AC-S5-08 the audit row is
+   * emitted by the controller AFTER the workbook materialises, via
+   * fn_audit_log_record (action='INSERT', new_values.event='EXPORT').
+   *
+   * Critical W1: this route's literal path '/export.xlsx' MUST be declared
+   * BEFORE any '/:id' matchers — otherwise Express binds :id='export.xlsx'
+   * and PositiveBigIntSchema 400s.
+   */
+  async exportXlsx(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'contract.exportXlsx',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const q = req.query as unknown as ContractExportXlsxQueryInferred;
+      const data = await db.callFunction<ContractExportXlsxResponse>(
+        'fn_contract_export_xlsx',
+        [
+          req.user!.id,
+          req.user!.role,
+          q.status ?? null,
+          q.contractType ?? null,
+          q.counterpartyId ?? null,
+          q.draftedBy ?? null,
+          q.approvedBy ?? null,
+          q.startDateFrom ?? null,
+          q.startDateTo ?? null,
+          q.endDateFrom ?? null,
+          q.endDateTo ?? null,
+          q.tags ?? null,
+          q.search ?? null,
+          q.maxRows ?? 10000,
+        ],
+        { actorId: req.user!.id },
+      );
+
+      // Codex BE-M1b-001 fix: render FIRST, then audit, then send. If
+      // renderContractXlsx throws mid-stream (corrupt input, OOM in
+      // exceljs) the controller's catch block runs and NO audit row is
+      // committed. Once the xlsxBuffer is fully materialised in memory, the
+      // remaining work (header + send) cannot fail in a way that delivers a
+      // partial file — so emitting the audit row before res.send is safe
+      // and lets the response semantics ("response complete iff audit
+      // committed") hold for tests and for synchronous downstream auditing.
+      const xlsxBuffer = await renderContractXlsx(data);
+
+      try {
+        await db.callFunction<AuditLogRecordResult>(
+          'fn_audit_log_record',
+          [
+            'contract',
+            null /* list-level event — no record id */,
+            'INSERT',
+            {
+              event: 'EXPORT',
+              format: 'xlsx',
+              rowCount: data.totalRows,
+              filter: data.filterApplied,
+            },
+            req.user!.id,
+          ],
+          { actorId: req.user!.id },
+        );
+      } catch (auditErr) {
+        // A failed audit must not block the export — the workbook is
+        // already materialised. Surface in logs and continue.
+        req.logger.warn(
+          {
+            action: 'contract.exportXlsx.audit',
+            userId: req.user?.id,
+            errorType: auditErr instanceof Error ? auditErr.name : 'UNKNOWN',
+          },
+          'fn_audit_log_record emission failed (non-fatal)',
+        );
+      }
+
+      const ts = new Date();
+      const pad = (n: number): string => String(n).padStart(2, '0');
+      const filename = `contracts-${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}.xlsx`;
+
+      req.logger.info(
+        {
+          action: 'contract.exportXlsx',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          bytes: xlsxBuffer.length,
+          rowCount: data.totalRows,
+          truncated: data.truncated,
+        },
+        'Controller exit',
+      );
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      );
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', String(xlsxBuffer.length));
+      if (data.truncated) {
+        res.setHeader('X-Export-Truncated', 'true');
+      }
+      res.status(200).send(xlsxBuffer);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'contract.exportXlsx',
           userId: req.user?.id,
           duration: Date.now() - startTime,
           errorType: errorType(error),

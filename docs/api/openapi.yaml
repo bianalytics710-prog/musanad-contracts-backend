@@ -42,6 +42,17 @@ tags:
       version history, and the contract activity timeline. body_en/body_ar are
       sensitive (pino-redacted on logs and audit_log JSONB-redacted by
       fn_audit_trigger).
+  - name: M1b — Compose Wizard, Payment Schedules & Exports
+    description: |
+      Compose Wizard, Payment Schedules & PDF/XLSX exports (M1b). 4 new endpoints:
+      list / replace payment schedule, single-contract PDF export, list-level XLSX
+      export. Heavy bundles (jspdf / xlsx) moved off the FE per G6 — backend renders
+      via Puppeteer (Chromium) and exceljs WorkbookWriter (streaming). Compose
+      Wizard is FE-only orchestration (POST /contracts → PUT /payment-schedules)
+      with NO new BE wrapper endpoint per Q2. M1b extends the contract_activity
+      activity_type CHECK enum with `payment_schedule_replaced` and `exported`.
+      W1 route-ordering: GET /contracts/export.xlsx (literal) MUST be declared
+      before any /:id-prefixed route — see comment in src/routes/v1/contracts.routes.ts.
 
 components:
   securitySchemes:
@@ -403,7 +414,12 @@ components:
 
     ContractActivityType:
       type: string
-      description: Activity event type (M1a set; M2/M3 may extend via ALTER CHECK).
+      description: |
+        Activity event type. M1a set (7 values) extended in M1b via migration 010
+        (`payment_schedule_replaced`, `exported`) and re-permitted in
+        `fn_contract_activity_create` whitelist via migration 013. Total: 9 values.
+        See dev-handoff §"How to extend M1a — To add a new activity_type" for the
+        ALTER CHECK pattern.
       enum:
         - created
         - updated
@@ -412,6 +428,8 @@ components:
         - tagged
         - soft_deleted
         - restored
+        - payment_schedule_replaced
+        - exported
 
     ContractActorRef:
       type: object
@@ -748,6 +766,141 @@ components:
         success: { type: boolean, enum: [true] }
         id: { type: integer }
         message: { type: string, example: Contract soft-deleted }
+
+    # ----------------------------------------------------------------------
+    # M1b — Compose Wizard, Payment Schedules & Exports
+    # ----------------------------------------------------------------------
+
+    PaymentScheduleStatus:
+      type: string
+      description: Milestone lifecycle state (mirrors Lovable enum).
+      enum: [pending, due, paid, overdue, waived, cancelled]
+
+    PaymentScheduleRecurrence:
+      type: string
+      nullable: true
+      description: Recurrence mode for recurring milestones. NULL = single (non-recurring).
+      enum: [once, monthly, quarterly, annually]
+
+    PaymentSchedule:
+      type: object
+      description: |
+        Per-contract milestone payment row. CASCADE-deletes with the parent
+        contract; soft-deleted by `fn_payment_schedule_create_bulk` replace path
+        (the only writer that flips `is_active` outside CASCADE). Direct DELETE
+        is denied by `payment_schedule_deny_direct_delete` RESTRICTIVE policy.
+      required:
+        - id
+        - contractId
+        - milestoneLabelEn
+        - amountAed
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: integer, example: 12 }
+        contractId: { type: integer, example: 123 }
+        milestoneLabelEn:
+          type: string
+          maxLength: 255
+          description: Short display tag (e.g. "Milestone 1", "Phase 2 Payment"). Required.
+          example: Milestone 1
+        milestoneLabelAr:
+          type: string
+          maxLength: 255
+          nullable: true
+          description: Arabic counterpart of milestoneLabelEn. Optional.
+        milestoneNameEn:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: Descriptive title for the milestone. Optional. Both label AND name retained per Q6 — see data-dictionary.
+          example: Initial deposit on signature
+        milestoneNameAr:
+          type: string
+          maxLength: 500
+          nullable: true
+        amountAed:
+          type: number
+          format: double
+          minimum: 0
+          description: Milestone payment amount in AED. NUMERIC(15,2). Zero allowed for waived/cancelled milestones.
+          example: 50000.00
+        dueDate:
+          type: string
+          format: date
+          nullable: true
+        paidAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Set when status flips to `paid`. CHECK enforces (paid_at IS NULL OR status = 'paid').
+        status:
+          $ref: "#/components/schemas/PaymentScheduleStatus"
+        recurrence:
+          $ref: "#/components/schemas/PaymentScheduleRecurrence"
+        invoiceRef:
+          type: string
+          maxLength: 100
+          nullable: true
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    PaymentScheduleListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          description: |
+            Active milestones for the contract, ordered by `due_date ASC NULLS LAST`
+            then `id ASC`. Not paginated (per-contract counts typically 1–30).
+          items: { $ref: "#/components/schemas/PaymentSchedule" }
+
+    PaymentScheduleCreateDto:
+      type: object
+      required: [milestoneLabelEn, amountAed]
+      properties:
+        milestoneLabelEn: { type: string, minLength: 1, maxLength: 255 }
+        milestoneLabelAr: { type: string, maxLength: 255, nullable: true }
+        milestoneNameEn:  { type: string, maxLength: 500, nullable: true }
+        milestoneNameAr:  { type: string, maxLength: 500, nullable: true }
+        amountAed:        { type: number, format: double, minimum: 0 }
+        dueDate:          { type: string, format: date, nullable: true }
+        paidAt:           { type: string, format: date-time, nullable: true }
+        status:           { $ref: "#/components/schemas/PaymentScheduleStatus" }
+        recurrence:       { $ref: "#/components/schemas/PaymentScheduleRecurrence" }
+        invoiceRef:       { type: string, maxLength: 100, nullable: true }
+
+    PaymentScheduleBulkReplaceDto:
+      type: object
+      required: [rows]
+      description: |
+        Atomic bulk-replace request body. Controller hardcodes
+        `p_replace_existing=true` (AC-S3-01) regardless of `replaceExisting`
+        client field. `fn_payment_schedule_create_bulk` takes
+        `SELECT FOR UPDATE` on the parent contract row to serialise concurrent
+        callers (Codex BE-001 hardening, AC-S3-11).
+      properties:
+        rows:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/PaymentScheduleCreateDto" }
+        replaceExisting:
+          type: boolean
+          description: Optional, ignored — endpoint always replaces.
+
+    PaymentScheduleBulkReplaceResponse:
+      type: object
+      required: [contractId, inserted, softDeleted, rows]
+      properties:
+        contractId:   { type: integer }
+        inserted:     { type: integer, description: Count of rows inserted by this call. }
+        softDeleted:  { type: integer, description: Count of rows deactivated by the replace path. }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/PaymentSchedule" }
 
   responses:
     Unauthenticated:
@@ -1755,6 +1908,309 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  # --------------------------------------------------------------------------
+  # M1b paths
+  #
+  # W1 ROUTE-ORDERING NOTE (binds Express runtime, not the OpenAPI generator):
+  #   `GET /contracts/export.xlsx` is a LITERAL path. In Express, route matching
+  #   is order-sensitive — this literal route MUST be declared BEFORE any
+  #   `/contracts/{id}` route or any `/contracts/{id}/...` matcher (otherwise
+  #   the path binds `:id='export.xlsx'` and fails PositiveBigIntSchema with
+  #   400 instead of reaching the export controller). Verified in
+  #   `src/routes/v1/contracts.routes.ts` L73-80 (literal) declared before
+  #   L109+ (any `:id` matchers). Smoke test: unauthenticated GET
+  #   /api/v1/contracts/export.xlsx → 401 (auth fires first), NOT 400.
+  # --------------------------------------------------------------------------
+
+  /contracts/export.xlsx:
+    get:
+      tags: [M1b — Compose Wizard, Payment Schedules & Exports]
+      operationId: contractExportXlsx
+      summary: Export filtered contract list to XLSX
+      description: |
+        List-level XLSX export. Accepts the same filter set as
+        `GET /contracts` (M1a `fn_contract_list`) plus an optional `maxRows`
+        clamp (default 10000, hard-clamped 1..50000). Backend exceljs
+        WorkbookWriter streams the workbook so memory stays bounded. Per G6:
+        heavy bundles (xlsx 0.18.5) moved off the FE.
+
+        - body_en / body_ar are EXCLUDED from the worksheet (AC-S5-02).
+        - Role-aware visibility mirrors `fn_contract_list` (AC-S5-04).
+        - When the result set exceeds `maxRows`, the workbook gets a
+          translated "Result truncated…" footer row AND the response carries
+          `X-Export-Truncated: true` (AC-S5-05).
+        - Empty result → header row only, NOT an error (AC-S5-07).
+        - Emits ONE `audit_log` row via SECURITY DEFINER `fn_audit_log_record`
+          AFTER the workbook stream completes (AC-S5-08); discriminated by
+          `new_values.event = 'EXPORT'`. NO `contract_activity` rows (per Q4).
+        - Rate-limited via `exportRateLimiter` (30 req/min/user — AC-S5-10).
+
+        DB function: `fn_contract_export_xlsx`. Audit helper:
+        `fn_audit_log_record` (SECURITY DEFINER, EXECUTE GRANT to
+        `neondb_owner` only).
+      x-rateLimit: exportRateLimiter (30 / min / authenticated user)
+      x-routeOrdering: |
+        LITERAL path — declared BEFORE /contracts/{id} matchers in
+        src/routes/v1/contracts.routes.ts (W1 enforcement).
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own only — via CMW-2 grant migration 010)
+        - executive (read-all scope)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own AND contract.export
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/ContractStatus" }
+        - name: contractType
+          in: query
+          schema: { type: string }
+        - name: counterpartyId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: draftedBy
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: approvedBy
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: startDateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: startDateTo
+          in: query
+          schema: { type: string, format: date }
+        - name: endDateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: endDateTo
+          in: query
+          schema: { type: string, format: date }
+        - name: tags
+          in: query
+          description: AND-semantics tag filter. Repeated query param or comma-list.
+          schema:
+            type: array
+            items: { type: string }
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: maxRows
+          in: query
+          description: Hard-clamped 1..50000. Default 10000. AC-S5-05/06.
+          schema: { type: integer, minimum: 1, maximum: 50000, default: 10000 }
+      responses:
+        "200":
+          description: Workbook binary (XLSX).
+          headers:
+            Content-Disposition:
+              description: Attachment filename `contracts-YYYYMMDD-HHmm.xlsx`.
+              schema: { type: string }
+            X-Export-Truncated:
+              description: Present and `true` only when truncated=true (AC-S5-05).
+              schema: { type: string, enum: ["true"] }
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+        "400":
+          description: VALIDATION_ERROR — `maxRows` out of range (AC-S5-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/payment-schedules:
+    get:
+      tags: [M1b — Compose Wizard, Payment Schedules & Exports]
+      operationId: paymentScheduleList
+      summary: List the active payment milestone schedule for a contract
+      description: |
+        Returns the active milestones for a contract, ordered by `due_date ASC
+        NULLS LAST` then `id ASC`. NOT paginated (typical 1–30 rows per
+        contract). Empty `data` array — not 404 — when the contract exists but
+        has no milestones (AC-S2-04). 404 (NOT 403) when the actor cannot see
+        the parent contract per RLS (AC-S2-03 layered defense).
+
+        DB function: `fn_payment_schedule_list` (SECURITY INVOKER STABLE).
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter
+        - contract_approver
+        - contract_approver_2
+        - executive
+        - contract_recipient (own)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/PaymentScheduleStatus" }
+      responses:
+        "200":
+          description: Active payment schedule rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PaymentScheduleListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    put:
+      tags: [M1b — Compose Wizard, Payment Schedules & Exports]
+      operationId: paymentScheduleReplace
+      summary: Atomic bulk-replace of a contract's milestone schedule
+      description: |
+        Soft-deletes existing active rows for the contract then inserts the new
+        set in a single transaction. Used by both the standalone Payment
+        Schedule Editor modal AND the Compose Wizard submit flow (Q2 — FE-only
+        orchestration: POST /contracts → PUT /:id/payment-schedules; NO new BE
+        wrapper endpoint).
+
+        - Controller hardcodes `p_replace_existing=true` (AC-S3-01) regardless
+          of any client-supplied `replaceExisting`.
+        - Concurrency: `fn_payment_schedule_create_bulk` takes
+          `SELECT FOR UPDATE` on the parent contract row before any read/write
+          of `payment_schedule` (Codex BE-001 pattern, AC-S3-11). Concurrent
+          calls against the same contract id are serialised.
+        - Emits ONE `contract_activity` row of type
+          `payment_schedule_replaced` (AC-S3-10) with metadata
+          `{insertedCount, softDeletedCount}`.
+        - Permission: `contract.edit` OR (`contract.draft` AND own draft
+          contract with status IN draft|resubmission_requested).
+
+        DB function: `fn_payment_schedule_create_bulk`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own draft only)
+      x-permissionRequired: contract.edit OR (contract.draft AND own draft)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentScheduleBulkReplaceDto" }
+      responses:
+        "200":
+          description: Replace succeeded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PaymentScheduleBulkReplaceResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /contracts/{id}/export.pdf:
+    get:
+      tags: [M1b — Compose Wizard, Payment Schedules & Exports]
+      operationId: contractExportPdf
+      summary: Export a single contract to PDF (en / ar / bilingual)
+      description: |
+        Single-contract PDF export. Backend Puppeteer (headless Chromium)
+        renders an HTML template (i18n + Tailwind-derived CSS, `dir='rtl'` for
+        Arabic) and pipes back `application/pdf` binary. Per G6: heavy bundles
+        (jspdf) moved off the FE.
+
+        - Languages: `en | ar | bilingual` (default `bilingual`) — AC-S4-05.
+        - PDF includes contract head + parties placeholder + body in requested
+          language(s) + tags + payment-schedule table (AC-S4-02).
+        - body_en / body_ar are pino-redacted in BE logs (paths
+          `*.bodyEn`, `*.body_en`, `*.bodyAr`, `*.body_ar`) — AC-S4-08.
+        - Emits ONE `contract_activity` row of type `exported` (AC-S4-06) with
+          metadata `{format:'pdf', language, includeAttachments}`. POST migration
+          015, this row is emitted by the controller (AFTER render, BEFORE
+          response) — NOT by the fn_ — so render-throw paths never write the
+          row (Codex BE-M1b-004).
+        - Rate-limited via `exportRateLimiter` (30 req/min/user — AC-S4-09).
+        - `includeAttachments` is accepted but no-op (AC-S4-10) until the
+          Attachments module ships.
+
+        Renderer pipeline:
+          1. fn_contract_export_pdf returns ContractExportPdfResponse JSONB
+             (data prep — STABLE post-015, no side effects).
+          2. BE controller renders HTML template; Puppeteer launches/uses the
+             singleton Chromium (Codex BE-M1b-003 pool — `withPage()` /
+             `p-limit(PUPPETEER_MAX_CONCURRENT)` semaphore).
+          3. Buffer is streamed back; controller emits `contract_activity`
+             AFTER successful render, BEFORE `res.send`.
+
+        DB function: `fn_contract_export_pdf` (SECURITY INVOKER STABLE
+        post-015).
+      x-rateLimit: exportRateLimiter (30 / min / authenticated user)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own only — via CMW-2 grant)
+        - executive (read-all scope)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own AND contract.export
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: language
+          in: query
+          schema:
+            type: string
+            enum: [en, ar, bilingual]
+            default: bilingual
+        - name: includeAttachments
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: PDF binary.
+          headers:
+            Content-Disposition:
+              description: Attachment filename `<contractNumber>-<language>.pdf`.
+              schema: { type: string }
+            X-Request-ID:
+              $ref: "#/components/headers/X-Request-ID"
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "400":
+          description: VALIDATION_ERROR — invalid `language` (AC-S4-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
 
 # Note: /api/health lives at the root, NOT under /api/v1. Documented as an
 # absolute path here so generators emit it correctly.
