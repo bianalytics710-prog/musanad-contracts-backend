@@ -36,8 +36,11 @@ export class ValidationError extends ApiError {
 }
 
 export class UnauthorizedError extends ApiError {
-  constructor(message = 'Unauthenticated') {
-    super(401, 'UNAUTHENTICATED', message);
+  constructor(message = 'Unauthorized') {
+    // errorCode 'UNAUTHORIZED' is the canonical value per api-contracts.json
+    // globalConventions.authentication.validation. Keeping 'UNAUTHORIZED' for
+    // missing/invalid bearer aligns BE with the contract used by FE + tests.
+    super(401, 'UNAUTHORIZED', message);
     this.name = 'UnauthorizedError';
   }
 }
@@ -57,8 +60,8 @@ export class ForbiddenError extends ApiError {
 }
 
 export class NotFoundError extends ApiError {
-  constructor(message = 'Resource not found') {
-    super(404, 'NOT_FOUND', message);
+  constructor(message = 'Resource not found', fields?: ApiErrorFields) {
+    super(404, 'NOT_FOUND', message, fields);
     this.name = 'NotFoundError';
   }
 }

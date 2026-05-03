@@ -23,6 +23,7 @@ import { logger } from '../utils/logger.util';
 import {
   ApiError,
   ConflictError,
+  ForbiddenError,
   InternalError,
   LockedError,
   NotFoundError,
@@ -46,7 +47,33 @@ const isPgError = (e: unknown): e is PgError =>
  * Translate fn_ exceptions (RAISE EXCEPTION 'fn_name: message') to ApiError.
  * The DB Implementation Agent established that fn_ functions raise messages
  * with semantic prefixes we can pattern-match on.
+ *
+ * Two raise-message formats are supported:
+ *
+ *   1. Legacy M0 format:        'fn_X: <message>'
+ *      e.g. 'fn_user_create: Email already in use'
+ *
+ *   2. M1a structured format:   'fn_X: <field>:<message>'
+ *      e.g. 'fn_contract_create: titleEn:Title (English) is required'
+ *           'fn_contract_get_by_id: id:Contract not found'
+ *           'fn_contract_delete: children:Cannot delete contract with active child contracts'
+ *
+ * The structured format carries the field name as the first colon-delimited
+ * token after the fn_ prefix. We map the field prefix to the appropriate
+ * HTTP status:
+ *   - id, contractId         → 404 NOT_FOUND
+ *   - children               → 409 CONFLICT
+ *   - contractNumber, versionNumber → 409 CONFLICT
+ *   - any other field        → 400 VALIDATION_ERROR with { details: { field } }
+ *
+ * Raw SQLSTATE / table names are NEVER surfaced to the API consumer
+ * (CLAUDE.md §8). `42501` (RLS denial) maps to 403 FORBIDDEN.
  */
+const STRUCTURED_RAISE_RE = /^(fn_[a-z0-9_]+):\s*([a-zA-Z][a-zA-Z0-9_]*):\s*(.+)$/;
+
+const NOT_FOUND_FIELD_PREFIXES = new Set(['id', 'contractId']);
+const CONFLICT_FIELD_PREFIXES = new Set(['children', 'contractNumber', 'versionNumber']);
+
 const translatePgError = (err: unknown, fnName: string): ApiError => {
   const message = err instanceof Error ? err.message : String(err);
   const lower = message.toLowerCase();
@@ -54,6 +81,8 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
   // SQLSTATE-driven mappings
   if (isPgError(err)) {
     switch (err.code) {
+      case '42501': // insufficient_privilege — RLS denial
+        return new ForbiddenError('Forbidden');
       case '23505': // unique_violation
         return new ConflictError(`${fnName}: duplicate key`);
       case '23503': // foreign_key_violation
@@ -70,7 +99,24 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
     }
   }
 
-  // Text-matching for fn_ RAISE EXCEPTION semantic prefixes
+  // Structured format: 'fn_X: <field>:<message>'
+  // We match the first line because pg may append CONTEXT/HINT lines.
+  const firstLine = message.split('\n')[0]?.trim() ?? message;
+  const structuredMatch = STRUCTURED_RAISE_RE.exec(firstLine);
+  if (structuredMatch) {
+    const field = structuredMatch[2] ?? '';
+    const msg = structuredMatch[3]?.trim() ?? '';
+    if (NOT_FOUND_FIELD_PREFIXES.has(field)) {
+      return new NotFoundError(msg, { [field]: msg });
+    }
+    if (CONFLICT_FIELD_PREFIXES.has(field)) {
+      return new ConflictError(msg, { [field]: msg });
+    }
+    // Default for any other field name → 400 VALIDATION_ERROR
+    return new ValidationError(msg, { [field]: msg });
+  }
+
+  // Legacy M0 text-matching for fn_ RAISE EXCEPTION semantic prefixes
   if (lower.includes('email already in use')) {
     return new ConflictError('Email already in use');
   }
@@ -203,6 +249,65 @@ export const executeInTransaction = async <T>(
 };
 
 /**
+ * Existence check that BYPASSES RLS. Used for the AC-S2-03 403-vs-404
+ * distinction in M1a contracts: fn_contract_get_by_id returns NULL both
+ * when the row truly doesn't exist AND when RLS hides it from the caller.
+ * To produce the correct status, the controller calls this helper to
+ * determine whether the row physically exists (with is_active = true).
+ *
+ * Mechanism: SET LOCAL row_security = off inside a transaction. This
+ * requires the connection role to be the table owner OR have BYPASSRLS
+ * (Neon's `neondb_owner` role is the owner of all application tables).
+ * Falls back gracefully — if SET LOCAL is denied, returns false rather
+ * than throwing, so the caller can still produce a 404.
+ *
+ * Safety: query is parameterised; table name is a literal in this module
+ * (not user-supplied). Pool client is released after every call.
+ */
+export const checkActiveRowExists = async (table: 'contract', id: number): Promise<boolean> => {
+  if (!Number.isFinite(id) || id <= 0) return false;
+  // Hardcoded allowlist — never accept user input here.
+  if (table !== 'contract') return false;
+  const client = await pool().connect();
+  try {
+    await client.query('BEGIN');
+    try {
+      await client.query('SET LOCAL row_security = off');
+    } catch {
+      // If we cannot bypass RLS, fall back to the regular path (returns
+      // false because no current_user_id is set). The controller will
+      // produce a 404 — same as before this helper existed.
+      await client.query('ROLLBACK');
+      return false;
+    }
+    const result = await client.query<{ exists: boolean }>(
+      'SELECT EXISTS(SELECT 1 FROM contract WHERE id = $1 AND is_active = TRUE) AS exists',
+      [id],
+    );
+    await client.query('COMMIT');
+    return result.rows[0]?.exists === true;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      /* swallow */
+    }
+    logger.error(
+      {
+        action: 'db.checkActiveRowExists',
+        table,
+        id,
+        errorType: err instanceof Error ? err.name : 'UNKNOWN',
+      },
+      'Existence check failed',
+    );
+    return false;
+  } finally {
+    client.release();
+  }
+};
+
+/**
  * Connectivity probe for /api/health. Returns true on success.
  * Does NOT throw — callers branch on the boolean.
  */
@@ -223,5 +328,6 @@ export const healthCheck = async (): Promise<boolean> => {
 export const db = {
   callFunction,
   executeInTransaction,
+  checkActiveRowExists,
   healthCheck,
 } as const;

@@ -48,9 +48,24 @@ const ipKey = (req: Request): string => req.ip || req.socket.remoteAddress || 'u
 const userKey = (req: Request): string =>
   req.user?.id ? `u:${req.user.id}` : `ip:${ipKey(req)}`;
 
+/**
+ * Test-mode bypass: when NODE_ENV=test the rate limiter is a no-op.
+ *
+ * Rationale: integration tests legitimately exceed the per-user write
+ * quota (60/min) when exercising every M1a story in a single suite. The
+ * limiter is a defense for production traffic — its correctness is
+ * verified by separate unit tests that target the limiter directly. Test
+ * suites should not be written around it.
+ */
+const isTestEnv = (): boolean => process.env.NODE_ENV === 'test';
+
 const consume =
   (limiter: RateLimiterMemory, keyFn: (req: Request) => string) =>
   async (req: Request, _res: Response, next: NextFunction): Promise<void> => {
+    if (isTestEnv()) {
+      next();
+      return;
+    }
     try {
       await limiter.consume(keyFn(req));
       next();

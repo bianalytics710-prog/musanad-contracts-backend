@@ -121,6 +121,40 @@ export const authorise =
   };
 
 /**
+ * Variant: requires the authenticated user to hold AT LEAST ONE of the
+ * supplied permission codes. Use for endpoints whose access is granted by
+ * any of several scoped permissions (e.g. contract.read.all OR
+ * contract.read.department OR contract.read.own).
+ */
+export const authoriseAnyOf =
+  (permissionCodes: ReadonlyArray<string>) =>
+  (req: Request, _res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      next(new UnauthorizedError('Authentication required'));
+      return;
+    }
+    if (permissionCodes.length === 0) {
+      next();
+      return;
+    }
+    const have = new Set(req.user.permissions);
+    const ok = permissionCodes.some((p) => have.has(p));
+    if (!ok) {
+      req.logger?.warn(
+        {
+          action: 'auth.forbidden',
+          userId: req.user.id,
+          requiredAnyOf: permissionCodes,
+        },
+        'Caller missing all required permission(s)',
+      );
+      next(new ForbiddenError('Insufficient permissions'));
+      return;
+    }
+    next();
+  };
+
+/**
  * Variant: requires EITHER the caller to be the user themselves (id match
  * on req.params.id) OR to hold one of the listed permission codes. Used by
  * GET/PUT /users/:id where self-edits are allowed for limited fields.

@@ -65,6 +65,15 @@ const SENSITIVE_PATHS: string[] = [
   '*.aiPromptPayload',
   '*.ai_prompt_payload',
 
+  // -- M1a contract body (bilingual) — see types/contracts.types.ts
+  //    M1A_SENSITIVE_FIELD_EXTENSIONS. Both camelCase (API surface) and
+  //    snake_case (DB column names that may surface in raw row dumps) are
+  //    listed because pino-redact matches literal keys.
+  '*.bodyEn',
+  '*.body_en',
+  '*.bodyAr',
+  '*.body_ar',
+
   // -- Common request/response top-level shapes --
   'req.body.password',
   'req.body.refreshToken',

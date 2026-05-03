@@ -35,6 +35,13 @@ tags:
     description: Permission catalog (read-only in M0)
   - name: Health
     description: Liveness / readiness probes
+  - name: M1a — Contracts
+    description: |
+      Contracts core CRUD & lifecycle (M1a). 11 endpoints covering list/get/create/
+      update/soft-delete, status transitions, parent/child tree, tag management,
+      version history, and the contract activity timeline. body_en/body_ar are
+      sensitive (pino-redacted on logs and audit_log JSONB-redacted by
+      fn_audit_trigger).
 
 components:
   securitySchemes:
@@ -99,7 +106,7 @@ components:
           properties:
             code:
               type: string
-              description: Machine-readable error code (e.g. VALIDATION_ERROR, UNAUTHENTICATED).
+              description: Machine-readable error code (e.g. VALIDATION_ERROR, UNAUTHORIZED).
               example: VALIDATION_ERROR
             message:
               type: string
@@ -355,9 +362,396 @@ components:
             email: { type: string, format: email, nullable: true }
             trustLevel: { type: string, example: SOP2 }
 
+    # ------------------------------------------------------------
+    # M1a — Contracts: Core CRUD & Lifecycle
+    # ------------------------------------------------------------
+    ContractStatus:
+      type: string
+      description: |
+        14-state contract lifecycle. M1a only validates enum membership;
+        state-machine transitions (which terminal -> next is legal) land in M2.
+      enum:
+        - draft
+        - in_review
+        - approved
+        - awaiting_signature_employer
+        - awaiting_signature_counterparty
+        - fully_signed
+        - active
+        - expiring_soon
+        - expired
+        - amended
+        - renewed
+        - terminated
+        - rejected
+        - resubmission_requested
+
+    ContractLanguage:
+      type: string
+      enum: [en, ar, bilingual]
+
+    ContractGoverningLaw:
+      type: string
+      enum: [uae_federal, dubai, abu_dhabi, sharjah, difc, adgm, english, other]
+      nullable: true
+
+    ContractRelationshipType:
+      type: string
+      description: Relationship to the parent contract when parentContractId is set.
+      enum: [amendment, renewal, extension, superseded, sow_under_msa]
+      nullable: true
+
+    ContractActivityType:
+      type: string
+      description: Activity event type (M1a set; M2/M3 may extend via ALTER CHECK).
+      enum:
+        - created
+        - updated
+        - status_changed
+        - version_created
+        - tagged
+        - soft_deleted
+        - restored
+
+    ContractActorRef:
+      type: object
+      nullable: true
+      required: [id, firstName, lastName]
+      properties:
+        id: { type: integer }
+        firstName: { type: string }
+        lastName: { type: string }
+
+    ContractListItem:
+      type: object
+      description: |
+        Slim list payload. body_en/body_ar are NEVER returned here (AC-S1-08).
+      required:
+        - id
+        - contractNumber
+        - titleEn
+        - contractType
+        - status
+        - currency
+        - currentVersion
+        - tags
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string, example: CT-2026-000123 }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        contractType: { type: string }
+        status: { $ref: "#/components/schemas/ContractStatus" }
+        valueAed: { type: number, format: double, nullable: true }
+        currency: { type: string, example: AED }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        counterpartyId: { type: integer, nullable: true }
+        ourPartyId: { type: integer, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        currentVersion: { type: integer, example: 1 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Contract:
+      type: object
+      description: |
+        Full contract payload. bodyEn/bodyAr appear in the response but are
+        pino-redacted on logging.
+      required:
+        - id
+        - contractNumber
+        - titleEn
+        - contractType
+        - status
+        - language
+        - currency
+        - currentVersion
+        - tags
+        - attachmentCount
+        - commentCount
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        contractType: { type: string }
+        templateId: { type: integer, nullable: true }
+        status: { $ref: "#/components/schemas/ContractStatus" }
+        language: { $ref: "#/components/schemas/ContractLanguage" }
+        ourPartyId: { type: integer, nullable: true }
+        counterpartyId: { type: integer, nullable: true }
+        valueAed: { type: number, format: double, nullable: true }
+        currency: { type: string }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        signedAt: { type: string, format: date-time, nullable: true }
+        expiryNoticeDays: { type: integer, default: 30 }
+        emirate: { type: string, nullable: true }
+        governingLaw: { $ref: "#/components/schemas/ContractGoverningLaw" }
+        jurisdictionCourt: { type: string, nullable: true }
+        parentContractId: { type: integer, nullable: true }
+        relationshipType: { $ref: "#/components/schemas/ContractRelationshipType" }
+        bodyEn:
+          type: string
+          nullable: true
+          description: SENSITIVE - pino-redacted on logging; redacted in audit_log.
+        bodyAr:
+          type: string
+          nullable: true
+          description: SENSITIVE - pino-redacted on logging; redacted in audit_log.
+        currentVersion: { type: integer }
+        draftedBy: { $ref: "#/components/schemas/ContractActorRef" }
+        reviewedBy: { $ref: "#/components/schemas/ContractActorRef" }
+        approvedBy: { $ref: "#/components/schemas/ContractActorRef" }
+        aiRiskScore: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+        aiSummaryEn: { type: string, nullable: true }
+        aiSummaryAr: { type: string, nullable: true }
+        importBatchId: { type: integer, nullable: true }
+        importConfidence: { type: integer, nullable: true }
+        importFilename: { type: string, nullable: true }
+        importWarnings:
+          type: object
+          nullable: true
+          additionalProperties: true
+        tags:
+          type: array
+          items: { type: string }
+        attachmentCount: { type: integer, example: 0 }
+        commentCount: { type: integer, example: 0 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateContractDto:
+      type: object
+      required: [titleEn, contractType]
+      additionalProperties: false
+      properties:
+        titleEn: { type: string, minLength: 1, maxLength: 500 }
+        titleAr: { type: string, maxLength: 500, nullable: true }
+        contractType: { type: string, minLength: 1, maxLength: 50 }
+        templateId: { type: integer, nullable: true }
+        language: { $ref: "#/components/schemas/ContractLanguage" }
+        ourPartyId: { type: integer, nullable: true }
+        counterpartyId: { type: integer, nullable: true }
+        valueAed: { type: number, format: double, minimum: 0, nullable: true }
+        currency: { type: string, default: AED }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        expiryNoticeDays: { type: integer, minimum: 0, default: 30 }
+        emirate: { type: string, nullable: true }
+        governingLaw: { $ref: "#/components/schemas/ContractGoverningLaw" }
+        jurisdictionCourt: { type: string, nullable: true }
+        parentContractId: { type: integer, nullable: true }
+        relationshipType: { $ref: "#/components/schemas/ContractRelationshipType" }
+        bodyEn:
+          type: string
+          nullable: true
+          description: SENSITIVE - pino-redacted on inbound request body.
+        bodyAr:
+          type: string
+          nullable: true
+          description: SENSITIVE - pino-redacted on inbound request body.
+        tags:
+          type: array
+          items: { type: string, minLength: 1, maxLength: 64 }
+
+    UpdateContractDto:
+      type: object
+      additionalProperties: false
+      description: |
+        Partial COALESCE update. Status MUST NOT be supplied here - use
+        PATCH /contracts/{id}/status instead (AC-S4-04, .strict() rejects).
+        Tags are not part of this DTO - use PUT /contracts/{id}/tags.
+      properties:
+        titleEn: { type: string, minLength: 1, maxLength: 500 }
+        titleAr: { type: string, maxLength: 500, nullable: true }
+        contractType: { type: string, maxLength: 50 }
+        templateId: { type: integer, nullable: true }
+        language: { $ref: "#/components/schemas/ContractLanguage" }
+        ourPartyId: { type: integer, nullable: true }
+        counterpartyId: { type: integer, nullable: true }
+        valueAed: { type: number, format: double, minimum: 0, nullable: true }
+        currency: { type: string }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        expiryNoticeDays: { type: integer, minimum: 0 }
+        emirate: { type: string, nullable: true }
+        governingLaw: { $ref: "#/components/schemas/ContractGoverningLaw" }
+        jurisdictionCourt: { type: string, nullable: true }
+        parentContractId: { type: integer, nullable: true }
+        relationshipType: { $ref: "#/components/schemas/ContractRelationshipType" }
+        bodyEn: { type: string, nullable: true, description: SENSITIVE }
+        bodyAr: { type: string, nullable: true, description: SENSITIVE }
+
+    UpdateContractStatusDto:
+      type: object
+      required: [newStatus]
+      additionalProperties: false
+      properties:
+        newStatus: { $ref: "#/components/schemas/ContractStatus" }
+        reason: { type: string, maxLength: 500, nullable: true }
+
+    SetContractTagsDto:
+      type: object
+      required: [tags]
+      additionalProperties: false
+      properties:
+        tags:
+          type: array
+          description: Replacement tag set. Empty array clears all tags.
+          items: { type: string, minLength: 1, maxLength: 64 }
+
+    CreateContractVersionDto:
+      type: object
+      required: [changeNote]
+      additionalProperties: false
+      description: |
+        At least one of bodyEn or bodyAr must be provided (AC-S10-04).
+      properties:
+        bodyEn: { type: string, nullable: true, description: SENSITIVE }
+        bodyAr: { type: string, nullable: true, description: SENSITIVE }
+        changeNote: { type: string, minLength: 1, maxLength: 500 }
+        diffSummary: { type: string, nullable: true }
+
+    ContractVersion:
+      type: object
+      required: [id, contractId, versionNumber, createdAt]
+      properties:
+        id: { type: integer }
+        contractId: { type: integer }
+        versionNumber: { type: integer }
+        bodyEn: { type: string, nullable: true, description: SENSITIVE - pino-redacted on log }
+        bodyAr: { type: string, nullable: true, description: SENSITIVE - pino-redacted on log }
+        diffSummary: { type: string, nullable: true }
+        changeNote: { type: string, nullable: true }
+        changedBy: { $ref: "#/components/schemas/ContractActorRef" }
+        createdAt: { type: string, format: date-time }
+
+    ContractTreeNode:
+      type: object
+      required: [id, contractNumber, titleEn, status, depth]
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/ContractStatus" }
+        relationshipType: { $ref: "#/components/schemas/ContractRelationshipType" }
+        parentContractId: { type: integer, nullable: true }
+        depth:
+          type: integer
+          description: Distance (in node hops) from the root. 0 = root.
+        currentVersion: { type: integer }
+        startDate: { type: string, format: date, nullable: true }
+        endDate: { type: string, format: date, nullable: true }
+        signedAt: { type: string, format: date-time, nullable: true }
+
+    ContractActivity:
+      type: object
+      required: [id, contractId, activityType, createdAt]
+      properties:
+        id: { type: integer }
+        contractId: { type: integer }
+        activityType: { $ref: "#/components/schemas/ContractActivityType" }
+        actor: { $ref: "#/components/schemas/ContractActorRef" }
+        descriptionEn: { type: string, nullable: true }
+        descriptionAr: { type: string, nullable: true }
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            Free-form JSON. Examples:
+            - status_changed: { fromStatus, toStatus, reason? }
+            - version_created: { versionNumber }
+            - tagged: { added: string[], removed: string[] }
+        createdAt: { type: string, format: date-time }
+
+    ContractListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ContractListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ContractVersionListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ContractVersion" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ContractActivityListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ContractActivity" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ContractTreeResponse:
+      type: object
+      required: [rootId, tree, currentNode, truncated]
+      properties:
+        rootId: { type: integer }
+        tree:
+          type: array
+          items: { $ref: "#/components/schemas/ContractTreeNode" }
+        currentNode: { $ref: "#/components/schemas/ContractTreeNode" }
+        truncated:
+          type: boolean
+          description: True when traversal hit the depth-20 cap (AC-S7-05).
+
+    UpdateContractStatusResponse:
+      type: object
+      required: [id, fromStatus, toStatus, changedAt]
+      properties:
+        id: { type: integer }
+        fromStatus: { $ref: "#/components/schemas/ContractStatus" }
+        toStatus: { $ref: "#/components/schemas/ContractStatus" }
+        changedAt: { type: string, format: date-time }
+
+    SetContractTagsResponse:
+      type: object
+      required: [id, tags]
+      properties:
+        id: { type: integer }
+        tags:
+          type: array
+          items: { type: string }
+
+    CreateContractVersionResponse:
+      type: object
+      required: [id, contractId, versionNumber, createdAt]
+      properties:
+        id: { type: integer }
+        contractId: { type: integer }
+        versionNumber: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    DeleteContractResponse:
+      type: object
+      required: [success, id, message]
+      properties:
+        success: { type: boolean, enum: [true] }
+        id: { type: integer }
+        message: { type: string, example: Contract soft-deleted }
+
   responses:
     Unauthenticated:
-      description: UNAUTHENTICATED - missing or invalid access token.
+      description: UNAUTHORIZED - missing or invalid access token.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/X-Request-ID"
@@ -850,6 +1244,517 @@ paths:
                     $ref: "#/components/schemas/PaginationMeta"
         "400": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  # ============================================================
+  # M1a — Contracts (11 endpoints, S1..S11; S12 is trigger-only)
+  # ============================================================
+
+  /contracts:
+    get:
+      tags: [M1a — Contracts]
+      operationId: contractList
+      summary: List contracts (paginated, role-aware, filter+search+tags)
+      description: |
+        Paginated contract list with role-aware filtering, status / type /
+        counterparty / date filters, debounced search, and AND-semantic tag
+        filter. body_en / body_ar are NEVER returned by this endpoint
+        (AC-S1-08). DB function: `fn_contract_list`.
+      x-rateLimit: authedReadRateLimiter (60 / min / authenticated user)
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - executive
+        - contract_drafter
+        - contract_approver
+        - contract_approver_2
+        - contract_recipient
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/ContractStatus" }
+        - name: contractType
+          in: query
+          schema: { type: string }
+        - name: counterpartyId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: draftedBy
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: approvedBy
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: startDateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: startDateTo
+          in: query
+          schema: { type: string, format: date }
+        - name: endDateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: endDateTo
+          in: query
+          schema: { type: string, format: date }
+        - name: tags
+          in: query
+          description: AND-semantics; every supplied tag must match.
+          schema:
+            type: array
+            items: { type: string }
+          style: form
+          explode: true
+        - name: search
+          in: query
+          description: ILIKE across contract_number / title_en / title_ar.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated contract list.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+    post:
+      tags: [M1a — Contracts]
+      operationId: contractCreate
+      summary: Create a new contract (draft status, auto-numbered)
+      description: |
+        Creates a new contract row with `status='draft'`, auto-generated
+        `contract_number` (format CT-YYYY-NNNNNN), `current_version=1`. A
+        `created` activity row is auto-emitted by trigger. body_en/body_ar
+        in the request body are pino-redacted on inbound logging.
+
+        DB function: `fn_contract_create`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [platform_admin, legal_counsel, contract_drafter]
+      x-permissionRequired: contract.draft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateContractDto" }
+      responses:
+        "201":
+          description: Contract created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contract" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: |
+            CONFLICT - contract number collision after 3 controller retries
+            (AC-S3-09 defensive only; auto-generation should not race).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /contracts/{id}:
+    get:
+      tags: [M1a — Contracts]
+      operationId: contractGetById
+      summary: Get a single contract (with attachment + comment counts)
+      description: |
+        Returns the full contract payload including bodyEn/bodyAr (which are
+        pino-redacted on logging). attachmentCount and commentCount are
+        inline numeric fields; the underlying tables are forward references.
+
+        AC-S2-03 layering: when the row exists in `contract` but is hidden by
+        RLS for the caller, the controller returns 403 (not 404). The
+        existence pre-check uses an allowlisted SECURITY DEFINER helper
+        (`db.checkActiveRowExists`).
+
+        DB function: `fn_contract_get_by_id`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - executive
+        - contract_drafter
+        - contract_approver
+        - contract_approver_2
+        - contract_recipient
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Contract found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contract" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    put:
+      tags: [M1a — Contracts]
+      operationId: contractUpdate
+      summary: Update a contract (partial COALESCE; body changes create a version)
+      description: |
+        Partial COALESCE update. **`status` MUST NOT be in the payload** -
+        Zod `.strict()` rejects it (AC-S4-04). Use PATCH /contracts/{id}/status
+        for status transitions. Tags are not part of this DTO either - use
+        PUT /contracts/{id}/tags. A body change auto-creates a new
+        `contract_version` row in the same transaction (S4 + S10 wired
+        together; AC-S4-02).
+
+        Migration 008 adds SELECT FOR UPDATE on the contract row before
+        reading existing values, serialising concurrent updates against
+        each other and against soft-delete (Codex BE-002).
+
+        DB function: `fn_contract_update`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own AND status IN draft|resubmission_requested)
+      x-permissionRequired: contract.edit
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateContractDto" }
+      responses:
+        "200":
+          description: Contract updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Contract" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    delete:
+      tags: [M1a — Contracts]
+      operationId: contractDelete
+      summary: Soft-delete a contract (cascades to tags; rejects if children active)
+      description: |
+        Soft-deletes the contract (sets `is_active=FALSE`). Cascades a
+        soft-delete to `contract_tag` rows. `contract_version` rows are
+        preserved verbatim (append-only; AC-S5-02).
+
+        Cannot soft-delete a contract with active children (AC-S5-04 ->
+        409 CONFLICT details.children).
+
+        Defence-in-depth: `fn_contract_delete` is SECURITY DEFINER and sets
+        the `app.fn_contract_delete='true'` GUC, takes
+        SELECT...FOR UPDATE on the row, performs the child-active check
+        inside the lock, then flips `is_active`. The companion RESTRICTIVE
+        RLS policy `contract_deny_direct_is_active_update` prevents bypass
+        via direct UPDATE. Codex G2 TOCTOU defense.
+
+        DB function: `fn_contract_delete`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [platform_admin]
+      x-permissionRequired: contract.delete
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Contract soft-deleted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeleteContractResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT - contract has active children.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /contracts/{id}/status:
+    patch:
+      tags: [M1a — Contracts]
+      operationId: contractUpdateStatus
+      summary: Update contract status (placeholder transitions; M2 adds state-machine)
+      description: |
+        Updates `contract.status` with **placeholder** transition rules:
+        M1a validates enum membership only. The full state-machine
+        (which transitions are legal from which terminal) lands in M2.
+
+        Auto-emits a `status_changed` activity row with
+        `metadata.{ fromStatus, toStatus, reason? }`. The trigger de-dupes
+        with the explicit emission inside `fn_contract_status_update` so
+        only one activity row is written per transition.
+
+        DB function: `fn_contract_status_update`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own)
+      x-permissionRequired: contract.status.update
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateContractStatusDto" }
+      responses:
+        "200":
+          description: Status changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateContractStatusResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /contracts/{id}/tree:
+    get:
+      tags: [M1a — Contracts]
+      operationId: contractGetTree
+      summary: Get parent/child amendment + renewal + extension + SOW timeline
+      description: |
+        Returns the full ancestor + descendant tree around the requested
+        contract. Recursive CTE in both directions; depth capped at 20
+        (`truncated=true` flag set when capped, AC-S7-05). Role-aware
+        filtering omits invisible nodes from the returned tree.
+
+        DB function: `fn_contract_get_tree`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - executive
+        - contract_drafter (department)
+        - contract_approver (department)
+        - contract_approver_2 (department)
+        - contract_recipient (own)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Contract tree.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractTreeResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /contracts/{id}/tags:
+    put:
+      tags: [M1a — Contracts]
+      operationId: contractSetTags
+      summary: Replace the tag set on a contract (atomic, idempotent)
+      description: |
+        Atomically replaces the contract's tag set. Empty array clears all
+        tags. Idempotent - same input twice yields the same final state.
+        Auto-emits a `tagged` activity with `metadata={ added, removed }`.
+
+        Migration 008 takes SELECT FOR UPDATE on the parent contract row
+        before computing the add/remove diff to serialise concurrent
+        replacements (Codex BE-003).
+
+        DB function: `fn_contract_set_tags`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own)
+      x-permissionRequired: contract.tag.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetContractTagsDto" }
+      responses:
+        "200":
+          description: Tags replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetContractTagsResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /contracts/{id}/versions:
+    get:
+      tags: [M1a — Contracts]
+      operationId: contractVersionList
+      summary: List versions for a contract (newest first)
+      description: |
+        Paginated version list, newest first. body_en/body_ar appear in the
+        payload but are pino-redacted on logging.
+
+        DB function: `fn_contract_version_list`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - executive
+        - contract_drafter (department)
+        - contract_approver (department)
+        - contract_approver_2 (department)
+        - contract_recipient (own)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Paginated versions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractVersionListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+    post:
+      tags: [M1a — Contracts]
+      operationId: contractVersionCreate
+      summary: Create a new version snapshot (atomic version_number increment)
+      description: |
+        Creates a new `contract_version` snapshot and updates
+        `contract.body_en`/`body_ar` to match within a single transaction.
+        Atomic version_number increment via SELECT FOR UPDATE on the parent
+        contract row. Auto-emits `version_created` activity with
+        `metadata.versionNumber`.
+
+        At least one of `bodyEn` or `bodyAr` must be supplied (AC-S10-04).
+        `changeNote` is required (AC-S10-05).
+
+        DB function: `fn_contract_version_create`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own AND status IN draft|resubmission_requested)
+      x-permissionRequired: contract.edit
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateContractVersionDto" }
+      responses:
+        "201":
+          description: Version created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateContractVersionResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            CONFLICT - defensive UNIQUE retry on (contract_id, version_number).
+            Should be unreachable from outside the DB given SELECT FOR UPDATE
+            serialisation (AC-S10-08; QA F-gap noted in test report).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /contracts/{id}/activity:
+    get:
+      tags: [M1a — Contracts]
+      operationId: contractActivityList
+      summary: List the contract activity timeline (newest first)
+      description: |
+        Paginated activity timeline, newest first. Optional `activityType`
+        filter. The `actor` field is enriched as `{ id, firstName, lastName }`
+        when the underlying user is still active and `null` otherwise.
+
+        Activity rows are write-only via the SECURITY DEFINER helper
+        `fn_contract_activity_create` (called by triggers); there is no
+        public POST endpoint for activity (DN4 - RLS denies direct INSERT).
+
+        DB function: `fn_contract_activity_list`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - platform_admin
+        - legal_counsel
+        - executive
+        - contract_drafter (department)
+        - contract_approver (department)
+        - contract_approver_2 (department)
+        - contract_recipient (own)
+      x-permissionRequired: any of contract.read.all | contract.read.department | contract.read.own
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: activityType
+          in: query
+          schema: { $ref: "#/components/schemas/ContractActivityType" }
+      responses:
+        "200":
+          description: Paginated activity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractActivityListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
 # Note: /api/health lives at the root, NOT under /api/v1. Documented as an
 # absolute path here so generators emit it correctly.

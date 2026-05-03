@@ -21,7 +21,9 @@
     "test:watch": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vitest",
     "test:coverage": "cross-env NODE_OPTIONS=--max-old-space-size=4096 vitest run --coverage",
     "migrate": "tsx -r dotenv/config src/database/migrate.ts up dotenv_config_path=.env.local",
-    "migrate:down": "tsx -r dotenv/config src/database/migrate.ts down dotenv_config_path=.env.local"
+    "migrate:down": "tsx -r dotenv/config src/database/migrate.ts down dotenv_config_path=.env.local",
+    "migrate:test": "tsx -r dotenv/config src/database/migrate.ts up --target=test dotenv_config_path=.env.local",
+    "migrate:test:down": "tsx -r dotenv/config src/database/migrate.ts down --target=test dotenv_config_path=.env.local"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.0",

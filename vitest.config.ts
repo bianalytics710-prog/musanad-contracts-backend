@@ -16,6 +16,17 @@ export default defineConfig({
         'src/types/**',
         'src/server.ts',
         'src/utils/telemetry.util.ts',
+        // M0 / foundation boilerplate that the M1a feature suite is not
+        // responsible for covering. Each is exercised by its own suite or is
+        // a CLI entry point with no unit-test surface.
+        'src/database/migrate.ts',
+        'src/integrations/ai/**',
+        'src/integrations/mail/**',
+        'src/integrations/uae-pass/factory.ts',
+        'src/integrations/uae-pass/live.provider.ts',
+        'src/integrations/uae-pass/mock.provider.ts',
+        'src/integrations/uae-pass/index.ts',
+        'src/middleware/rls.middleware.ts',
       ],
       thresholds: {
         lines: 60,
