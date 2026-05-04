@@ -99,6 +99,10 @@ export const contractsController = {
     );
     try {
       const q = req.query as unknown as ContractListQueryInferred;
+      // M1c: fn_contract_list signature widened from 15 -> 18 params
+      // (db-design.md §4.3 / migration 017). Three new optional filter
+      // params appended at the end (default NULL). Existing positional
+      // call site preserved + extended additively.
       const result = await db.callFunction<ContractListResponse>(
         'fn_contract_list',
         [
@@ -117,6 +121,10 @@ export const contractsController = {
           q.search ?? null,
           req.user!.id,
           req.user!.role,
+          // ---- M1c additive params (AE-1) ----
+          q.importBatchId ?? null,
+          q.importConfidenceMin ?? null,
+          q.importConfidenceMax ?? null,
         ],
         { actorId: req.user!.id },
       );

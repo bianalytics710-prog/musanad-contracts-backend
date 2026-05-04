@@ -209,6 +209,21 @@ export interface Contract {
   tags: string[];
   attachmentCount: number;
   commentCount: number;
+
+  // ---- M1c additive extension (Codex BE round-1 finding H1, migration 022) ----
+  // fn_contract_get_by_id projection extended to surface the 4 import-trace
+  // fields in camelCase. Always present in responses; null when the contract
+  // was not bulk-imported. Round-trip symmetry with ContractListItem (which
+  // carries 3 of these — list rows omit importFilename for payload weight).
+  /** M1c addition. import_batch.id this contract belongs to (or null). */
+  importBatchId: number | null;
+  /** M1c addition. Original uploaded filename (or null when not bulk-imported). */
+  importFilename: string | null;
+  /** M1c addition. 0..100 AI confidence (or null when not extracted). */
+  importConfidence: number | null;
+  /** M1c addition. Array of human-readable warnings (or null). */
+  importWarnings: string[] | null;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -234,6 +249,16 @@ export interface ContractListItem {
   currentVersion: number;
   createdAt: string;
   updatedAt: string;
+
+  // ---- M1c additive extension (AE-1 / AE-2) ----
+  // fn_contract_list 18-param signature surfaces 3 new fields per row.
+  // Always present in responses; null when contract was not bulk-imported.
+  /** M1c addition. import_batch.id this contract belongs to (or null). */
+  importBatchId: number | null;
+  /** M1c addition. 0..100 AI confidence (or null when not extracted). */
+  importConfidence: number | null;
+  /** M1c addition. Array of human-readable warnings (or null). */
+  importWarnings: string[] | null;
 }
 
 // ------------------------------------------------------------
@@ -324,6 +349,19 @@ export interface CreateContractDto {
   bodyEn?: string | null;
   bodyAr?: string | null;
   tags?: string[];
+
+  // ---- M1c additive extension (Q3-OI-A / AE-1 / OI-2) ----
+  // Bulk-import flow per AC-S5-08, AC-S7-04 calls POST /api/v1/contracts
+  // with these extra keys. All are optional and target M1a-shipped columns
+  // on contract — additive at the runtime Zod schema level (no fn_ change).
+  /** M1c addition. import_batch.id this insert belongs to. */
+  importBatchId?: number | null;
+  /** M1c addition. Original uploaded filename — captured on contract.import_filename. */
+  importFilename?: string | null;
+  /** M1c addition. 0..100 AI extraction confidence. */
+  importConfidence?: number | null;
+  /** M1c addition. Array of human-readable AI warnings. */
+  importWarnings?: string[] | null;
 }
 
 export interface UpdateContractDto {
@@ -385,6 +423,16 @@ export interface ContractListQuery {
   /** AND-semantics — all tags must match. */
   tags?: string[];
   search?: string;
+
+  // ---- M1c additive extension (AE-1) ----
+  // fn_contract_list 18-param signature accepts 3 new optional filter
+  // params. Existing call sites that omit them are unaffected.
+  /** M1c addition. Filter to a single import_batch (S4 admin drill-down). AC-S4-05. */
+  importBatchId?: number;
+  /** M1c addition. Lower bound on contract.import_confidence — range 0..100 (S6). AC-S6-01. */
+  importConfidenceMin?: number;
+  /** M1c addition. Upper bound on contract.import_confidence — range 0..100 (S6). AC-S6-01. */
+  importConfidenceMax?: number;
 }
 
 export interface ContractVersionListQuery {

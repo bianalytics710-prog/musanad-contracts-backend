@@ -71,8 +71,29 @@ const isPgError = (e: unknown): e is PgError =>
  */
 const STRUCTURED_RAISE_RE = /^(fn_[a-z0-9_]+):\s*([a-zA-Z][a-zA-Z0-9_]*):\s*(.+)$/;
 
+// M1c: '404:Import batch not found' → 404. The fn_import_batch_update raise
+// uses the literal field name '404' which the structured-raise regex matches.
+// (Token must start with a-z A-Z but the regex actually allows leading
+// digits via [a-zA-Z][a-zA-Z0-9_]* — leading digit fails. Use a separate
+// 404-prefix check below.)
 const NOT_FOUND_FIELD_PREFIXES = new Set(['id', 'contractId']);
+
+// M1c: 'status:Invalid status transition' is a 409 (illegal lifecycle
+// transition — e.g. completed → in_progress). Generic 'status:' field on
+// other fn_'s would 400, but for M1c the only 'status:' raise is the
+// transition error. We pattern-match on the message for safety.
 const CONFLICT_FIELD_PREFIXES = new Set(['children', 'contractNumber', 'versionNumber']);
+
+// M1c: 'permission:Forbidden' raised by fn_import_batch_create /
+// fn_import_batch_update as defense in depth (the BE permission middleware
+// blocks 403 cases upstream, so this raise should not normally fire — but
+// it is mapped here to keep the layered enforcement honest).
+const FORBIDDEN_FIELD_PREFIXES = new Set(['permission']);
+
+// M1c: '404:<msg>' literal-prefix raised by fn_import_batch_update to flag
+// the not-found case (token '404' has a leading digit so the structured-
+// raise regex above does not match — handled separately below).
+const HTTP_404_LITERAL_PREFIX_RE = /^fn_[a-z0-9_]+:\s*404:\s*(.+)$/;
 
 const translatePgError = (err: unknown, fnName: string): ApiError => {
   const message = err instanceof Error ? err.message : String(err);
@@ -86,12 +107,24 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
       case '23505': // unique_violation
         return new ConflictError(`${fnName}: duplicate key`);
       case '23503': // foreign_key_violation
+        // M1c AC-S9-04: contract.import_batch_id FK to import_batch(id).
+        // INSERT into contract with a non-existent import_batch_id raises
+        // 23503; surface as 400 with a field-scoped envelope so the FE
+        // bulk-import flow gets a clear message instead of the generic
+        // 422. We pattern-match on the constraint name to scope the
+        // friendlier message — other 23503s remain 422.
+        if (err.constraint === 'fk_contract_import_batch_id') {
+          return new ValidationError('Referenced import batch not found', {
+            importBatchId: 'Referenced import batch not found',
+          });
+        }
         return new UnprocessableEntityError(`${fnName}: foreign key violation`);
       case '23502': // not_null_violation
         return new ValidationError(`${fnName}: required field missing`);
       case '23514': // check_violation — Codex BE-M1b-005
         // The Zod schemas allow combinations the DB rejects via CHECK
-        // (e.g., paid_at set when status != 'paid' on payment_schedule).
+        // (e.g., paid_at set when status != 'paid' on payment_schedule;
+        // M1c chk_import_batch_counter_sum / chk_import_batch_completed_at_status).
         // Surface as a 400 so the client knows it is a request-shape
         // problem, not a server fault. We deliberately do NOT echo
         // err.constraint — it leaks raw constraint names — but keep the
@@ -107,15 +140,36 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
     }
   }
 
+  // M1c: '404:<msg>' literal-prefix raise (e.g. fn_import_batch_update for
+  // missing batch). The structured-raise regex requires a leading letter on
+  // the field token, so '404' is matched separately here.
+  const firstLine = message.split('\n')[0]?.trim() ?? message;
+  const literal404 = HTTP_404_LITERAL_PREFIX_RE.exec(firstLine);
+  if (literal404) {
+    const msg = literal404[1]?.trim() ?? 'Not found';
+    return new NotFoundError(msg);
+  }
+
   // Structured format: 'fn_X: <field>:<message>'
   // We match the first line because pg may append CONTEXT/HINT lines.
-  const firstLine = message.split('\n')[0]?.trim() ?? message;
   const structuredMatch = STRUCTURED_RAISE_RE.exec(firstLine);
   if (structuredMatch) {
     const field = structuredMatch[2] ?? '';
     const msg = structuredMatch[3]?.trim() ?? '';
     if (NOT_FOUND_FIELD_PREFIXES.has(field)) {
       return new NotFoundError(msg, { [field]: msg });
+    }
+    if (FORBIDDEN_FIELD_PREFIXES.has(field)) {
+      // M1c: defense-in-depth fn_ permission raise. BE middleware blocks
+      // 403 cases upstream so this rarely fires — surface as 403 anyway.
+      return new ForbiddenError(msg);
+    }
+    // M1c AC-S2-02: 'status:Invalid status transition' is the only 'status'
+    // field raise from fn_import_batch_update — it's a CONFLICT, not a
+    // validation failure. We scope this strictly to the transition message
+    // so other future 'status:' raises fall through to 400 VALIDATION_ERROR.
+    if (field === 'status' && /invalid status transition/i.test(msg)) {
+      return new ConflictError(msg, { [field]: msg });
     }
     if (CONFLICT_FIELD_PREFIXES.has(field)) {
       return new ConflictError(msg, { [field]: msg });

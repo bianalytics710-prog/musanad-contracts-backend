@@ -1,10 +1,12 @@
 openapi: 3.0.3
 info:
-  title: Musanad Contracts Hub - M0 Foundation API
+  title: Musanad Contracts Hub API
   description: |
-    M0 Foundation API for the Musanad Contracts Hub platform. Covers authentication
-    (login, refresh, logout, UAE Pass federated entry), user CRUD, role catalog,
-    permission catalog, and the operational health probe.
+    Musanad Contracts Hub platform API. Covers M0 (authentication, user / role /
+    permission catalog, health probe), M1a (contract core CRUD + lifecycle),
+    M1b (Compose Wizard + Payment Schedules + PDF/XLSX exports), and M1c
+    (Bulk & Manual Import — 4 import-batch endpoints + 1 AI extraction stub +
+    additive extension of GET /contracts).
 
     All routes are prefixed with `/api/v1` except `/api/health` (infrastructural).
 
@@ -13,7 +15,7 @@ info:
     `app.current_user_id` session GUC, set by middleware before every fn_ call.
 
     Every response carries an `X-Request-ID` correlation header.
-  version: 0.1.0
+  version: 0.4.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -53,6 +55,28 @@ tags:
       activity_type CHECK enum with `payment_schedule_replaced` and `exported`.
       W1 route-ordering: GET /contracts/export.xlsx (literal) MUST be declared
       before any /:id-prefixed route — see comment in src/routes/v1/contracts.routes.ts.
+  - name: M1c — Imports
+    description: |
+      Bulk & Manual Import (M1c). 4 import-batch endpoints (S1 create, S2 update,
+      S3 list, S4 get-by-id) + the M1a GET /contracts list extended with 3 import
+      filter params (importBatchId, importConfidenceMin, importConfidenceMax) and
+      3 list-row fields (importBatchId, importConfidence, importWarnings). FE-direct
+      Supabase Storage upload (HQ1 ratified) — backend never sees the file bytes,
+      only the already-extracted text + filename + size. Cancellation is a status
+      transition (status='cancelled'), not is_active=false; the
+      trg_import_batch_immutable_fields BEFORE UPDATE trigger blocks any direct
+      flip of is_active or initiated_by (Codex C1 fix).
+  - name: M1c — AI
+    description: |
+      AI namespace introduced in M1c. M1c ships ONE controller-only stub
+      (POST /api/v1/ai/extract-contract-bulk) — no fn_, no DB persistence. The
+      stub returns a deterministic mock derived from extractedText.length so
+      routing-by-confidence tests are repeatable. Request + response DTOs are
+      FROZEN per HQ2: M4 will replace the controller body without changing the
+      route, auth, request DTO, or response DTO. extractedText is classified as
+      ai_prompt_payload (project.config.json sensitiveFields) and pino-redacted
+      across 7 paths (top-level, req.body.*, req.query.*, req.params.*, *.X,
+      *.*.X) — Codex M1 fix.
 
 components:
   securitySchemes:
@@ -444,6 +468,10 @@ components:
       type: object
       description: |
         Slim list payload. body_en/body_ar are NEVER returned here (AC-S1-08).
+        M1c additively extends this shape with 3 new fields (importBatchId,
+        importConfidence, importWarnings) — always present, null when the
+        contract was not bulk-imported. fn_contract_list signature widened
+        15→18 params in migration 017.
       required:
         - id
         - contractNumber
@@ -455,6 +483,9 @@ components:
         - tags
         - createdAt
         - updatedAt
+        - importBatchId
+        - importConfidence
+        - importWarnings
       properties:
         id: { type: integer }
         contractNumber: { type: string, example: CT-2026-000123 }
@@ -474,6 +505,21 @@ components:
         currentVersion: { type: integer, example: 1 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        importBatchId:
+          type: integer
+          nullable: true
+          description: M1c addition. import_batch.id this contract belongs to. NULL when not bulk-imported.
+        importConfidence:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+          description: M1c addition. AI extraction confidence 0..100. NULL when not extracted.
+        importWarnings:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: M1c addition. Human-readable AI extraction warnings. NULL when none.
 
     Contract:
       type: object
@@ -531,13 +577,36 @@ components:
         aiRiskScore: { type: integer, nullable: true, minimum: 0, maximum: 100 }
         aiSummaryEn: { type: string, nullable: true }
         aiSummaryAr: { type: string, nullable: true }
-        importBatchId: { type: integer, nullable: true }
-        importConfidence: { type: integer, nullable: true }
-        importFilename: { type: string, nullable: true }
-        importWarnings:
-          type: object
+        importBatchId:
+          type: integer
           nullable: true
-          additionalProperties: true
+          description: |
+            M1c addition (always present in projection post-migration 022 — Codex H1 fix).
+            import_batch.id this contract belongs to. NULL when not bulk-imported.
+        importConfidence:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+          description: |
+            M1c addition (always present in projection post-migration 022).
+            AI extraction confidence 0..100. NULL when not extracted.
+        importFilename:
+          type: string
+          nullable: true
+          description: |
+            M1c addition (always present in projection post-migration 022).
+            Original uploaded filename (no path / no extension stripped).
+            NULL when not bulk-imported. Deliberately NOT in fn_audit_trigger redact list
+            (Design Note D1 — useful for forensics, not classified PII).
+        importWarnings:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: |
+            M1c addition (always present in projection post-migration 022).
+            Human-readable AI extraction warnings.
+            NULL when key absent on insert; '[]' when explicitly empty (key-exists semantics).
         tags:
           type: array
           items: { type: string }
@@ -550,6 +619,16 @@ components:
       type: object
       required: [titleEn, contractType]
       additionalProperties: false
+      description: |
+        Create a contract. M1c additively extends this DTO with 4 optional
+        import-trace fields (importBatchId, importFilename, importConfidence,
+        importWarnings) consumed by the bulk-import flow (S5 auto-save) and the
+        manual-entry flow (S7). Migration 019 extended fn_contract_create to
+        read these from p_data; migration 020 hardened the body to preserve the
+        Codex BE-001 SELECT FOR UPDATE on parent_contract_id and changed
+        importWarnings missing-key semantics to NULL (key-exists check).
+        Existing M1a/M1b callers passing the original 19 fields are unaffected
+        — Zod .strict() permits, fn_ ignores when absent.
       properties:
         titleEn: { type: string, minLength: 1, maxLength: 500 }
         titleAr: { type: string, maxLength: 500, nullable: true }
@@ -579,6 +658,43 @@ components:
         tags:
           type: array
           items: { type: string, minLength: 1, maxLength: 64 }
+        importBatchId:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: |
+            M1c addition (OI-2 / AC-S5-08). import_batch.id this insert belongs to.
+            FK fk_contract_import_batch_id (ON DELETE SET NULL) — bad id surfaces
+            as 400 with field='importBatchId' (translatePgError 23503 mapping).
+            Migration 020 also adds a SELECT FOR UPDATE existence check inside
+            fn_contract_create so concurrent batch soft-deletes are serialised.
+        importFilename:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: |
+            M1c addition (OI-2 / AC-S7-04). Original uploaded filename. Persists
+            unredacted into contract.import_filename — kept out of pino redact
+            list per Design Note D1 (forensics use case; not project.config.json
+            sensitiveFields).
+        importConfidence:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: |
+            M1c addition (OI-2 / AC-S7-04). AI extraction confidence 0..100.
+            In-fn range guard fires before column CHECK so error envelope is
+            structured ('importConfidence:Confidence must be between 0 and 100').
+        importWarnings:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: |
+            M1c addition (OI-2 / AC-S5-09 indirect). Array of human-readable AI
+            warnings. fn_contract_create uses JSONB key-exists semantics
+            (post-migration 020): missing key → NULL; explicit `[]` → `'[]'::jsonb`;
+            populated array → preserved verbatim.
 
     UpdateContractDto:
       type: object
@@ -901,6 +1017,334 @@ components:
         rows:
           type: array
           items: { $ref: "#/components/schemas/PaymentSchedule" }
+
+    # ----------------------------------------------------------------------
+    # M1c — Bulk & Manual Import
+    # ----------------------------------------------------------------------
+
+    ImportBatchStatus:
+      type: string
+      description: |
+        4-value lifecycle enum for import_batch.status. CHECK constraint enforced
+        on the column. Allowed transitions (AC-S2-02 — fn_import_batch_update):
+          in_progress → paused | completed | cancelled
+          paused      → in_progress | completed | cancelled
+          completed   → (terminal — no transitions; AC-S2-08)
+          cancelled   → (terminal — no transitions; AC-S2-08)
+        Cancellation is a status transition, NOT is_active=false. The
+        trg_import_batch_immutable_fields BEFORE UPDATE trigger raises
+        SQLSTATE 42501 (BE 403) on any direct flip of is_active.
+      enum: [in_progress, paused, completed, cancelled]
+
+    ImportBatchStatusMode:
+      type: string
+      description: |
+        3-value enum embedded in the import_batch.config JSONB key statusMode.
+        Validated server-side inside fn_import_batch_create — NOT a DB CHECK
+        on the table (Design Note D6 — JSONB-shape CHECK is brittle and slow).
+          active — every imported contract lands with status='active'
+          draft  — every imported contract lands with status='draft'
+          auto   — use the AI-detected status from extract-contract-bulk
+      enum: [active, draft, auto]
+
+    ImportBatchConfig:
+      type: object
+      description: |
+        Batch defaults JSONB (camelCase keys) stored in import_batch.config.
+        Validated by fn_import_batch_create + Zod CreateImportBatchSchema (.strict).
+      additionalProperties: false
+      properties:
+        contractType:
+          type: string
+          description: |
+            Optional override of the M1a contract.contract_type CHECK enum value
+            applied to every contract in this batch. Hardcoded 8-value list inside
+            fn_import_batch_create (cross-ref M1a migration 003): service,
+            employment, vendor, partnership, lease, license, nda, other.
+        statusMode:
+          $ref: "#/components/schemas/ImportBatchStatusMode"
+        defaultCounterpartyId:
+          type: integer
+          minimum: 1
+          description: |
+            Optional default counterparty applied when AI does not detect one.
+            Forward-references the (deferred) Parties module — kept nullable
+            until that module ships.
+
+    ImportBatch:
+      type: object
+      description: |
+        Full import_batch shape returned by fn_import_batch_get_by_id (S4) and
+        used as the response body of fn_import_batch_create (S1) +
+        fn_import_batch_update (S2 — both end with `RETURN
+        fn_import_batch_get_by_id(...)`). initiatedBy is hydrated as a UserRef
+        via M0 fn_user_get_by_id (AC-S4-04). For the lighter list shape see
+        ImportBatchListItem.
+      required:
+        - id
+        - initiatedBy
+        - config
+        - totalFiles
+        - autoSaved
+        - reviewQueue
+        - manualEntry
+        - duplicatesSkipped
+        - errored
+        - status
+        - startedAt
+        - completedAt
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: integer, example: 42 }
+        initiatedBy:
+          allOf:
+            - $ref: "#/components/schemas/ContractActorRef"
+          description: |
+            Operator identity. UserRef hydrated by fn_user_get_by_id. Immutable
+            post-create — trg_import_batch_immutable_fields raises SQLSTATE
+            42501 on any UPDATE that changes initiated_by (Codex C1 fix).
+        config:
+          $ref: "#/components/schemas/ImportBatchConfig"
+        totalFiles:
+          type: integer
+          minimum: 1
+          description: |
+            Up-front file count, set on create; immutable thereafter. CHECK >= 1.
+            Sum of the 5 counters is bounded by this value — chk_import_batch_counter_sum.
+        autoSaved:
+          type: integer
+          minimum: 0
+          description: |
+            Files that AI extraction routed straight to active/draft contracts
+            (high-confidence track). Mutated only via fn_import_batch_update
+            with SELECT FOR UPDATE on the batch row (Codex BE-001).
+        reviewQueue:
+          type: integer
+          minimum: 0
+          description: Files routed to the human review queue (medium-confidence track).
+        manualEntry:
+          type: integer
+          minimum: 0
+          description: Files routed to the manual-entry track (low-confidence or extraction-failed).
+        duplicatesSkipped:
+          type: integer
+          minimum: 0
+          description: |
+            Files skipped because the FE pre-check matched an existing active
+            contract by detectedDuplicateContractNumber (AC-S5-09).
+        errored:
+          type: integer
+          minimum: 0
+          description: |
+            Files that failed extraction or upload entirely (OI-6 / Design Note D3).
+            Without this counter, batches with errors could never reach
+            status='completed'. Sum-bounded with the 4 above against totalFiles.
+        status:
+          $ref: "#/components/schemas/ImportBatchStatus"
+        startedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp set at row creation.
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            ISO-8601 timestamp. Non-NULL iff status is terminal (completed |
+            cancelled) — enforced declaratively by chk_import_batch_completed_at_status
+            (Design Note D2).
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ImportBatchListItem:
+      type: object
+      description: |
+        Lighter list shape returned by fn_import_batch_list (S3). initiatedBy is
+        a raw bigint user id (not a UserRef) to keep the admin list query lean.
+        createdAt/updatedAt omitted (list shows startedAt + completedAt only).
+      required:
+        - id
+        - initiatedBy
+        - totalFiles
+        - autoSaved
+        - reviewQueue
+        - manualEntry
+        - duplicatesSkipped
+        - errored
+        - status
+        - config
+        - startedAt
+        - completedAt
+      properties:
+        id: { type: integer }
+        initiatedBy:
+          type: integer
+          description: Raw bigint user id. Drill-down to UserRef via GET /import-batches/:id.
+        totalFiles: { type: integer, minimum: 1 }
+        autoSaved: { type: integer, minimum: 0 }
+        reviewQueue: { type: integer, minimum: 0 }
+        manualEntry: { type: integer, minimum: 0 }
+        duplicatesSkipped: { type: integer, minimum: 0 }
+        errored: { type: integer, minimum: 0 }
+        status: { $ref: "#/components/schemas/ImportBatchStatus" }
+        config: { $ref: "#/components/schemas/ImportBatchConfig" }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time, nullable: true }
+
+    ImportBatchListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ImportBatchListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    CreateImportBatchDto:
+      type: object
+      required: [totalFiles]
+      additionalProperties: false
+      description: |
+        Body of POST /api/v1/import-batches (S1). Maps to fn_import_batch_create
+        p_data JSONB. initiated_by is set server-side from req.user.id (NOT a
+        body field — AC-S1-05; RLS policy import_batch_insert_runner enforces
+        post-image matches current_user_id, blocking impersonation).
+      properties:
+        totalFiles:
+          type: integer
+          minimum: 1
+          description: AC-S1-02. CHECK total_files >= 1.
+        config:
+          $ref: "#/components/schemas/ImportBatchConfig"
+
+    UpdateImportBatchDto:
+      type: object
+      additionalProperties: false
+      description: |
+        Body of PATCH /api/v1/import-batches/:id (S2). Counter deltas are SIGNED
+        integers — negative deltas allowed iff result remains >= 0 (AC-S2-04
+        underflow guard); the 5-counter sum is bounded by chk_import_batch_counter_sum
+        (AC-S2-05 overflow guard). Status transitions validated against the
+        4-value allowed-transition table (AC-S2-02). Zod .strict() rejects unknown
+        keys; .refine() requires at least one field to be present.
+      properties:
+        status: { $ref: "#/components/schemas/ImportBatchStatus" }
+        autoSavedDelta:
+          type: integer
+          description: |
+            Default 0 (no-op). AC-S2-04 underflow → 400 with field='autoSaved'.
+        reviewQueueDelta:
+          type: integer
+          description: Default 0. AC-S2-04 underflow → 400 with field='reviewQueue'.
+        manualEntryDelta:
+          type: integer
+          description: Default 0. AC-S2-04 underflow → 400 with field='manualEntry'.
+        duplicatesSkippedDelta:
+          type: integer
+          description: Default 0. AC-S2-04 underflow → 400 with field='duplicatesSkipped'.
+        erroredDelta:
+          type: integer
+          description: |
+            Default 0. OI-6 / Design Note D3 — 5th counter so 'completed' status
+            can be reached when files fail extraction. AC-S2-04 underflow →
+            400 with field='errored'.
+
+    ExtractContractBulkRequest:
+      type: object
+      required: [filename, fileSize, extractedText, batchId]
+      additionalProperties: false
+      description: |
+        Body of POST /api/v1/ai/extract-contract-bulk (S8). FROZEN per HQ2 —
+        M4 must replace the controller body without changing this DTO. The
+        already-extracted text is sent here (mammoth/pdfjs run in the browser
+        per AC-S5-02 / HQ1 — backend never sees the file bytes).
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          description: Non-empty original filename.
+        fileSize:
+          type: integer
+          minimum: 0
+          description: File size in bytes (informational — locked for M4 use).
+        extractedText:
+          type: string
+          minLength: 50
+          description: |
+            Already-extracted text. Min 50 chars (AC-S8-03). SENSITIVE —
+            classified as ai_prompt_payload per project.config.json
+            sensitiveFields. Pino-redacted across 7 paths (Codex M1 fix:
+            top-level, req.body.*, req.body.*.*, req.query.*, req.params.*,
+            *.X, *.*.X). The AI controller additionally never passes req.body
+            to a logger call — only filename/fileSize/batchId/textLength.
+        batchId:
+          type: integer
+          minimum: 1
+          description: import_batch.id this file belongs to. Positive bigint.
+
+    ExtractContractBulkResponse:
+      type: object
+      required: [importConfidence, importWarnings]
+      additionalProperties: false
+      description: |
+        Response body of POST /api/v1/ai/extract-contract-bulk. FROZEN DTO per
+        HQ2 — M4 replaces the controller body without changing this shape
+        (AC-S8-07). Fields are the union of M1a CreateContractDto (all optional —
+        AI may not detect every field) + M1c-specific extraction metadata.
+        M1c stub computes importConfidence as
+        round(min(95, max(20, extractedText.length / 100))) — pure deterministic
+        function in src/services/ai/extract-contract-bulk.service.ts (BE-AI-stub-formula).
+      properties:
+        # M1a CreateContractDto fields (all optional)
+        titleEn: { type: string }
+        titleAr: { type: string }
+        contractType: { type: string }
+        templateId: { type: integer }
+        language: { $ref: "#/components/schemas/ContractLanguage" }
+        ourPartyId: { type: integer }
+        counterpartyId: { type: integer }
+        valueAed: { type: number, format: double }
+        currency: { type: string }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        expiryNoticeDays: { type: integer }
+        emirate: { type: string }
+        governingLaw: { $ref: "#/components/schemas/ContractGoverningLaw" }
+        jurisdictionCourt: { type: string }
+        parentContractId: { type: integer }
+        relationshipType: { $ref: "#/components/schemas/ContractRelationshipType" }
+        bodyEn: { type: string, description: SENSITIVE — pino-redacted on log. }
+        bodyAr: { type: string, description: SENSITIVE — pino-redacted on log. }
+        tags:
+          type: array
+          items: { type: string }
+        # M1c-specific extraction metadata
+        importConfidence:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            REQUIRED. AI extraction confidence — routes the per-file result via
+            IMPORT_CONFIDENCE_THRESHOLDS in S5:
+              high   (>= 80) → auto-save track
+              medium (50..79) → review queue
+              low    (<50)   → manual entry track
+            AC-S5-05 / AC-S8-04.
+        importWarnings:
+          type: array
+          nullable: true
+          items: { type: string }
+          description: |
+            REQUIRED. Human-readable warnings produced during extraction.
+            null when no warnings apply.
+        detectedDuplicateContractNumber:
+          type: string
+          nullable: true
+          description: |
+            Optional. When the AI detects a contract number on the document, the
+            FE pre-checks against existing active contracts; matching rows are
+            skipped and duplicatesSkipped is incremented (AC-S5-09).
 
   responses:
     Unauthenticated:
@@ -1468,9 +1912,35 @@ paths:
           in: query
           description: ILIKE across contract_number / title_en / title_ar.
           schema: { type: string }
+        # ----------------------------------------------------------------
+        # M1c additive query params. fn_contract_list signature widened
+        # 15→18 (migration 017). All three default NULL — backward
+        # compatible. Used by M1c S4 (admin drill-down) and S6 (review queue).
+        # ----------------------------------------------------------------
+        - name: importBatchId
+          in: query
+          description: |
+            M1c addition. Filter to a single import_batch — used by S4 admin
+            drill-down (AC-S4-05). Positive bigint or omitted.
+          schema: { type: integer, minimum: 1 }
+        - name: importConfidenceMin
+          in: query
+          description: |
+            M1c addition. Lower bound (inclusive) on contract.import_confidence —
+            used by S6 review queue (AC-S6-01). Range 0..100.
+          schema: { type: integer, minimum: 0, maximum: 100 }
+        - name: importConfidenceMax
+          in: query
+          description: |
+            M1c addition. Upper bound (inclusive) on contract.import_confidence —
+            used by S6 review queue (AC-S6-01). Range 0..100.
+          schema: { type: integer, minimum: 0, maximum: 100 }
       responses:
         "200":
-          description: Paginated contract list.
+          description: |
+            Paginated contract list. Each row carries 3 M1c additions
+            (importBatchId, importConfidence, importWarnings) — always present,
+            null when contract was not bulk-imported.
           headers:
             X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
           content:
@@ -2211,6 +2681,348 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  # ============================================================
+  # M1c — Bulk & Manual Import (4 import-batch endpoints + 1 AI stub)
+  #
+  # Route ordering in src/routes/v1/import-batches.routes.ts:
+  #   1. POST   /import-batches             (S1)
+  #   2. GET    /import-batches             (S3 — list, no :id)
+  #   3. GET    /import-batches/:id         (S4)
+  #   4. PATCH  /import-batches/:id         (S2)
+  # No literal-before-:id collision (no /import-batches/<keyword>) so the
+  # M1b W1 ordering rule is informational here.
+  #
+  # AI namespace (NEW in M1c): src/routes/v1/ai.routes.ts
+  #   1. POST   /ai/extract-contract-bulk   (S8 — controller-only stub)
+  # Inherits these conventions for M4: JWT required; permission-gated at the
+  # controller; authedWriteRateLimiter; pino-redact ai_prompt_payload; FROZEN
+  # request + response DTOs (HQ2).
+  # ============================================================
+
+  /import-batches:
+    post:
+      tags: [M1c — Imports]
+      operationId: importBatchCreate
+      summary: Create a new bulk-import batch (S1)
+      description: |
+        Initiate a new bulk-import batch. Sets totalFiles up-front; counters
+        start at 0; status='in_progress'; initiated_by = current user. Returns
+        the full ImportBatch shape via fn_import_batch_get_by_id (initiatedBy
+        hydrated as UserRef).
+
+        - AC-S1-04: caller MUST hold `import.run` (BE authorise() gate +
+          fn_ defense-in-depth + RLS WITH CHECK on import_batch_insert_runner).
+        - AC-S1-05: initiated_by = current_setting('app.current_user_id'),
+          NOT a body field — RLS WITH CHECK forbids impersonation.
+        - AC-S1-02: totalFiles >= 1 — Zod first, fn_ second.
+        - AC-S1-03: config.statusMode in {active|draft|auto} when present.
+
+        DB function: `fn_import_batch_create` (SECURITY INVOKER,
+        SET search_path = public, pg_temp).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, contract_drafter]
+      x-requiredPermissions: [import.run]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateImportBatchDto" }
+            example:
+              totalFiles: 50
+              config:
+                contractType: service
+                statusMode: active
+                defaultCounterpartyId: 12
+      responses:
+        "201":
+          description: Batch created.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportBatch" }
+        "400":
+          description: |
+            VALIDATION_ERROR — totalFiles < 1 (field='totalFiles'),
+            invalid statusMode (field='config.statusMode'), or invalid
+            contractType (field='config.contractType').
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: FORBIDDEN — caller lacks `import.run` permission (AC-S1-04).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    get:
+      tags: [M1c — Imports]
+      operationId: importBatchList
+      summary: List import batches (paginated, role-aware) (S3)
+      description: |
+        Paginated, role-aware list of import batches. Ordered by
+        `started_at DESC, id DESC` tiebreaker (AC-S3-01). totalPages = 0 when
+        total = 0 (M1a 007 patch precedent — AC-S3-02). Soft-deleted
+        (is_active=false) batches universally excluded (AC-S3-08).
+
+        Role narrowing (AC-S3-07):
+          - platform_admin / legal_counsel / Super Admin / executive
+              → see ALL active batches (v_role_can_see_all gate inside
+                fn_import_batch_list + import_batch_select_role_aware RLS policy).
+          - contract_drafter → sees ONLY own batches (initiated_by = current_user).
+
+        Permission gate is upstream (controller checks anyOf(import.review,
+        import.run)); fn_ enforces row visibility. Defense in depth — Codex
+        G2 lesson + M1a precedent.
+
+        DB function: `fn_import_batch_list` (SECURITY INVOKER STABLE).
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own batches only)
+      x-requiredPermissions: anyOf(import.review, import.run)
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+          description: AC-S3-05 — clamped 1..100.
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/ImportBatchStatus" }
+          description: AC-S3-03 optional status filter.
+        - name: initiatedBy
+          in: query
+          schema: { type: integer, minimum: 1 }
+          description: AC-S3-03 optional initiator filter (raw bigint user id).
+      responses:
+        "200":
+          description: Paginated batch list.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportBatchListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: FORBIDDEN — caller lacks both `import.review` AND `import.run` (AC-S3-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /import-batches/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+        description: import_batch.id (positive bigint).
+    get:
+      tags: [M1c — Imports]
+      operationId: importBatchGetById
+      summary: Get a single import batch with hydrated initiator (S4)
+      description: |
+        Returns the full ImportBatch shape with initiatedBy hydrated as
+        UserRef via M0 fn_user_get_by_id (AC-S4-04). Per-batch contract
+        drill-down is served by `GET /api/v1/contracts?importBatchId={id}`
+        (AC-S4-05) — see the M1a contracts list endpoint with M1c-extended
+        params.
+
+        Returns 404 (NOT 403) when the batch does not exist OR is_active=false
+        OR not visible to the caller via RLS (Design Note D7 — matches
+        M1a fn_contract_get_by_id pattern; avoids leaking existence to
+        unauthorised callers).
+
+        DB function: `fn_import_batch_get_by_id` (SECURITY INVOKER STABLE).
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter (own batch only)
+      x-requiredPermissions: anyOf(import.review, import.run)
+      responses:
+        "200":
+          description: Batch found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportBatch" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: |
+            Batch not found, soft-deleted, or not visible to caller (AC-S4-02 +
+            AC-S4-03). 404 is intentional — RLS-narrowed not-authorised surfaces
+            as 404 (Design Note D7).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    patch:
+      tags: [M1c — Imports]
+      operationId: importBatchUpdate
+      summary: Update batch counters and/or transition lifecycle status (S2)
+      description: |
+        Apply counter deltas (signed integers) and/or transition lifecycle
+        status. SELECT FOR UPDATE on the batch row inside fn_import_batch_update
+        serialises concurrent counter writes (Codex BE-001 — Design Note D8).
+        Returns the full updated ImportBatch shape via fn_import_batch_get_by_id.
+
+        - AC-S2-01: counters incremented atomically.
+        - AC-S2-02: allowed transitions:
+            in_progress → paused | completed | cancelled
+            paused      → in_progress | completed | cancelled
+            completed   → (terminal)
+            cancelled   → (terminal)
+          Other transitions raise 'status:Invalid status transition' → 409.
+        - AC-S2-03: when transitioning to completed/cancelled, completed_at =
+          CURRENT_TIMESTAMP set in same transaction (also enforced by
+          chk_import_batch_completed_at_status — Design Note D2).
+        - AC-S2-04: per-counter underflow guard → 400 with the failing field name.
+        - AC-S2-05: 5-counter sum overflow vs totalFiles → 400 (also enforced
+          declaratively by chk_import_batch_counter_sum — Design Note D3).
+        - AC-S2-07: caller must be initiator OR have import.run; defense in depth.
+        - AC-S2-08: 'reopen' from terminal states is rejected → 409.
+
+        Direct flips of `is_active` or `initiated_by` are blocked by the
+        BEFORE UPDATE trigger `trg_import_batch_immutable_fields` (Codex C1
+        fix, migration 021) — SQLSTATE 42501 → BE 403.
+
+        DB function: `fn_import_batch_update`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - contract_drafter (initiator-self only)
+        - legal_counsel (only when also initiator)
+      x-requiredPermissions: anyOf(import.run, import.review) + initiator-self enforcement in fn_
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateImportBatchDto" }
+            example:
+              autoSavedDelta: 1
+              reviewQueueDelta: 0
+      responses:
+        "200":
+          description: Updated batch shape.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImportBatch" }
+        "400":
+          description: |
+            VALIDATION_ERROR — counter underflow (field one of autoSaved,
+            reviewQueue, manualEntry, duplicatesSkipped, errored) or counter
+            overflow (field='counters').
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: |
+            FORBIDDEN — caller is neither admin nor initiator AND lacks
+            import.run (AC-S2-07). Also: any direct UPDATE that flips
+            is_active or initiated_by raises SQLSTATE 42501 (trigger).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Batch not found or is_active=false (AC-S2-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — invalid status transition (AC-S2-02 / AC-S2-08).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/extract-contract-bulk:
+    post:
+      tags: [M1c — AI]
+      operationId: aiExtractContractBulk
+      summary: AI extraction stub for bulk-import flow (S8 — controller-only)
+      description: |
+        Controller-only AI extraction STUB. NO fn_, NO DB persistence. Returns
+        a deterministic mock derived from extractedText.length so routing-by-
+        confidence tests are repeatable.
+
+        Architecture (HQ1 + HQ2 ratified):
+          - File extraction (mammoth/pdfjs) runs IN THE BROWSER per AC-S5-02.
+            The backend receives only the extracted text + filename + size.
+          - The Supabase 'contracts' bucket upload is FE-direct (best-effort,
+            non-blocking) — no BE storage abstraction. Filename is captured on
+            contract.import_filename for forensics.
+
+        DTO contract is FROZEN (AC-S8-07): M4 will replace this controller body
+        with a real AI provider call WITHOUT changing route, auth, request DTO,
+        or response DTO.
+
+        - AC-S8-02: caller MUST hold `import.run`.
+        - AC-S8-03: extractedText min 50 chars.
+        - AC-S8-04: confidence formula —
+          `round(min(95, max(20, extractedText.length / 100)))`
+          implemented in src/services/ai/extract-contract-bulk.service.ts.
+        - AC-S8-05: rate-limited via authedWriteRateLimiter (429 on excess).
+        - AC-S8-06: extractedText is `ai_prompt_payload` per
+          project.config.json sensitiveFields. Pino-redacted across 7 paths
+          (Codex M1 fix). Controller additionally avoids logging req.body —
+          only filename / fileSize / batchId / textLength as derived metadata.
+
+        DB function: NONE — this endpoint never touches the database.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, contract_drafter]
+      x-requiredPermissions: [import.run]
+      x-frozenDto: true
+      x-replaceableBy: M4 (real AI provider call — controller body only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExtractContractBulkRequest" }
+            example:
+              filename: "service-agreement-acme-2026.pdf"
+              fileSize: 184320
+              extractedText: "<extracted text — pino-redacted on log; min 50 chars>"
+              batchId: 42
+      responses:
+        "200":
+          description: Deterministic mock extraction response.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ExtractContractBulkResponse" }
+        "400":
+          description: |
+            VALIDATION_ERROR — filename empty, fileSize < 0, extractedText
+            < 50 chars (AC-S8-03), or batchId not a positive integer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: FORBIDDEN — caller lacks `import.run` (AC-S8-02).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: RATE_LIMITED — authedWriteRateLimiter exceeded (AC-S8-05).
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
 # Note: /api/health lives at the root, NOT under /api/v1. Documented as an
 # absolute path here so generators emit it correctly.

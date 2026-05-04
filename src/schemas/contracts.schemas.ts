@@ -158,6 +158,23 @@ export const CreateContractDtoSchema = z
     bodyEn: z.string().nullable().optional(),
     bodyAr: z.string().nullable().optional(),
     tags: z.array(TagStringSchema).optional(), // AC-S3-02
+
+    // ---- M1c additive extension (Q3-OI-A / OI-2 / AC-S5-08 + AC-S7-04) ----
+    // The bulk-import flow per AC-S5-08 / AC-S7-04 calls POST /api/v1/contracts
+    // with these extra keys. All optional; target M1a-shipped columns on
+    // contract (import_batch_id, import_filename, import_confidence,
+    // import_warnings). No fn_ change required — fn_contract_create accepts
+    // them via the JSONB payload. Existing M1a callers omit them — safe.
+    importBatchId: PositiveBigIntSchema.nullable().optional(),
+    importFilename: z.string().trim().max(500).nullable().optional(),
+    importConfidence: z
+      .number({ invalid_type_error: 'importConfidence must be in range 0..100' })
+      .int()
+      .min(0, 'importConfidence must be in range 0..100')
+      .max(100, 'importConfidence must be in range 0..100')
+      .nullable()
+      .optional(),
+    importWarnings: z.array(z.string().max(1000)).nullable().optional(),
   })
   .superRefine((val, ctx) => {
     // AC-S3-07: end date must be on or after start date
@@ -323,6 +340,23 @@ export const ContractListQuerySchema = z.object({
     return v;
   }, z.array(TagStringSchema).optional()),
   search: z.string().trim().max(500).optional(),
+
+  // ---- M1c additive extension (AE-1) ----
+  // fn_contract_list 18-param signature accepts 3 new optional filter
+  // params for review queue (S6) + admin batch drill-down (S4).
+  importBatchId: PositiveBigIntSchema.optional(),
+  importConfidenceMin: z.coerce
+    .number()
+    .int()
+    .min(0, 'importConfidenceMin must be in range 0..100')
+    .max(100, 'importConfidenceMin must be in range 0..100')
+    .optional(),
+  importConfidenceMax: z.coerce
+    .number()
+    .int()
+    .min(0, 'importConfidenceMax must be in range 0..100')
+    .max(100, 'importConfidenceMax must be in range 0..100')
+    .optional(),
 });
 export type ContractListQueryInferred = z.infer<typeof ContractListQuerySchema>;
 

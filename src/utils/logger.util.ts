@@ -1,8 +1,15 @@
 /**
  * Pino logger with sensitive-field redaction.
- * Redact paths cover all 17 sensitive fields from project.config.json,
+ * Redact paths cover all 15 sensitive fields from project.config.json,
  * the LoginUserRecord.passwordHash carrier (per Contract Generator handoff),
- * and the standard wire-level secrets (token / accessToken / refreshToken).
+ * the M1a bilingual body fields (bodyEn / bodyAr), and the M1c extractedText
+ * AI-payload alias (S8 AC-S8-06).
+ *
+ * Codex BE round-1 patch (M1): each sensitive field ships with explicit
+ * top-level + req.body.* + req.body.*.* + req.query.* + req.params.* paths
+ * in addition to the original `*.field` and `*.*.field` wildcards. Pino
+ * wildcards match exactly one nesting level, so wildcard-only coverage
+ * leaves top-level and direct-nested keys unredacted.
  *
  * Pretty print in development; JSON in production.
  */
@@ -14,71 +21,358 @@ const isDevelopment = process.env.NODE_ENV !== 'production';
 /**
  * Sensitive-field redaction paths.
  *
- * Pino redaction supports `*.field` wildcard at any depth (single-segment
- * wildcard only). We list both common envelope shapes (req.body.password,
- * res.user.passwordHash) and a generic `*.field` pattern as a safety net.
+ * Pino redaction paths are LITERAL: a `*` wildcard matches exactly ONE
+ * property-name level. So `*.password` covers `foo.password` but NOT
+ * `password` at the top level, NOT `req.body.password` (two levels deep),
+ * and NOT `req.body.user.password` (three levels deep).
+ *
+ * Codex BE round-1 finding M1: the original list was wildcard-only. The
+ * M1c AI stub controller logs derived metadata (textLength, fileSize) and
+ * NOT req.body — but as a safety net every sensitive field now ships with
+ * a complementary set of explicit paths covering the routes pino redact
+ * cannot infer from a single-segment wildcard:
+ *
+ *   - exact top-level key            (`password`)
+ *   - `req.body.<key>`               (controller logs req.body)
+ *   - `req.body.*.<key>`             (controller logs an array/object inside body)
+ *   - `req.query.<key>`              (controller logs req.query)
+ *   - `req.params.<key>`             (controller logs req.params)
+ *   - `*.<key>`                      (one-level wildcard — original M0 coverage)
+ *   - `*.*.<key>`                    (two-level wildcard for envelope-wrapped logs)
  *
  * Mirrors:
- *   - project.config.json sensitiveFields (15 entries — both snake_case
- *     DB column names and conceptual sentinels)
+ *   - project.config.json sensitiveFields (15 entries — snake_case DB
+ *     column names; we list camelCase API-surface variants alongside)
  *   - LoginUserRecord.passwordHash (BE Impl handoff in
  *     contracts-summary.json `beImplementation`)
  *   - tokenHash (TokenBlacklistEntry @internal type)
+ *   - M1c S8 AC-S8-06 extractedText (ai_prompt_payload alias)
+ *
+ * pino-redact docs:
+ *   https://github.com/pinojs/pino/blob/main/docs/redaction.md
  */
 const SENSITIVE_PATHS: string[] = [
-  // -- Wire-level (always present) --
-  '*.password',
-  '*.passwordHash',
-  '*.password_hash',
-  '*.refreshToken',
-  '*.refresh_token',
-  '*.accessToken',
-  '*.access_token',
-  '*.tokenHash',
-  '*.token_hash',
-  '*.jwtSecret',
-  '*.jwt_secret',
-
-  // -- Provider keys --
-  '*.openaiApiKey',
-  '*.openai_api_key',
-  '*.anthropicApiKey',
-  '*.anthropic_api_key',
-  '*.smtpPassword',
-  '*.smtp_password',
-  '*.uaePassClientSecret',
-  '*.uae_pass_client_secret',
-  '*.supabaseServiceRoleKey',
-  '*.supabase_service_role_key',
-
-  // -- Project-specific contract fields --
-  '*.contractBody',
-  '*.contract_body',
-  '*.signerEmail',
-  '*.signer_email',
-  '*.signerPhone',
-  '*.signer_phone',
-  '*.emiratesId',
-  '*.emirates_id',
-  '*.signatureImage',
-  '*.signature_image',
-  '*.aiPromptPayload',
-  '*.ai_prompt_payload',
-
-  // -- M1a contract body (bilingual) — see types/contracts.types.ts
-  //    M1A_SENSITIVE_FIELD_EXTENSIONS. Both camelCase (API surface) and
-  //    snake_case (DB column names that may surface in raw row dumps) are
-  //    listed because pino-redact matches literal keys.
-  '*.bodyEn',
-  '*.body_en',
-  '*.bodyAr',
-  '*.body_ar',
-
-  // -- Common request/response top-level shapes --
+  // -- Wire-level: password --
+  'password',
   'req.body.password',
+  'req.body.*.password',
+  'req.query.password',
+  'req.params.password',
+  '*.password',
+  '*.*.password',
+
+  // -- Wire-level: passwordHash / password_hash --
+  'passwordHash',
+  'req.body.passwordHash',
+  'req.body.*.passwordHash',
+  'req.query.passwordHash',
+  'req.params.passwordHash',
+  '*.passwordHash',
+  '*.*.passwordHash',
+  'password_hash',
+  'req.body.password_hash',
+  'req.body.*.password_hash',
+  'req.query.password_hash',
+  'req.params.password_hash',
+  '*.password_hash',
+  '*.*.password_hash',
+
+  // -- Wire-level: refreshToken / refresh_token --
+  'refreshToken',
   'req.body.refreshToken',
+  'req.body.*.refreshToken',
+  'req.query.refreshToken',
+  'req.params.refreshToken',
+  '*.refreshToken',
+  '*.*.refreshToken',
+  'refresh_token',
+  'req.body.refresh_token',
+  'req.body.*.refresh_token',
+  'req.query.refresh_token',
+  'req.params.refresh_token',
+  '*.refresh_token',
+  '*.*.refresh_token',
+
+  // -- Wire-level: accessToken / access_token --
+  'accessToken',
   'req.body.accessToken',
+  'req.body.*.accessToken',
+  'req.query.accessToken',
+  'req.params.accessToken',
+  '*.accessToken',
+  '*.*.accessToken',
+  'access_token',
+  'req.body.access_token',
+  'req.body.*.access_token',
+  'req.query.access_token',
+  'req.params.access_token',
+  '*.access_token',
+  '*.*.access_token',
+
+  // -- Wire-level: tokenHash / token_hash (TokenBlacklistEntry @internal) --
+  'tokenHash',
+  'req.body.tokenHash',
+  'req.body.*.tokenHash',
+  'req.query.tokenHash',
+  'req.params.tokenHash',
+  '*.tokenHash',
+  '*.*.tokenHash',
+  'token_hash',
+  'req.body.token_hash',
+  'req.body.*.token_hash',
+  'req.query.token_hash',
+  'req.params.token_hash',
+  '*.token_hash',
+  '*.*.token_hash',
+
+  // -- Wire-level: jwtSecret / jwt_secret --
+  'jwtSecret',
+  'req.body.jwtSecret',
+  'req.body.*.jwtSecret',
+  'req.query.jwtSecret',
+  'req.params.jwtSecret',
+  '*.jwtSecret',
+  '*.*.jwtSecret',
+  'jwt_secret',
+  'req.body.jwt_secret',
+  'req.body.*.jwt_secret',
+  'req.query.jwt_secret',
+  'req.params.jwt_secret',
+  '*.jwt_secret',
+  '*.*.jwt_secret',
+
+  // -- Provider keys: openaiApiKey / openai_api_key --
+  'openaiApiKey',
+  'req.body.openaiApiKey',
+  'req.body.*.openaiApiKey',
+  'req.query.openaiApiKey',
+  'req.params.openaiApiKey',
+  '*.openaiApiKey',
+  '*.*.openaiApiKey',
+  'openai_api_key',
+  'req.body.openai_api_key',
+  'req.body.*.openai_api_key',
+  'req.query.openai_api_key',
+  'req.params.openai_api_key',
+  '*.openai_api_key',
+  '*.*.openai_api_key',
+
+  // -- Provider keys: anthropicApiKey / anthropic_api_key --
+  'anthropicApiKey',
+  'req.body.anthropicApiKey',
+  'req.body.*.anthropicApiKey',
+  'req.query.anthropicApiKey',
+  'req.params.anthropicApiKey',
+  '*.anthropicApiKey',
+  '*.*.anthropicApiKey',
+  'anthropic_api_key',
+  'req.body.anthropic_api_key',
+  'req.body.*.anthropic_api_key',
+  'req.query.anthropic_api_key',
+  'req.params.anthropic_api_key',
+  '*.anthropic_api_key',
+  '*.*.anthropic_api_key',
+
+  // -- Provider keys: smtpPassword / smtp_password --
+  'smtpPassword',
+  'req.body.smtpPassword',
+  'req.body.*.smtpPassword',
+  'req.query.smtpPassword',
+  'req.params.smtpPassword',
+  '*.smtpPassword',
+  '*.*.smtpPassword',
+  'smtp_password',
+  'req.body.smtp_password',
+  'req.body.*.smtp_password',
+  'req.query.smtp_password',
+  'req.params.smtp_password',
+  '*.smtp_password',
+  '*.*.smtp_password',
+
+  // -- Provider keys: uaePassClientSecret / uae_pass_client_secret --
+  'uaePassClientSecret',
+  'req.body.uaePassClientSecret',
+  'req.body.*.uaePassClientSecret',
+  'req.query.uaePassClientSecret',
+  'req.params.uaePassClientSecret',
+  '*.uaePassClientSecret',
+  '*.*.uaePassClientSecret',
+  'uae_pass_client_secret',
+  'req.body.uae_pass_client_secret',
+  'req.body.*.uae_pass_client_secret',
+  'req.query.uae_pass_client_secret',
+  'req.params.uae_pass_client_secret',
+  '*.uae_pass_client_secret',
+  '*.*.uae_pass_client_secret',
+
+  // -- Provider keys: supabaseServiceRoleKey / supabase_service_role_key --
+  'supabaseServiceRoleKey',
+  'req.body.supabaseServiceRoleKey',
+  'req.body.*.supabaseServiceRoleKey',
+  'req.query.supabaseServiceRoleKey',
+  'req.params.supabaseServiceRoleKey',
+  '*.supabaseServiceRoleKey',
+  '*.*.supabaseServiceRoleKey',
+  'supabase_service_role_key',
+  'req.body.supabase_service_role_key',
+  'req.body.*.supabase_service_role_key',
+  'req.query.supabase_service_role_key',
+  'req.params.supabase_service_role_key',
+  '*.supabase_service_role_key',
+  '*.*.supabase_service_role_key',
+
+  // -- Project-specific: contractBody / contract_body --
+  'contractBody',
+  'req.body.contractBody',
+  'req.body.*.contractBody',
+  'req.query.contractBody',
+  'req.params.contractBody',
+  '*.contractBody',
+  '*.*.contractBody',
+  'contract_body',
+  'req.body.contract_body',
+  'req.body.*.contract_body',
+  'req.query.contract_body',
+  'req.params.contract_body',
+  '*.contract_body',
+  '*.*.contract_body',
+
+  // -- Project-specific: signerEmail / signer_email --
+  'signerEmail',
+  'req.body.signerEmail',
+  'req.body.*.signerEmail',
+  'req.query.signerEmail',
+  'req.params.signerEmail',
+  '*.signerEmail',
+  '*.*.signerEmail',
+  'signer_email',
+  'req.body.signer_email',
+  'req.body.*.signer_email',
+  'req.query.signer_email',
+  'req.params.signer_email',
+  '*.signer_email',
+  '*.*.signer_email',
+
+  // -- Project-specific: signerPhone / signer_phone --
+  'signerPhone',
+  'req.body.signerPhone',
+  'req.body.*.signerPhone',
+  'req.query.signerPhone',
+  'req.params.signerPhone',
+  '*.signerPhone',
+  '*.*.signerPhone',
+  'signer_phone',
+  'req.body.signer_phone',
+  'req.body.*.signer_phone',
+  'req.query.signer_phone',
+  'req.params.signer_phone',
+  '*.signer_phone',
+  '*.*.signer_phone',
+
+  // -- Project-specific: emiratesId / emirates_id --
+  'emiratesId',
+  'req.body.emiratesId',
+  'req.body.*.emiratesId',
+  'req.query.emiratesId',
+  'req.params.emiratesId',
+  '*.emiratesId',
+  '*.*.emiratesId',
+  'emirates_id',
+  'req.body.emirates_id',
+  'req.body.*.emirates_id',
+  'req.query.emirates_id',
+  'req.params.emirates_id',
+  '*.emirates_id',
+  '*.*.emirates_id',
+
+  // -- Project-specific: signatureImage / signature_image --
+  'signatureImage',
+  'req.body.signatureImage',
+  'req.body.*.signatureImage',
+  'req.query.signatureImage',
+  'req.params.signatureImage',
+  '*.signatureImage',
+  '*.*.signatureImage',
+  'signature_image',
+  'req.body.signature_image',
+  'req.body.*.signature_image',
+  'req.query.signature_image',
+  'req.params.signature_image',
+  '*.signature_image',
+  '*.*.signature_image',
+
+  // -- Project-specific: aiPromptPayload / ai_prompt_payload --
+  'aiPromptPayload',
+  'req.body.aiPromptPayload',
+  'req.body.*.aiPromptPayload',
+  'req.query.aiPromptPayload',
+  'req.params.aiPromptPayload',
+  '*.aiPromptPayload',
+  '*.*.aiPromptPayload',
+  'ai_prompt_payload',
+  'req.body.ai_prompt_payload',
+  'req.body.*.ai_prompt_payload',
+  'req.query.ai_prompt_payload',
+  'req.params.ai_prompt_payload',
+  '*.ai_prompt_payload',
+  '*.*.ai_prompt_payload',
+
+  // -- M1a contract body (bilingual): bodyEn / body_en --
+  //    See types/contracts.types.ts M1A_SENSITIVE_FIELD_EXTENSIONS.
+  'bodyEn',
+  'req.body.bodyEn',
+  'req.body.*.bodyEn',
+  'req.query.bodyEn',
+  'req.params.bodyEn',
+  '*.bodyEn',
+  '*.*.bodyEn',
+  'body_en',
+  'req.body.body_en',
+  'req.body.*.body_en',
+  'req.query.body_en',
+  'req.params.body_en',
+  '*.body_en',
+  '*.*.body_en',
+
+  // -- M1a contract body (bilingual): bodyAr / body_ar --
+  'bodyAr',
+  'req.body.bodyAr',
+  'req.body.*.bodyAr',
+  'req.query.bodyAr',
+  'req.params.bodyAr',
+  '*.bodyAr',
+  '*.*.bodyAr',
+  'body_ar',
+  'req.body.body_ar',
+  'req.body.*.body_ar',
+  'req.query.body_ar',
+  'req.params.body_ar',
+  '*.body_ar',
+  '*.*.body_ar',
+
+  // -- M1c AI extraction stub (S8 AC-S8-06): extractedText / extracted_text --
+  //    Treated as ai_prompt_payload alias per project.config.json. The AI
+  //    controller already avoids logging req.body, but this acts as the
+  //    safety net for any future code path that does.
+  'extractedText',
+  'req.body.extractedText',
+  'req.body.*.extractedText',
+  'req.query.extractedText',
+  'req.params.extractedText',
+  '*.extractedText',
+  '*.*.extractedText',
+  'extracted_text',
+  'req.body.extracted_text',
+  'req.body.*.extracted_text',
+  'req.query.extracted_text',
+  'req.params.extracted_text',
+  '*.extracted_text',
+  '*.*.extracted_text',
+
+  // -- Response envelope: passwordHash on res.body / res.user --
+  //    Preserved from M0 — covers the auth login response shape.
   'res.body.passwordHash',
+  'res.body.*.passwordHash',
 ];
 
 const baseConfig = {
