@@ -9,6 +9,8 @@ import permissionRouter from './permission.routes';
 import contractsRouter from './contracts.routes';
 import importBatchesRouter from './import-batches.routes';
 import aiRouter from './ai.routes';
+import approvalsRouter from './approvals.routes';
+import adminRouter from './admin';
 
 const v1Router = Router();
 
@@ -23,5 +25,9 @@ v1Router.use('/import-batches', importBatchesRouter);
 // M1c — NEW /api/v1/ai/* namespace (Q3-OI-E / collision-report MD-4).
 // M4 will append additional AI endpoints to ai.routes.ts.
 v1Router.use('/ai', aiRouter);
+
+// M2 — Approval Workflows (Q3-OI-E)
+v1Router.use('/approvals', approvalsRouter);
+v1Router.use('/admin', adminRouter);
 
 export default v1Router;

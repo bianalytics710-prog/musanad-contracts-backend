@@ -46,6 +46,10 @@ import topRouter from './routes';
 import { closePool, pool } from './database/config';
 import { telemetry } from './utils/telemetry.util';
 import { closeBrowser as closePuppeteerBrowser } from './services/export/puppeteer-pool.service';
+import {
+  startApprovalEscalationCron,
+  stopApprovalEscalationCron,
+} from './services/approval-escalation.cron.service';
 
 const app = express();
 
@@ -123,12 +127,22 @@ const server = app.listen(port, () => {
     },
     `Musanad Contracts backend listening on port ${port}`,
   );
+
+  // M2 / S9 — start approval-escalation cron driver. The driver is a no-op
+  // in NODE_ENV=test (smoke harness owns scheduling). On boot the driver
+  // simply schedules the cron task; the first sweep fires per the cron
+  // expression (default every 15 minutes).
+  startApprovalEscalationCron();
 });
 
 // --- Graceful shutdown ---
 const shutdown = async (signal: string): Promise<void> => {
   logger.info({ action: 'server.shutdown', signal }, 'Shutdown initiated');
   try {
+    // Stop the approval-escalation cron driver before draining requests so
+    // no new sweep starts mid-shutdown.
+    stopApprovalEscalationCron();
+
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
     });

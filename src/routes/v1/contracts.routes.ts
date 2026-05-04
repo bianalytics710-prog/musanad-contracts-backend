@@ -30,6 +30,7 @@
  */
 import { Router } from 'express';
 import { contractsController } from '../../controllers/contracts.controller';
+import { approvalController } from '../../controllers/approval.controller';
 import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import {
@@ -46,7 +47,7 @@ import {
   CreateContractVersionDtoSchema,
   SetContractTagsDtoSchema,
   UpdateContractDtoSchema,
-  UpdateContractStatusDtoSchema,
+  UpdateContractStatusUserDtoSchema,
 } from '../../schemas/contracts.schemas';
 import {
   ContractExportPdfQuerySchema,
@@ -54,6 +55,10 @@ import {
   PaymentScheduleBulkReplaceSchema,
   PaymentScheduleListQuerySchema,
 } from '../../schemas/payment-schedule.schemas';
+import {
+  RouteInitPreviewSchema,
+  SubmitForApprovalSchema,
+} from '../../schemas/approval.schemas';
 
 const router = Router();
 
@@ -140,6 +145,45 @@ router.get(
 );
 
 // ============================================================
+// M2 :id-prefixed sub-routes (W1 — POST literals before bare :id):
+//   POST /:id/approval-chain/preview   — S6 (BEFORE the GET /:id/approval-chain literal)
+//   POST /:id/submit-for-approval      — S7
+//   GET  /:id/approval-chain           — S10 (most-recent chain)
+// ============================================================
+
+// POST /api/v1/contracts/:id/approval-chain/preview — S6
+//   approval.matrix.read covers preview + chain visibility (Q3-OI-F kept POST + body
+//   to keep commercial value out of access logs).
+router.post(
+  '/:id/approval-chain/preview',
+  authedWriteRateLimiter,
+  authorise(['approval.matrix.read']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(RouteInitPreviewSchema, 'body'),
+  approvalController.routeInitPreview,
+);
+
+// POST /api/v1/contracts/:id/submit-for-approval — S7
+router.post(
+  '/:id/submit-for-approval',
+  authedWriteRateLimiter,
+  authorise(['approval.submit_for_review']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(SubmitForApprovalSchema, 'body'),
+  approvalController.submitForApproval,
+);
+
+// GET /api/v1/contracts/:id/approval-chain — S10
+//   Standard contract-read narrowing — RLS auto-narrows via parent contract.
+router.get(
+  '/:id/approval-chain',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  approvalController.chainGetByContract,
+);
+
+// ============================================================
 // M1a :id-prefixed routes (declared after M1b literal /export.xlsx
 // per W1; relative ordering among M1a routes preserved)
 // ============================================================
@@ -172,13 +216,28 @@ router.delete(
   contractsController.delete,
 );
 
-// PATCH /api/v1/contracts/:id/status — status update (S6)
+// PATCH /api/v1/contracts/:id/status — status update (M1a S6, extended by M2 / AE-2)
+//
+// M2 / AE-2: replaces fn_contract_status_update with fn_contract_status_update_user
+// (INVOKER, drafter narrow transitions). Wire signature unchanged. Per-transition
+// permission gates are enforced inside the fn_; the route-level authorise()
+// keeps the M1a contract.status.update grant as a baseline so the BE middleware
+// can produce a clear 403 for callers without ANY status-mutation grant. Drafters
+// + admins must additionally hold approval.submit_for_review (for in_review
+// transitions) or contract.delete / contract.edit per-transition; the fn_ raises
+// 42501 → 403 with a precise message when the per-transition grant is missing.
 router.patch(
   '/:id/status',
   authedWriteRateLimiter,
-  authorise(['contract.status.update']),
+  authoriseAnyOf([
+    'contract.status.update',
+    'approval.submit_for_review',
+    'contract.edit',
+    'contract.delete',
+    'contract.draft',
+  ]),
   validate(ContractIdParamSchema, 'params'),
-  validate(UpdateContractStatusDtoSchema, 'body'),
+  validate(UpdateContractStatusUserDtoSchema, 'body'),
   contractsController.updateStatus,
 );
 

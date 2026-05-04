@@ -48,7 +48,15 @@ const NonEmptyString = (msg: string, max?: number): z.ZodString => {
 // 2. Enum schemas — map 1:1 to TS union types
 // ------------------------------------------------------------
 
-/** AC-S6-03: 14-state workflow. Message matches AC-S6-03 'Invalid status'. */
+/**
+ * AC-S6-03 / AC-S12-01: 16-state workflow.
+ *
+ * M2 (AE-3 / migration 023) widened the contract.status CHECK enum with
+ * 'in_approval' + 'cancelled'. Mirror the DB constraint exactly so the BE
+ * Zod layer + FE consumers stay aligned. Per-transition validity is
+ * enforced separately by `UpdateContractStatusUserDtoSchema` and the DB
+ * fn_contract_status_update_user whitelist.
+ */
 export const ContractStatusSchema = z.enum(
   [
     'draft',
@@ -65,6 +73,9 @@ export const ContractStatusSchema = z.enum(
     'terminated',
     'rejected',
     'resubmission_requested',
+    // M2 / AE-3 additions
+    'in_approval',
+    'cancelled',
   ],
   { errorMap: () => ({ message: 'Invalid status' }) },
 );
@@ -86,6 +97,10 @@ export const RelationshipTypeSchema = z.enum(
   { errorMap: () => ({ message: 'Invalid relationship type' }) },
 );
 
+/**
+ * 14-value activity-type union — mirrors migration 027 CHECK IN-list.
+ * M1a 7 + M1b 2 + M2 5 = 14.
+ */
 export const ActivityTypeSchema = z.enum([
   'created',
   'updated',
@@ -94,6 +109,15 @@ export const ActivityTypeSchema = z.enum([
   'tagged',
   'soft_deleted',
   'restored',
+  // M1b 011 additions
+  'payment_schedule_replaced',
+  'exported',
+  // M2 / AE-1 — migration 027 additions
+  'submitted_for_approval',
+  'approval_decided',
+  'approval_reassigned',
+  'approval_escalated',
+  'approval_delegated',
 ]);
 
 // ------------------------------------------------------------
@@ -257,6 +281,94 @@ export const UpdateContractStatusDtoSchema = z.object({
   reason: z.string().trim().max(2000).nullable().optional(),
 });
 export type UpdateContractStatusDtoInferred = z.infer<typeof UpdateContractStatusDtoSchema>;
+
+// ------------------------------------------------------------
+// 6b. UpdateContractStatusUserDtoSchema — PATCH /:id/status (M2 / AE-2 / S12)
+// ------------------------------------------------------------
+
+/**
+ * Drafter-facing PATCH /api/v1/contracts/:id/status DTO.
+ *
+ * AE-2 / Q2=C: replaces the M1a placeholder schema on the wire (same field
+ * shape, narrower transition matrix). The fn_contract_status_update_user
+ * hard-coded transition whitelist is the canonical source of truth; this
+ * schema mirrors it as a defense-in-depth Zod check that returns 400 with
+ * a clear `field: 'newStatus'` message before the DB call.
+ *
+ * Allowed transitions (M2-NEW-1 / AC-S12-01):
+ *   draft → in_review                     (approval.submit_for_review)
+ *   in_review → in_approval               (approval.submit_for_review;
+ *                                          atomically calls fn_approval_route_init)
+ *   in_review → draft                     (approval.submit_for_review own OR contract.delete)
+ *   approved → active                     (contract.edit)
+ *   <non-terminal> → cancelled            (contract.delete OR contract.draft+ownership)
+ *
+ * REJECTED at Zod layer with a 400 hint before fn_ call:
+ *   in_approval → approved | rejected | resubmission_requested
+ *     → "Use fn_approval_decide for in_approval transitions"
+ *
+ * (The DB fn_ also raises 409 with the same message for defense in depth —
+ *  this Zod check is purely a friendlier early-out for the FE.)
+ */
+const TERMINAL_OR_LOCKED_FROM_CANCEL: ReadonlySet<string> = new Set([
+  'approved',
+  'active',
+  'expired',
+  'terminated',
+  'cancelled',
+  'rejected',
+  'fully_signed',
+  'expiring_soon',
+  'amended',
+  'renewed',
+]);
+
+export const UpdateContractStatusUserDtoSchema = z
+  .object({
+    newStatus: ContractStatusSchema, // AC-S12-01 — 16-value enum (post-AE-3)
+    reason: z.string().trim().max(2000).nullable().optional(),
+  })
+  .superRefine((val, ctx) => {
+    // Narrow: cannot directly drive in_approval → terminal via this endpoint.
+    // The fn_ enforces this with 409; mirror it at Zod for an earlier 400.
+    // We cannot know the current `from` status here (Zod is body-only) —
+    // so only the *target* side is enforceable client-side. The fn_ handles
+    // the source-side (from='in_approval' AND to in (approved|rejected|
+    // resubmission_requested)) check authoritatively at 409.
+    //
+    // What we DO enforce at this layer: newStatus must be a status this
+    // endpoint can ever set. Statuses owned exclusively by other paths
+    // (e.g. signature lifecycle states like awaiting_signature_*, fully_signed,
+    // expiring_soon, expired, amended, renewed, terminated) and the
+    // approval-engine-only terminal states (approved, rejected,
+    // resubmission_requested) are rejected here with field='newStatus'.
+    const allowedTargets = new Set<string>([
+      'draft',
+      'in_review',
+      'in_approval',
+      'active',
+      'cancelled',
+    ]);
+    if (!allowedTargets.has(val.newStatus)) {
+      // Match the fn_ raise-message wording when possible.
+      const msg =
+        val.newStatus === 'approved' ||
+        val.newStatus === 'rejected' ||
+        val.newStatus === 'resubmission_requested'
+          ? 'Use fn_approval_decide for in_approval transitions'
+          : `newStatus '${val.newStatus}' is not a valid target for this endpoint`;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['newStatus'],
+        message: msg,
+      });
+    }
+    // unused but documented for future per-target reasoning.
+    void TERMINAL_OR_LOCKED_FROM_CANCEL;
+  });
+export type UpdateContractStatusUserDtoInferred = z.infer<
+  typeof UpdateContractStatusUserDtoSchema
+>;
 
 // ------------------------------------------------------------
 // 7. SetContractTagsDtoSchema — PUT /:id/tags (S8)

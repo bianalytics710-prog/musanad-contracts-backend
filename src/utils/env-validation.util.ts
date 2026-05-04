@@ -80,6 +80,10 @@ const envSchema = z.object({
   // OpenTelemetry (optional — stub if not set)
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().optional(),
   OTEL_SERVICE_NAME: z.string().optional(),
+
+  // M2 — Approval escalation cron (S9). Default '*/15 * * * *' (every 15
+  // minutes). Disabled in NODE_ENV=test (smoke harness short-circuit).
+  APPROVAL_ESCALATION_INTERVAL_CRON: z.string().min(1).default('*/15 * * * *'),
 });
 
 export type Env = z.infer<typeof envSchema>;

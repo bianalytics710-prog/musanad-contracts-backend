@@ -4,9 +4,11 @@ info:
   description: |
     Musanad Contracts Hub platform API. Covers M0 (authentication, user / role /
     permission catalog, health probe), M1a (contract core CRUD + lifecycle),
-    M1b (Compose Wizard + Payment Schedules + PDF/XLSX exports), and M1c
+    M1b (Compose Wizard + Payment Schedules + PDF/XLSX exports), M1c
     (Bulk & Manual Import — 4 import-batch endpoints + 1 AI extraction stub +
-    additive extension of GET /contracts).
+    additive extension of GET /contracts), and M2 (Approval Workflows — 10 new
+    endpoints under /approvals/* and /admin/approval-* + extension of
+    PATCH /contracts/:id/status).
 
     All routes are prefixed with `/api/v1` except `/api/health` (infrastructural).
 
@@ -15,7 +17,15 @@ info:
     `app.current_user_id` session GUC, set by middleware before every fn_ call.
 
     Every response carries an `X-Request-ID` correlation header.
-  version: 0.4.0
+
+    M2 introduces two new namespaces — `/api/v1/approvals/*` (drafter / approver
+    actions) and `/api/v1/admin/approval-*` (admin matrix + chain monitor + step
+    reassign). The approval engine writes the contract.status state machine via
+    fn_contract_status_update_user (drafter, INVOKER) and a system-only
+    fn_contract_status_update_internal (DEFINER, called only by fn_approval_decide
+    on terminal chain transitions). Escalation (fn_approval_escalate) is invoked
+    by an in-process node-cron driver, not exposed via HTTP.
+  version: 0.5.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -77,6 +87,28 @@ tags:
       ai_prompt_payload (project.config.json sensitiveFields) and pino-redacted
       across 7 paths (top-level, req.body.*, req.query.*, req.params.*, *.X,
       *.*.X) — Codex M1 fix.
+  - name: M2 — Approvals
+    description: |
+      Approval engine — drafter + approver actions (M2). 6 endpoints under
+      /api/v1/approvals/* and /api/v1/contracts/:id/* covering S1 my-pending
+      inbox, S2 decide (approve / reject / request_resubmission), S3 voluntary
+      delegation, S6 chain preview, S7 submit-for-approval, S10 read most-recent
+      chain. The engine is DB-first — every endpoint is a thin pass-through to a
+      fn_approval_* PL/pgSQL function with FOR UPDATE row locks on the relevant
+      step / chain / contract. decisionNote is sensitive (pino-redacted on
+      logs across 14 paths and JSONB-redacted by fn_audit_trigger). Approval
+      events emit only contract_activity rows (HQ1 / HQ7 — no notification
+      table). fn_approval_escalate (S9) is system-only; invoked by a node-cron
+      driver inside the BE process, not exposed via HTTP.
+  - name: M2 — Admin Approvals
+    description: |
+      Admin oversight + configuration endpoints (M2). 4 endpoints under
+      /api/v1/admin/approval-* covering S4 matrix list, S5 matrix replace
+      (PUT — atomic upsert via fn_approval_matrix_set with pg_advisory_xact_lock
+      on the (contract_type, value range) hash), S8 admin step reassign, S11
+      role-aware chain monitor list. matrixSnapshot is sensitive (pino-redacted
+      and audit-redacted by fn_audit_trigger). The /api/v1/admin/* namespace is
+      first introduced in M2 — convention parity with /api/v1/ai/* (M1c).
 
 components:
   securitySchemes:
@@ -403,11 +435,17 @@ components:
     ContractStatus:
       type: string
       description: |
-        14-state contract lifecycle. M1a only validates enum membership;
-        state-machine transitions (which terminal -> next is legal) land in M2.
+        16-state contract lifecycle. M1a established 14 values; M2 extends the
+        CHECK to 16 with `in_approval` and `cancelled` (migration 023). The
+        enum membership is only one of two gates — M2 also enforces a per-
+        transition matrix in fn_contract_status_update_user (drafter wrapper)
+        and fn_contract_status_update_internal (system, called only by
+        fn_approval_decide). See PATCH /contracts/{id}/status for the wire
+        contract; see the M2 data dictionary for the full transition matrix.
       enum:
         - draft
         - in_review
+        - in_approval
         - approved
         - awaiting_signature_employer
         - awaiting_signature_counterparty
@@ -420,6 +458,7 @@ components:
         - terminated
         - rejected
         - resubmission_requested
+        - cancelled
 
     ContractLanguage:
       type: string
@@ -1345,6 +1384,367 @@ components:
             Optional. When the AI detects a contract number on the document, the
             FE pre-checks against existing active contracts; matching rows are
             skipped and duplicatesSkipped is incremented (AC-S5-09).
+
+    # ===================================================================
+    # M2 — Approval Workflows schemas
+    # ===================================================================
+
+    UserRef:
+      type: object
+      description: Lightweight user reference (id + display fields). Reused across M2 chain payloads.
+      properties:
+        id: { type: integer, format: int64 }
+        firstName: { type: string }
+        lastName: { type: string }
+        email: { type: string, format: email }
+
+    ApprovalChainStatus:
+      type: string
+      description: Approval chain lifecycle. `in_progress` is the only non-terminal state. `cancelled` is set when a drafter or admin cancels a contract before chain completion (AE-3 contract.status='cancelled' counterpart).
+      enum: [in_progress, approved, rejected, resubmission_requested, cancelled]
+
+    ApprovalStepStatus:
+      type: string
+      description: |
+        Approval step lifecycle. Note `delegated` and `reassigned` are reserved on the CHECK constraint but unwritten by M2 — fn_approval_delegate and fn_approval_reassign leave step.status='pending' (AC-S3-01 / AC-S8-03). Forward-compat reservation only.
+      enum: [pending, approved, rejected, skipped, escalated, resubmission_requested, delegated, reassigned]
+
+    ApprovalDecisionType:
+      type: string
+      enum: [approve, reject, request_resubmission, delegate, reassign, escalate]
+
+    ApprovalPendingSort:
+      type: string
+      enum: [oldest, newest, highest_value]
+
+    ApprovalMatrixRule:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        contractType: { type: string }
+        valueMin: { type: number }
+        valueMax: { type: number, nullable: true }
+        stepOrder: { type: integer }
+        parallelGroup: { type: integer, nullable: true }
+        approverRole: { type: string }
+        isRequired: { type: boolean }
+        escalationRole: { type: string, nullable: true }
+        escalationAfterHours: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ApprovalMatrixRuleInput:
+      type: object
+      required: [stepOrder, approverRole]
+      properties:
+        stepOrder: { type: integer, minimum: 1 }
+        parallelGroup:
+          type: integer
+          nullable: true
+          description: When set, MUST equal stepOrder (AC-S5-05).
+        approverRole:
+          type: string
+          description: Must exist in role.name (AC-S5-03).
+        isRequired: { type: boolean, default: true }
+        escalationRole: { type: string, nullable: true }
+        escalationAfterHours: { type: integer, nullable: true, minimum: 1 }
+
+    UpdateApprovalMatrixDto:
+      type: object
+      required: [contractType, valueMin, rules]
+      properties:
+        contractType:
+          type: string
+          description: M1a 8-value contract_type enum value.
+        valueMin:
+          type: number
+          minimum: 0
+        valueMax:
+          type: number
+          nullable: true
+          description: ">= valueMin if set; NULL = no upper bound."
+        rules:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ApprovalMatrixRuleInput" }
+
+    ApprovalMatrixListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalMatrixRule" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ApprovalMatrixSetResponse:
+      type: object
+      properties:
+        contractType: { type: string }
+        minValueAed: { type: number }
+        maxValueAed: { type: number, nullable: true }
+        ruleCount: { type: integer }
+        ruleIds:
+          type: array
+          items: { type: integer, format: int64 }
+
+    RouteInitPreviewRequest:
+      type: object
+      required: [contractType, valueAed]
+      properties:
+        contractType: { type: string }
+        valueAed: { type: number, minimum: 0 }
+
+    RouteInitPreviewStep:
+      type: object
+      properties:
+        stepOrder: { type: integer }
+        parallelGroup: { type: integer, nullable: true }
+        approverRole: { type: string }
+        isRequired: { type: boolean }
+        escalationRole: { type: string, nullable: true }
+        escalationAfterHours: { type: integer, nullable: true }
+
+    RouteInitPreviewResponse:
+      type: object
+      properties:
+        contractType: { type: string }
+        valueAed: { type: number }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/RouteInitPreviewStep" }
+        hasNoMatchingRule:
+          type: boolean
+          description: TRUE when matrix has no rule for the (contract_type, valueAed) pair (AC-S6-05).
+
+    SubmitForApprovalResponse:
+      type: object
+      properties:
+        chainId: { type: integer, format: int64 }
+        contractId: { type: integer, format: int64 }
+        totalSteps: { type: integer }
+        currentStepOrder: { type: integer, description: "Always 1 for a new chain." }
+        newContractStatus: { type: string, enum: [in_approval] }
+
+    DecideApprovalDto:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [approve, reject, request_resubmission]
+          description: |
+            delegate / reassign / escalate are SEPARATE endpoints; fn_approval_decide rejects them at step 1 with HTTP 400. (AC-S2-01)
+        decisionNote:
+          type: string
+          description: |
+            Required when decision in (reject, request_resubmission). Sensitive — pino-redacted on logs (14 paths) and JSONB-redacted by fn_audit_trigger. (AC-S2-02 / AC-S2-03)
+
+    DecideApprovalResponse:
+      type: object
+      properties:
+        stepId: { type: integer, format: int64 }
+        chainId: { type: integer, format: int64 }
+        contractId: { type: integer, format: int64 }
+        newStepStatus: { $ref: "#/components/schemas/ApprovalStepStatus" }
+        newChainStatus: { $ref: "#/components/schemas/ApprovalChainStatus" }
+        newContractStatus: { $ref: "#/components/schemas/ContractStatus" }
+        advancedToStepOrder:
+          type: integer
+          nullable: true
+          description: NULL when chain halted or completed.
+        allChainStepsResolved:
+          type: boolean
+          description: TRUE iff chain.status moved out of in_progress.
+
+    DelegateApprovalDto:
+      type: object
+      required: [delegatedToUserId]
+      properties:
+        delegatedToUserId:
+          type: integer
+          format: int64
+          description: |
+            Target user.id. Must be active, hold a compatible approver role
+            (contract_approver / contract_approver_2 / legal_counsel) and NOT
+            equal the caller (AC-S3-03 / AC-S3-04).
+        decisionNote:
+          type: string
+          description: Optional. Sensitive — pino-redacted.
+
+    DelegateApprovalResponse:
+      type: object
+      properties:
+        stepId: { type: integer, format: int64 }
+        delegatedTo: { $ref: "#/components/schemas/UserRef" }
+        decisionId: { type: integer, format: int64 }
+
+    ReassignApprovalDto:
+      type: object
+      required: [reassignedToUserId]
+      properties:
+        reassignedToUserId:
+          type: integer
+          format: int64
+          description: |
+            Target user.id. Role MUST equal step.approver_role OR be one of
+            (platform_admin / legal_counsel / Super Admin). (AC-S8-05)
+        decisionNote:
+          type: string
+          description: Optional. Sensitive — pino-redacted.
+
+    ReassignApprovalResponse:
+      type: object
+      properties:
+        stepId: { type: integer, format: int64 }
+        originalApprover:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+          description: NULL when step had no prior approver_user_id (role-only assignment).
+        reassignedTo: { $ref: "#/components/schemas/UserRef" }
+        decisionId: { type: integer, format: int64 }
+
+    MyPendingApprovalListItem:
+      type: object
+      properties:
+        stepId: { type: integer, format: int64 }
+        chainId: { type: integer, format: int64 }
+        contractId: { type: integer, format: int64 }
+        contractNumber: { type: string }
+        contractTitleEn: { type: string, nullable: true }
+        contractTitleAr: { type: string, nullable: true }
+        valueAed: { type: number, nullable: true }
+        requesterUserRef: { $ref: "#/components/schemas/UserRef" }
+        stepOrder: { type: integer }
+        parallelGroup: { type: integer, nullable: true }
+        isRequired: { type: boolean }
+        hoursPending: { type: integer }
+        escalationRole: { type: string, nullable: true }
+        escalationAfterHours: { type: integer, nullable: true }
+
+    MyPendingApprovalListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/MyPendingApprovalListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ApprovalChainStepDecisionItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        decision: { $ref: "#/components/schemas/ApprovalDecisionType" }
+        decidedBy:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+          description: NULL for system-emitted (cron) escalation rows.
+        decidedAt: { type: string, format: date-time }
+        decisionNote:
+          type: string
+          nullable: true
+          description: Sensitive — redacted in audit_log.
+        delegatedTo:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        reassignedTo:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+
+    ApprovalChainStepDetail:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        stepOrder: { type: integer }
+        parallelGroup: { type: integer, nullable: true }
+        approverRole: { type: string }
+        approver:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        delegatedTo:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        reassignedTo:
+          allOf:
+            - $ref: "#/components/schemas/UserRef"
+          nullable: true
+        status: { $ref: "#/components/schemas/ApprovalStepStatus" }
+        isRequired: { type: boolean }
+        escalationRole: { type: string, nullable: true }
+        escalationAfterHours: { type: integer, nullable: true }
+        decidedAt: { type: string, format: date-time, nullable: true }
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalChainStepDecisionItem" }
+
+    ApprovalChainGetResponse:
+      type: object
+      description: matrixSnapshot is intentionally OMITTED from this projection (sensitive — visible only via admin / forensic paths).
+      properties:
+        chain:
+          type: object
+          properties:
+            id: { type: integer, format: int64 }
+            contractId: { type: integer, format: int64 }
+            status: { $ref: "#/components/schemas/ApprovalChainStatus" }
+            currentStepOrder: { type: integer }
+            submittedBy: { $ref: "#/components/schemas/UserRef" }
+            submittedAt: { type: string, format: date-time }
+            completedAt: { type: string, format: date-time, nullable: true }
+        steps:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalChainStepDetail" }
+
+    ApprovalChainListItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        contractId: { type: integer, format: int64 }
+        contractNumber: { type: string }
+        status: { $ref: "#/components/schemas/ApprovalChainStatus" }
+        currentStepOrder: { type: integer }
+        totalSteps: { type: integer }
+        submittedBy: { $ref: "#/components/schemas/UserRef" }
+        submittedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time, nullable: true }
+        hoursPending: { type: integer }
+
+    ApprovalChainListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalChainListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    UpdateContractStatusUserDto:
+      type: object
+      required: [newStatus]
+      description: |
+        M2 (AE-2) wire DTO for PATCH /contracts/{id}/status. Same field shape
+        as the M1a UpdateContractStatusDto (which is now deprecated as a type
+        alias) but newStatus is restricted to the per-transition matrix
+        enforced by fn_contract_status_update_user. Direct in_approval
+        terminal targets (approved / rejected / resubmission_requested) are
+        rejected with 409 — callers must use POST /approvals/{stepId}/decide.
+      properties:
+        newStatus: { $ref: "#/components/schemas/ContractStatus" }
+        reason:
+          type: string
+          description: Optional. Captured in metadata.reason of the status_changed contract_activity row.
+
+    UpdateContractStatusUserResponse:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        fromStatus: { $ref: "#/components/schemas/ContractStatus" }
+        toStatus: { $ref: "#/components/schemas/ContractStatus" }
+        changedAt: { type: string, format: date-time }
 
   responses:
     Unauthenticated:
@@ -3058,3 +3458,548 @@ x-paths-root:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # =====================================================================
+  # M2 — Approval Workflows
+  # =====================================================================
+
+  /approvals/my-pending:
+    get:
+      tags: [M2 — Approvals]
+      operationId: approvalListMyPending
+      summary: List pending approval steps assigned to the calling user
+      description: |
+        Paginated list of pending approval steps assigned to the calling user
+        via 4 OR-arms: (a) `approver_user_id = current_user`, (b)
+        `approver_role IN current_user_roles AND approver_user_id IS NULL`,
+        (c) `delegated_to = current_user`, (d) `reassigned_to = current_user`.
+        RLS narrows naturally via approval_step → approval_chain → contract.
+        DB function: `fn_approval_my_pending`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_approver, contract_approver_2, contract_drafter, executive]
+      x-acsCovered: [AC-S1-01, AC-S1-02, AC-S1-03, AC-S1-04, AC-S1-05, AC-S1-06]
+      parameters:
+        - $ref: "#/components/parameters/PageQuery"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: sort
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/ApprovalPendingSort" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MyPendingApprovalListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /approvals/{stepId}/decide:
+    post:
+      tags: [M2 — Approvals]
+      operationId: approvalDecide
+      summary: Approver acts on a pending step (approve / reject / request_resubmission)
+      description: |
+        Atomically inserts an approval_decision row, updates step + chain +
+        contract status as needed. Parallel-group aware (all-of vs any-of
+        derived from peer is_required pattern, M2-NEW-4). On terminal chain
+        transitions, calls fn_contract_status_update_internal (DEFINER) which
+        emits the lifecycle status_changed activity row; this fn separately
+        emits the rich `approval_decided` row (BE-M1b-004 audit-after-render).
+        DB function: `fn_approval_decide` (locks step + chain + contract FOR
+        UPDATE; NULL-safe actor check via IS NOT DISTINCT FROM, migration 031).
+
+        delegate / reassign / escalate are SEPARATE endpoints — fn_approval_decide rejects them at step 1 with 400.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_approver, contract_approver_2]
+      x-requiredPermissions: [approval.act]
+      x-acsCovered: [AC-S2-01, AC-S2-02, AC-S2-03, AC-S2-04, AC-S2-05, AC-S2-06, AC-S2-07, AC-S2-08, AC-S2-09]
+      parameters:
+        - name: stepId
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecideApprovalDto" }
+            examples:
+              approve:
+                summary: Approve
+                value: { decision: approve }
+              rejectWithNote:
+                summary: Reject with required note
+                value: { decision: reject, decisionNote: "Counterparty entity name does not match the ICA filing." }
+              requestResubmission:
+                summary: Request resubmission
+                value: { decision: request_resubmission, decisionNote: "Add the indemnification clause from template T-2024-12." }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DecideApprovalResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT — step already decided.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /approvals/{stepId}/delegate:
+    post:
+      tags: [M2 — Approvals]
+      operationId: approvalDelegate
+      summary: Approver voluntarily delegates a pending step to another user
+      description: |
+        Voluntary delegation by the assigned approver to another user with a
+        compatible role. Updates step.delegated_to (status remains 'pending';
+        AC-S3-01). Inserts approval_decision row with decision='delegate'.
+        Self-delegation is rejected (AC-S3-04).
+        DB function: `fn_approval_delegate` (locks step FOR UPDATE).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_approver, contract_approver_2]
+      x-requiredPermissions: [approval.act, approval.delegate]
+      x-acsCovered: [AC-S3-01, AC-S3-02, AC-S3-03, AC-S3-04, AC-S3-05, AC-S3-06]
+      parameters:
+        - name: stepId
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelegateApprovalDto" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegateApprovalResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT — step is not pending.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /admin/approval-matrix:
+    get:
+      tags: [M2 — Admin Approvals]
+      operationId: approvalMatrixList
+      summary: List active approval matrix rules
+      description: |
+        Paginated, ordered list of active approval matrix rules. Permission
+        gate `approval.matrix.read` (AC-S4-05). Ordered by contract_type ASC,
+        step_order ASC, parallel_group NULLS FIRST, approver_role ASC.
+        DB function: `fn_approval_matrix_list`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [approval.matrix.read]
+      x-acsCovered: [AC-S4-01, AC-S4-02, AC-S4-03, AC-S4-04, AC-S4-05]
+      parameters:
+        - $ref: "#/components/parameters/PageQuery"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: contractType
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalMatrixListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    put:
+      tags: [M2 — Admin Approvals]
+      operationId: approvalMatrixSet
+      summary: Atomic upsert/replace of approval matrix rules for a (contractType, value range)
+      description: |
+        Atomic upsert/replace of approval matrix rules for a (contract_type,
+        value range). fn_approval_matrix_set soft-deletes existing active rows
+        for the (contract_type, min, max) tuple and INSERTs the new ordered
+        rule set. PUT semantics chosen because the operation is replace-shaped
+        (idempotent body); POST creation is not modeled separately.
+        pg_advisory_xact_lock prevents concurrent admin races on the same range.
+        DB function: `fn_approval_matrix_set`.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [approval.matrix.write]
+      x-acsCovered: [AC-S5-01, AC-S5-02, AC-S5-03, AC-S5-04, AC-S5-05, AC-S5-06, AC-S5-07, AC-S5-08]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateApprovalMatrixDto" }
+            example:
+              contractType: service_agreement
+              valueMin: 0
+              valueMax: 50000
+              rules:
+                - { stepOrder: 1, approverRole: contract_approver, isRequired: true, escalationRole: legal_counsel, escalationAfterHours: 48 }
+                - { stepOrder: 2, approverRole: legal_counsel, isRequired: true }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalMatrixSetResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/approval-chain/preview:
+    post:
+      tags: [M2 — Approvals]
+      operationId: approvalChainPreview
+      summary: Read-only preview of which matrix rules would route a (contractType, valueAed) pair
+      description: |
+        Read-only preview of which matrix rules would apply to a given
+        (contractType, valueAed) pair. Does NOT persist a chain
+        (fn_approval_route_init_preview is STABLE — no INSERT/UPDATE/DELETE).
+        FE uses this to show 'will route to N approvers' before the drafter
+        clicks Submit (S7). POST + body chosen over GET + query string to
+        keep commercial value (valueAed) out of access logs.
+        DB function: `fn_approval_route_init_preview`.
+
+        NOTE: Express route registration order — this POST sub-path MUST be
+        registered BEFORE GET /contracts/{id}/approval-chain to avoid the
+        literal-segment shadow (mirrors M1b W1).
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter]
+      x-requiredPermissions: [approval.matrix.read]
+      x-acsCovered: [AC-S6-01, AC-S6-02, AC-S6-03, AC-S6-04, AC-S6-05]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RouteInitPreviewRequest" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RouteInitPreviewResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/submit-for-approval:
+    post:
+      tags: [M2 — Approvals]
+      operationId: approvalSubmitForApproval
+      summary: Atomically create approval chain and transition contract to in_approval
+      description: |
+        Atomically (a) creates a new approval_chain (matrix_snapshot frozen),
+        (b) INSERTs all approval_step rows from matched matrix rules,
+        (c) transitions contract.status from draft|in_review to in_approval,
+        (d) emits 'submitted_for_approval' contract_activity. Idempotency:
+        rejects with 409 if an in_progress chain already exists for this
+        contract (uq_approval_chain_one_active_per_contract is the DB backstop).
+        DB function: `fn_approval_route_init` (FOR UPDATE on contract).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, contract_drafter]
+      x-requiredPermissions: [approval.submit_for_review]
+      x-acsCovered: [AC-S7-01, AC-S7-02, AC-S7-03, AC-S7-04, AC-S7-05, AC-S7-06, AC-S7-07, AC-S7-08]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: false
+        description: Empty body — fn_approval_route_init takes only path id + JWT actor.
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        "201":
+          description: CREATED
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitForApprovalResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            CONFLICT — already has an in_progress chain (AC-S7-04) OR
+            contract.status not in (draft, in_review).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /admin/approval-steps/{stepId}/reassign:
+    post:
+      tags: [M2 — Admin Approvals]
+      operationId: approvalReassign
+      summary: Admin force-reassigns a stalled pending step to another user
+      description: |
+        Admin force-reassigns a stalled pending step to another user. Updates
+        step.approver_user_id (replaced) AND step.reassigned_to (audit pointer).
+        Inserts approval_decision row with decision='reassign'. Distinct from
+        delegate (which is voluntary, by the assigned approver).
+        DB function: `fn_approval_reassign` (locks step FOR UPDATE).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [approval.reassign]
+      x-acsCovered: [AC-S8-01, AC-S8-02, AC-S8-03, AC-S8-04, AC-S8-05, AC-S8-06, AC-S8-07, AC-S8-08]
+      parameters:
+        - name: stepId
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReassignApprovalDto" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReassignApprovalResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: CONFLICT — cannot reassign a non-pending step.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/approval-chain:
+    get:
+      tags: [M2 — Approvals]
+      operationId: approvalChainGet
+      summary: Get the most recent approval chain for a contract
+      description: |
+        Returns the most recent approval chain for a contract with full
+        step + decision detail. Resolves chain via contract_id (most recent
+        by initiated_at DESC). UserRef hydration for chain.initiated_by +
+        per-step approver / delegated_to / reassigned_to + per-decision
+        decided_by. matrixSnapshot is OMITTED from this projection — surfaced
+        only via admin / forensic paths.
+        DB function: `fn_approval_chain_get`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, contract_recipient, executive]
+      x-permission: anyOf(contract.read.all, contract.read.department, contract.read.own)
+      x-acsCovered: [AC-S10-01, AC-S10-02, AC-S10-03, AC-S10-04, AC-S10-05]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalChainGetResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: |
+            NOT_FOUND — contract has no chain OR caller cannot see this contract
+            (RLS-narrowed silently per Design Note D7 / M1a precedent).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /admin/approval-chains:
+    get:
+      tags: [M2 — Admin Approvals]
+      operationId: approvalChainList
+      summary: Role-aware list of approval chains for the admin chain monitor
+      description: |
+        Paginated, role-aware list of approval chains for the admin chain
+        monitor. Ordered by initiated_at DESC. Role narrowing:
+        platform_admin / Super Admin / legal_counsel see all chains; the
+        route gate is `anyOf(approval.matrix.read, approval.reassign)`.
+        Drafters / approvers see chains for their own contracts via
+        GET /contracts/{id}/approval-chain instead.
+        DB function: `fn_approval_chain_list`.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [approval.matrix.read, approval.reassign]
+      x-permission: anyOf(approval.matrix.read, approval.reassign)
+      x-acsCovered: [AC-S11-01, AC-S11-02, AC-S11-03, AC-S11-04, AC-S11-05, AC-S11-06, AC-S11-07, AC-S11-08, AC-S11-09]
+      parameters:
+        - $ref: "#/components/parameters/PageQuery"
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: contractId
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: status
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/ApprovalChainStatus" }
+        - name: submittedBy
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApprovalChainListResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/status:
+    patch:
+      tags: [M2 — Approvals, M1a — Contracts]
+      operationId: contractUpdateStatus
+      summary: |
+        Update contract status (M1a endpoint, narrowed-transitions extension by M2 / AE-2).
+      description: |
+        M2 (AE-2) OWN-AND-SPLIT extension of the M1a endpoint. Wire DTO field
+        shape preserved (newStatus + optional reason); the body schema is
+        UpdateContractStatusUserDto, with newStatus restricted to the
+        per-transition matrix enforced by fn_contract_status_update_user.
+
+        Per-transition permission gates (fn_-side authoritative):
+          - draft → in_review        : approval.submit_for_review
+          - in_review → in_approval  : approval.submit_for_review (atomic — internally calls fn_approval_route_init)
+          - in_review → draft        : approval.submit_for_review (own) OR contract.delete
+          - approved → active        : contract.edit
+          - any non-terminal → cancelled : contract.delete OR (contract.draft AND ownership)
+
+        Direct in_approval terminal targets (approved / rejected /
+        resubmission_requested) are REJECTED with 409 — callers must use
+        POST /approvals/{stepId}/decide. (AC-S12-02 / AC-S12-09 / M2-NEW-1.)
+
+        FE migration note: previously-permissive M1a transitions
+        (e.g. draft → approved direct) now return 409. Existing M1a tests
+        that exercised valid transitions continue to pass; tests that
+        exercised permissive transitions MUST be updated to use the
+        chain-driven path.
+
+        DB function: `fn_contract_status_update_user` (M2 INVOKER, FOR UPDATE
+        on contract — UPGRADE over M1a placeholder which had no lock). Replaces
+        the M1a fn_contract_status_update placeholder. The system-only
+        fn_contract_status_update_internal (DEFINER) is invoked ONLY by
+        fn_approval_decide and is not exposed via HTTP.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter]
+      x-permission: anyOf(contract.status.update, approval.submit_for_review, contract.edit, contract.delete, contract.draft)
+      x-acsCovered: [AC-S12-01, AC-S12-02, AC-S12-03, AC-S12-04, AC-S12-05, AC-S12-06, AC-S12-07, AC-S12-08, AC-S12-09, AC-S12-10]
+      x-extensionType: M2 / AE-2 OWN-AND-SPLIT (wire-compatible)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateContractStatusUserDto" }
+            examples:
+              submitForReview:
+                summary: draft → in_review
+                value: { newStatus: in_review }
+              submitForApproval:
+                summary: in_review → in_approval (atomic — chain created)
+                value: { newStatus: in_approval, reason: "Ready for legal sign-off" }
+              activate:
+                summary: approved → active
+                value: { newStatus: active }
+              cancel:
+                summary: any non-terminal → cancelled
+                value: { newStatus: cancelled, reason: "Counterparty withdrew." }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpdateContractStatusUserResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            CONFLICT — invalid transition. Common causes: (a) target is
+            in_approval terminal direct override (use fn_approval_decide /
+            POST /approvals/{stepId}/decide); (b) transition pair not in the
+            whitelist (AC-S12-03).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+

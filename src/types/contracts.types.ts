@@ -78,7 +78,22 @@ export type SensitiveFieldName = M0SensitiveFieldName | M1aSensitiveFieldName;
 // 3. Enum union types (lookup-style values; CHECK-constrained in DB)
 // ------------------------------------------------------------
 
-/** 14-state workflow per requirements-analysis.json. M1a only sets/reads — full state machine is M2. */
+/**
+ * 16-state workflow.
+ *
+ * M1a shipped 14 values; M2 (AE-3 / migration 023) widened the
+ * contract.status CHECK constraint with 'in_approval' + 'cancelled' to
+ * support the approval-engine state machine. The TS union below mirrors the
+ * canonical CHECK constraint exactly so the BE Zod layer + FE consumers
+ * stay aligned.
+ *
+ * The M2 split:
+ *   - fn_contract_status_update_user (INVOKER) owns drafter / admin
+ *     non-chain transitions.
+ *   - fn_contract_status_update_internal (DEFINER) owns
+ *     in_approval → approved | rejected | draft, called only by
+ *     fn_approval_decide.
+ */
 export type ContractStatus =
   | 'draft'
   | 'in_review'
@@ -93,7 +108,10 @@ export type ContractStatus =
   | 'renewed'
   | 'terminated'
   | 'rejected'
-  | 'resubmission_requested';
+  | 'resubmission_requested'
+  // M2 / AE-3 — migration 023 widened the CHECK enum to 16 values
+  | 'in_approval'
+  | 'cancelled';
 
 export type ContractLanguage = 'en' | 'ar' | 'bilingual';
 
@@ -114,6 +132,14 @@ export type RelationshipType =
   | 'superseded'
   | 'sow_under_msa';
 
+/**
+ * 14-value activity-type union.
+ *
+ * M1a shipped 7 values; M1b 011 added 2 (payment_schedule_replaced, exported);
+ * M2 (AE-1 / migration 027) extends the whitelist with 5 namespace-prefixed
+ * approval-engine activity types. Mirrors the canonical
+ * contract_activity_activity_type_check IN-list verbatim.
+ */
 export type ActivityType =
   | 'created'
   | 'updated'
@@ -121,7 +147,16 @@ export type ActivityType =
   | 'version_created'
   | 'tagged'
   | 'soft_deleted'
-  | 'restored';
+  | 'restored'
+  // M1b 011 additions
+  | 'payment_schedule_replaced'
+  | 'exported'
+  // M2 / AE-1 — migration 027 additions
+  | 'submitted_for_approval'
+  | 'approval_decided'
+  | 'approval_reassigned'
+  | 'approval_escalated'
+  | 'approval_delegated';
 
 /**
  * Contract-domain role keys (created in M1a CMSW-1). M0's existing roles

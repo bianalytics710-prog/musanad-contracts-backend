@@ -369,6 +369,44 @@ const SENSITIVE_PATHS: string[] = [
   '*.extracted_text',
   '*.*.extracted_text',
 
+  // -- M2 approval — decisionNote / decision_note --
+  //    See approval.types.ts M2_SENSITIVE_FIELD_EXTENSIONS + fn_audit_trigger
+  //    redact array (migration 029). decisionNote is on the wire DTO for
+  //    fn_approval_decide / fn_approval_delegate / fn_approval_reassign.
+  'decisionNote',
+  'req.body.decisionNote',
+  'req.body.*.decisionNote',
+  'req.query.decisionNote',
+  'req.params.decisionNote',
+  '*.decisionNote',
+  '*.*.decisionNote',
+  'decision_note',
+  'req.body.decision_note',
+  'req.body.*.decision_note',
+  'req.query.decision_note',
+  'req.params.decision_note',
+  '*.decision_note',
+  '*.*.decision_note',
+
+  // -- M2 approval — matrixSnapshot / matrix_snapshot --
+  //    Frozen approval-matrix snapshot stored on approval_chain (immutable
+  //    post-creation). Redacted in audit_log + pino logs; surfaces only on
+  //    admin / forensic projection (not on the standard chain GET).
+  'matrixSnapshot',
+  'req.body.matrixSnapshot',
+  'req.body.*.matrixSnapshot',
+  'req.query.matrixSnapshot',
+  'req.params.matrixSnapshot',
+  '*.matrixSnapshot',
+  '*.*.matrixSnapshot',
+  'matrix_snapshot',
+  'req.body.matrix_snapshot',
+  'req.body.*.matrix_snapshot',
+  'req.query.matrix_snapshot',
+  'req.params.matrix_snapshot',
+  '*.matrix_snapshot',
+  '*.*.matrix_snapshot',
+
   // -- Response envelope: passwordHash on res.body / res.user --
   //    Preserved from M0 — covers the auth login response shape.
   'res.body.passwordHash',

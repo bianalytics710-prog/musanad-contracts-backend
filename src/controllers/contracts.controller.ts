@@ -38,7 +38,7 @@ import type {
   ContractActivityListQueryInferred,
   CreateContractDtoInferred,
   UpdateContractDtoInferred,
-  UpdateContractStatusDtoInferred,
+  UpdateContractStatusUserDtoInferred,
   SetContractTagsDtoInferred,
   CreateContractVersionDtoInferred,
 } from '../schemas/contracts.schemas';
@@ -58,8 +58,8 @@ import type {
   ContractVersionCreated,
   DeleteContractResponse,
   SetContractTagsResponse,
-  UpdateContractStatusResponse,
 } from '../types/contracts.types';
+import type { UpdateContractStatusUserResponse } from '../types/approval.types';
 import type {
   AuditLogRecordResult,
   ContractExportPdfResponse,
@@ -352,10 +352,20 @@ export const contractsController = {
   },
 
   /**
-   * PATCH /api/v1/contracts/:id/status → fn_contract_status_update
+   * PATCH /api/v1/contracts/:id/status → fn_contract_status_update_user (M2 / AE-2).
    *
-   * M1a placeholder — validates enum membership only (AC-S6-07: no transition
-   * validity in M1a; M2 will replace with state-machine-aware variant).
+   * Drafter / admin narrow transitions only. fn_contract_status_update_user is
+   * INVOKER + per-transition permission-gated + FOR UPDATE on the contract row.
+   * The M1a placeholder fn_contract_status_update was DROPPED in migration 026;
+   * this endpoint now delegates to the _user variant.
+   *
+   * In_approval terminal transitions (in_approval → approved | rejected |
+   * resubmission_requested) are REJECTED here with 409 (M2-NEW-1) — those flow
+   * via fn_approval_decide invoked from POST /api/v1/approvals/:stepId/decide.
+   *
+   * The special case `in_review → in_approval` atomically delegates to
+   * fn_approval_route_init inside the same DB transaction; the response
+   * includes a routeInit nested object on that branch only.
    */
   async updateStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
@@ -365,9 +375,9 @@ export const contractsController = {
     );
     try {
       const { id } = req.params as unknown as ContractIdParamInferred;
-      const body = req.body as UpdateContractStatusDtoInferred;
-      const result = await db.callFunction<UpdateContractStatusResponse>(
-        'fn_contract_status_update',
+      const body = req.body as UpdateContractStatusUserDtoInferred;
+      const result = await db.callFunction<UpdateContractStatusUserResponse>(
+        'fn_contract_status_update_user',
         [id, body.newStatus, req.user!.id, body.reason ?? null],
         { actorId: req.user!.id },
       );

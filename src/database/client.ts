@@ -102,7 +102,16 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
   // SQLSTATE-driven mappings
   if (isPgError(err)) {
     switch (err.code) {
-      case '42501': // insufficient_privilege — RLS denial
+      case '42501': // insufficient_privilege — RLS denial / M2 fn_ permission gate
+        // Preserve structured-raise message when present (e.g. 'permission:approval.act required').
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const msg = m[3]?.trim() ?? 'Forbidden';
+            return new ForbiddenError(msg);
+          }
+        }
         return new ForbiddenError('Forbidden');
       case '23505': // unique_violation
         return new ConflictError(`${fnName}: duplicate key`);
@@ -121,15 +130,58 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
         return new UnprocessableEntityError(`${fnName}: foreign key violation`);
       case '23502': // not_null_violation
         return new ValidationError(`${fnName}: required field missing`);
-      case '23514': // check_violation — Codex BE-M1b-005
-        // The Zod schemas allow combinations the DB rejects via CHECK
-        // (e.g., paid_at set when status != 'paid' on payment_schedule;
-        // M1c chk_import_batch_counter_sum / chk_import_batch_completed_at_status).
-        // Surface as a 400 so the client knows it is a request-shape
-        // problem, not a server fault. We deliberately do NOT echo
-        // err.constraint — it leaks raw constraint names — but keep the
-        // message generic.
+      case '23514': // check_violation
+        // M2: many fn_'s raise 23514 with a structured field:message body
+        // (e.g. fn_contract_status_update_user 'newStatus:Invalid status').
+        // Surface the structured message as a 400 with the field intact.
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? 'check';
+            const msg = m[3]?.trim() ?? 'Invalid value';
+            return new ValidationError(msg, { [field]: msg });
+          }
+        }
         return new ValidationError('Data violates database constraint', { check: 'invalid' });
+      case '22023': // invalid_parameter_value — M2 fn_ validation raises
+        // M2 fn_'s raise 22023 with a structured field:message body
+        // (e.g. fn_approval_decide 'decision:Invalid decision').
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? '_root';
+            const msg = m[3]?.trim() ?? 'Invalid value';
+            return new ValidationError(msg, { [field]: msg });
+          }
+        }
+        return new ValidationError(`${fnName}: invalid parameter value`);
+      case 'P0001': // raise_exception — M2 state-transition / lockout / idempotency
+        // Map to 409 CONFLICT with the structured field:message preserved.
+        // fn_approval_decide / fn_contract_status_update_user / fn_approval_route_init
+        // use P0001 for all "valid request but rejected by current state" cases.
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? '_root';
+            const msg = m[3]?.trim() ?? 'Conflict';
+            return new ConflictError(msg, { [field]: msg });
+          }
+        }
+        return new ConflictError(`${fnName}: state conflict`);
+      case 'P0002': // no_data_found — entity lookup miss inside fn_
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? 'id';
+            const msg = m[3]?.trim() ?? 'Not found';
+            return new NotFoundError(msg, { [field]: msg });
+          }
+        }
+        return new NotFoundError('Resource not found');
       case '22P02': // invalid_text_representation
         return new ValidationError(`${fnName}: invalid value type`);
       case '42883': // undefined_function
