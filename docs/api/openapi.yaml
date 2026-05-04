@@ -25,7 +25,21 @@ info:
     fn_contract_status_update_internal (DEFINER, called only by fn_approval_decide
     on terminal chain transitions). Escalation (fn_approval_escalate) is invoked
     by an in-process node-cron driver, not exposed via HTTP.
-  version: 0.5.0
+
+    M3 introduces three new namespaces and 10 new endpoints — 5 JWT-authenticated
+    (admin/drafter signature management under `/api/v1/contracts/:id/...`,
+    `/api/v1/signature-parties/:id/resend`, `/api/v1/signature-invitations/:id/cancel`)
+    and **5 PUBLIC token-bearer** under `/api/v1/sign/*` (verify_jwt=false; the
+    first such namespace in the project). The 5 public endpoints authenticate via
+    a SHA-256-hashed `invitation_token` plaintext in the URL path (and
+    `X-Session-Token` header on `/qa/message`); GRANT EXECUTE TO PUBLIC is
+    applied to exactly 5 SECURITY DEFINER fn_'s (CC-4 Option A, ratified at HITL
+    Gate 2). M3 also adds the SSE response on `POST /sign/:invitationToken/qa/message`
+    (Content-Type: `text/event-stream`) — the only streaming endpoint in the
+    project. Cron-driven invitation expiry (`fn_signature_invitation_expire_due`)
+    runs in-process via `SIGNATURE_EXPIRATION_INTERVAL_CRON` and is not exposed
+    via HTTP.
+  version: 0.6.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -109,6 +123,51 @@ tags:
       role-aware chain monitor list. matrixSnapshot is sensitive (pino-redacted
       and audit-redacted by fn_audit_trigger). The /api/v1/admin/* namespace is
       first introduced in M2 — convention parity with /api/v1/ai/* (M1c).
+  - name: M3 — Signatures (Admin)
+    description: |
+      Admin / drafter-facing signature ceremony endpoints (M3). 5 endpoints
+      requiring JWT auth: bulk-create signer roster, send-for-signature (issues
+      invitation tokens), resend invitation, cancel invitation, and per-contract
+      signature-progress list. Permission gates: `signature.send` (create roster,
+      send, resend), `signature.cancel` (cancel — drafter cannot self-cancel,
+      AC-S8-03), `contract.read.* OR signature.read.all` (list).
+      `invitationTokenPlaintext` is returned ONCE on creation (persisted as
+      SHA-256 hash in `signature_invitation.invitation_token_hash`); the
+      response field is pino-redacted on egress. `signer_email` is masked
+      (`j***@example.com`) for non-privileged roles on the list endpoint
+      (AC-S6-04). `signature_data` and `signature_image_url` are NEVER
+      returned regardless of role (AC-S6-05).
+  - name: M3 — Signer Public (verify_jwt=false)
+    description: |
+      Public signer ceremony endpoints (M3). 3 endpoints under `/api/v1/sign/*`
+      (no Authorization header). Token-bearer authenticated — invitation_token
+      plaintext in URL path is hashed (SHA-256) and matched server-side inside
+      a SECURITY DEFINER fn_. GRANT EXECUTE TO PUBLIC is applied to exactly the
+      named fn_'s (CC-4 Option A, HITL Gate 2 locked):
+      `fn_signature_get_by_invitation_token`, `fn_signature_sign`,
+      `fn_signature_decline`. Errors return single generic
+      `invitation_invalid_or_expired` (HTTP 410) that does NOT distinguish
+      unknown / expired / cancelled (AC-S3-04 / AC-S4-05 / AC-S5-04).
+      Email is ALWAYS masked on the public read; `signature_data` and
+      `signature_image_url` are NEVER returned. Rate limit:
+      `publicSignerRateLimiter` (60 req/min/IP).
+  - name: M3 — Signer Q&A AI (verify_jwt=false)
+    description: |
+      Public signer Q&A endpoints (M3). 2 endpoints under `/api/v1/sign/:invitationToken/qa/*`.
+      `POST /qa/session` returns a `sessionTokenPlaintext` ONCE (persisted as
+      SHA-256 `session_token_hash`); subsequent `POST /qa/message` calls require
+      the plaintext in the `X-Session-Token` header. Sliding-window
+      enforcement when 5+ active sessions per invitation (AN-12 Option A —
+      soft-deactivate oldest, never returns 429). `POST /qa/message` returns
+      a Server-Sent Events stream (`Content-Type: text/event-stream`) — the
+      only streaming endpoint in the project. Two-call rate-limit pattern
+      (DN-10 / AN-2 — GATE pre-AI reservation, COMMIT post-AI usage record);
+      per-session cap 20/h, per-invitation cap 50/h enforced inside the fn_
+      (HTTP 429 surfaces with `retryAfterSeconds`). AI provider: OpenAI
+      `gpt-4o`; system prompt loaded VERBATIM from `prompts/ai-signer-qa.txt`
+      at request time (no transcript persisted — AN-2 transcriptStorage,
+      DN-11). `userMessage` is sensitive (pino-redacted as `ai_prompt_payload`,
+      AC-S12-09).
 
 components:
   securitySchemes:
@@ -1746,6 +1805,593 @@ components:
         toStatus: { $ref: "#/components/schemas/ContractStatus" }
         changedAt: { type: string, format: date-time }
 
+    # ========================================================================
+    # M3 — Signatures + Signer Q&A AI schemas
+    # ========================================================================
+
+    SignerSide:
+      type: string
+      enum: [employer, counterparty, witness]
+      description: |
+        signature_party.signer_side — FK to signature_party_side(code).
+        Seeded in migration 035 §7.1 (3 stable rows).
+
+    SignatureMethod:
+      type: string
+      enum: [uae_pass, ds_otp, drawn, typed]
+      description: |
+        signature_method.code — FK target referenced from signature_event.signature_method.
+        Seeded in migration 035 §7.2 (4 stable rows). is_enabled=FALSE
+        surfaces as 400 invalid_method (AC-S4-12).
+
+    UaePassVerificationLevel:
+      type: string
+      enum: [basic, verified, premium]
+      description: |
+        Required when signature_method='uae_pass' (CHECK chk_signature_event_uae_pass_level_required).
+
+    SignatureInvitationStatus:
+      type: string
+      enum: [pending, viewed, signed, declined, expired, cancelled]
+      description: |
+        signature_invitation.status — 6-value lifecycle CHECK enum
+        (db-design.md §1.4). Allowed transitions enforced inside fn_signature_*.
+
+    SignatureEventType:
+      type: string
+      enum: [viewed, signed, declined, expired, cancelled, resent]
+      description: |
+        signature_event.event_type — 6-value CHECK enum (db-design.md §1.5).
+        Append-only audit event log. 'viewed' is emitted ONCE per invitation
+        (idempotent — gated on first_viewed_at IS NULL).
+
+    SignatureLanguage:
+      type: string
+      enum: [en, ar]
+      description: |
+        signature_invitation.language / signer_qa_session.language —
+        Locked at session start for QA per AN-2 languageLock (AC-S11-05).
+
+    SignerQaRecordMessageMode:
+      type: string
+      enum: [GATE, COMMIT]
+      description: |
+        Two-call rate-limit pattern discriminator (AN-2 / DN-10).
+        - GATE   — pre-AI slot reservation; ignores tokensConsumed; raises 429 when limit exceeded.
+        - COMMIT — post-AI commit; records actual tokens; does NOT re-check limit.
+
+    SignaturePartyInput:
+      type: object
+      required: [signerSide, signerNameEn, stepOrder]
+      properties:
+        signerSide: { $ref: "#/components/schemas/SignerSide" }
+        signerUserId:
+          type: integer
+          format: int64
+          nullable: true
+          description: NULL for external counterparty signers without a user account.
+        signerNameEn: { type: string, minLength: 1, maxLength: 200 }
+        signerNameAr:
+          type: string
+          maxLength: 200
+          nullable: true
+        signerEmail:
+          type: string
+          format: email
+          nullable: true
+          description: |
+            SENSITIVE — pino-redacted in logs. NEVER in error messages
+            (AC-S1-08). Already in M2 029 audit redact list.
+        signerPhone:
+          type: string
+          maxLength: 40
+          nullable: true
+          description: |
+            SENSITIVE — pino-redacted in logs; never returned in any response.
+        signerPartyId:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Forward-reference to future party(id). NO FK constraint in M3
+            (AN-6 / ND-2; mirrors M1a contract.our_party_id forward-FK).
+        stepOrder:
+          type: integer
+          minimum: 1
+          description: 1..N — determines signature order. Employer typically signs first.
+        isRequired:
+          type: boolean
+          default: true
+          description: Defaults TRUE on the DB column.
+
+    SignaturePartyCreateBulkDto:
+      type: object
+      required: [signers]
+      description: |
+        AC-S1-01 — bulk-create roster. signers length 1..20 (AC-S1-04 +
+        DB validation). At least one element MUST have signerSide='employer'
+        AND isRequired=TRUE (AC-S1-04).
+      properties:
+        signers:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { $ref: "#/components/schemas/SignaturePartyInput" }
+
+    SignatureParty:
+      type: object
+      required:
+        - id
+        - signerSide
+        - signerNameEn
+        - stepOrder
+        - isRequired
+        - currentInvitationId
+        - currentInvitationStatus
+        - lastEventType
+      properties:
+        id: { type: integer, format: int64 }
+        signerSide: { $ref: "#/components/schemas/SignerSide" }
+        signerNameEn: { type: string }
+        signerNameAr: { type: string, nullable: true }
+        signerEmail:
+          type: string
+          nullable: true
+          description: |
+            Masked (`j***@example.com`) for contract_drafter / contract_recipient
+            roles; full plaintext for legal_counsel / platform_admin / Super Admin
+            on the admin path (AC-S6-04). Never the full plaintext on PUBLIC
+            fn_ paths.
+        stepOrder: { type: integer }
+        isRequired: { type: boolean }
+        currentInvitationId:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            Active signature_invitation row id for this party (NULL when no
+            invitation issued yet). Added by migration 038 — used by FE
+            Signatures tab to target POST /signature-invitations/:id/cancel.
+        currentInvitationStatus:
+          allOf: [{ $ref: "#/components/schemas/SignatureInvitationStatus" }]
+          nullable: true
+        invitationSentAt: { type: string, format: date-time, nullable: true }
+        signedAt: { type: string, format: date-time, nullable: true }
+        declinedAt: { type: string, format: date-time, nullable: true }
+        lastEventType:
+          allOf: [{ $ref: "#/components/schemas/SignatureEventType" }]
+          nullable: true
+        signatureMethod:
+          allOf: [{ $ref: "#/components/schemas/SignatureMethod" }]
+          nullable: true
+        uaePassVerificationLevel:
+          allOf: [{ $ref: "#/components/schemas/UaePassVerificationLevel" }]
+          nullable: true
+
+    SignaturePartyCreateBulkResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [signatureParties, createdCount, skippedCount]
+          properties:
+            signatureParties:
+              type: array
+              items: { $ref: "#/components/schemas/SignatureParty" }
+            createdCount: { type: integer }
+            skippedCount: { type: integer, description: ON CONFLICT DO NOTHING per AC-S1-08 idempotency. }
+
+    SignatureSendInvitationItem:
+      type: object
+      required: [signaturePartyId, invitationTokenPlaintext, expiresAt]
+      properties:
+        signaturePartyId: { type: integer, format: int64 }
+        invitationTokenPlaintext:
+          type: string
+          description: |
+            @once-only — never persisted, never re-derivable. Plaintext
+            base64 (32-byte random). The DB persists only invitation_token_hash
+            (SHA-256 hex). Pino-redacted on egress logs. Mailer-bound only.
+        expiresAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC. Default invitation_sent_at + 14 days.
+        signerEmail:
+          type: string
+          nullable: true
+          description: |
+            Plaintext (mailer-bound). Pino-redacted on egress logs. Internal
+            callers only — never echoed to the public signer page.
+
+    SendForSignatureDto:
+      type: object
+      description: |
+        AC-S2-01. POST /api/v1/contracts/:id/send-for-signature has no request
+        body — p_contract_id from the path, p_actor_id from the JWT. Empty
+        body schema preserved for symmetry with the Zod schema (z.object({}).strict()).
+
+    SendForSignatureResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [contractId, newStatus, invitations]
+          properties:
+            contractId: { type: integer, format: int64 }
+            newStatus:
+              allOf: [{ $ref: "#/components/schemas/ContractStatus" }]
+              description: Always 'awaiting_signature_employer' on success (AC-S2-01).
+            invitations:
+              type: array
+              items: { $ref: "#/components/schemas/SignatureSendInvitationItem" }
+              description: |
+                One element per signer at MIN(step_order). Each carries the
+                plaintext invitation token returned ONCE.
+
+    ResendInvitationDto:
+      type: object
+      description: |
+        AC-S7-01. reason is optional (no min length when present — DB-side
+        accepts NULL).
+      properties:
+        reason: { type: string, nullable: true, maxLength: 500 }
+
+    ResendInvitationResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [newInvitationId, invitationTokenPlaintext, expiresAt]
+          properties:
+            newInvitationId: { type: integer, format: int64 }
+            invitationTokenPlaintext:
+              type: string
+              description: |
+                @once-only — never persisted, never re-derivable. Returned
+                exactly once on creation. Pino-redacted on egress.
+            expiresAt:
+              type: string
+              format: date-time
+              description: ISO-8601 UTC. NOW() + 14 days.
+
+    CancelInvitationDto:
+      type: object
+      required: [reason]
+      description: |
+        AC-S8-06 — reason is REQUIRED non-empty.
+        AC-S8-03 — permission gate: signature.cancel (NOT granted to drafter).
+      properties:
+        reason: { type: string, minLength: 1 }
+
+    CancelInvitationResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [invitationId, status, contractRolledBack]
+          properties:
+            invitationId: { type: integer, format: int64 }
+            status:
+              allOf: [{ $ref: "#/components/schemas/SignatureInvitationStatus" }]
+              description: Always 'cancelled' on success.
+            contractRolledBack:
+              type: boolean
+              description: |
+                TRUE when this was the last active invitation at the current
+                step and fn_contract_status_update_internal rolled the contract
+                back to 'approved' (AC-S8-02).
+
+    SignatureMethodRef:
+      type: object
+      required: [code, labelEn, labelAr, verificationStrength, isEnabled]
+      properties:
+        code: { $ref: "#/components/schemas/SignatureMethod" }
+        labelEn: { type: string }
+        labelAr: { type: string }
+        verificationStrength:
+          type: integer
+          minimum: 1
+          maximum: 4
+          description: 1=lowest (typed), 4=highest (uae_pass). Used for sort + UX hint.
+        isEnabled: { type: boolean }
+        isActive: { type: boolean }
+
+    SignaturePublicView:
+      type: object
+      required: [invitation, signer, contract, availableMethods]
+      description: |
+        Sensitive-field policy is the strictest of any read path:
+        - signerEmail ALWAYS masked (`j***@example.com` per DN-9)
+        - signerPhone NEVER returned
+        - body TRUNCATED to LEFT(body_*, 4000) chars
+        - signature_data + signature_image_url NEVER returned (AC-S3-05)
+      properties:
+        invitation:
+          type: object
+          required: [id, status, expiresAt, viewCount, language]
+          properties:
+            id: { type: integer, format: int64 }
+            status: { $ref: "#/components/schemas/SignatureInvitationStatus" }
+            expiresAt: { type: string, format: date-time }
+            viewCount: { type: integer }
+            language: { $ref: "#/components/schemas/SignatureLanguage" }
+        signer:
+          type: object
+          required: [side, nameEn]
+          properties:
+            side: { $ref: "#/components/schemas/SignerSide" }
+            nameEn: { type: string }
+            nameAr: { type: string, nullable: true }
+            email:
+              type: string
+              nullable: true
+              description: Masked form ONLY (e.g., `j***@example.com`). Plaintext NEVER returned.
+        contract:
+          type: object
+          required: [id, contractNumber, titleEn, contractType]
+          properties:
+            id: { type: integer, format: int64 }
+            contractNumber: { type: string }
+            titleEn: { type: string }
+            titleAr: { type: string, nullable: true }
+            contractType: { type: string }
+            valueAed:
+              type: number
+              format: double
+              nullable: true
+              description: AED — NUMERIC(15,2) on the DB.
+            startDate: { type: string, format: date, nullable: true }
+            endDate: { type: string, format: date, nullable: true }
+            ourPartyName: { type: string, nullable: true }
+            counterpartyName: { type: string, nullable: true }
+            aiSummaryEn: { type: string, nullable: true }
+            aiSummaryAr: { type: string, nullable: true }
+            bodyEnExcerpt:
+              type: string
+              nullable: true
+              description: TRUNCATED to LEFT(body_en, 4000). Full body NEVER returned to PUBLIC.
+            bodyArExcerpt:
+              type: string
+              nullable: true
+        availableMethods:
+          type: array
+          items: { $ref: "#/components/schemas/SignatureMethodRef" }
+          description: Filtered to is_enabled=TRUE; sorted by verificationStrength DESC.
+
+    SignaturePublicViewResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data: { $ref: "#/components/schemas/SignaturePublicView" }
+
+    SignContractDto:
+      type: object
+      required: [signatureMethod]
+      description: |
+        AC-S4-01..AC-S4-12. Method gating (validated by fn_, mirrored in Zod):
+        - signatureMethod='typed'    → signatureData required (>= 2 chars).
+        - signatureMethod='drawn'    → signatureData AND signatureImageUrl required.
+        - signatureMethod='uae_pass' → uaePassVerificationLevel required.
+        - signatureMethod='ds_otp'   → metadata.otpReceipt required (non-empty).
+
+        SENSITIVE — signatureData and signatureImageUrl are pino-redacted
+        on the request envelope and audit_log JSONB-redacted by fn_audit_trigger
+        (added in M3 034 — the 4 net-new redact-list names).
+      properties:
+        signatureMethod: { $ref: "#/components/schemas/SignatureMethod" }
+        signatureData:
+          type: string
+          nullable: true
+          description: SENSITIVE. Required for typed/drawn (>= 2 chars trimmed). NULL otherwise.
+        signatureImageUrl:
+          type: string
+          nullable: true
+          description: SENSITIVE. Required for drawn. Storage URL of canvas-rendered PNG.
+        uaePassVerificationLevel:
+          allOf: [{ $ref: "#/components/schemas/UaePassVerificationLevel" }]
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: |
+            Free-form camelCase. Examples:
+            - { otpReceipt: '...' } — required for ds_otp
+            - { uaePassAttestationId, browserFingerprint } — uae_pass evidence
+            Controllers forward req.ip / req.headers['user-agent'] as separate
+            fn_ parameters (NOT inside metadata).
+
+    RemainingSignerSummary:
+      type: object
+      required: [signaturePartyId, signerSide, status]
+      properties:
+        signaturePartyId: { type: integer, format: int64 }
+        signerSide: { $ref: "#/components/schemas/SignerSide" }
+        status: { $ref: "#/components/schemas/SignatureInvitationStatus" }
+
+    SignContractResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [invitationId, status, signedAt, stepCompleted, remainingSigners]
+          properties:
+            invitationId: { type: integer, format: int64 }
+            status:
+              allOf: [{ $ref: "#/components/schemas/SignatureInvitationStatus" }]
+              description: Always 'signed' on success.
+            signedAt: { type: string, format: date-time }
+            stepCompleted:
+              type: boolean
+              description: TRUE when this signer was the LAST required at their step.
+            contractNewStatus:
+              allOf: [{ $ref: "#/components/schemas/ContractStatus" }]
+              nullable: true
+              description: |
+                NULL when stepCompleted=false. Otherwise:
+                'awaiting_signature_counterparty' | 'fully_signed'.
+            remainingSigners:
+              type: array
+              items: { $ref: "#/components/schemas/RemainingSignerSummary" }
+
+    DeclineContractDto:
+      type: object
+      required: [declineReason]
+      description: |
+        AC-S5-02 / AC-S5-03 — declineReason length 5..2000.
+      properties:
+        declineReason: { type: string, minLength: 5, maxLength: 2000 }
+
+    DeclineContractResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [invitationId, status]
+          properties:
+            invitationId: { type: integer, format: int64 }
+            status:
+              allOf: [{ $ref: "#/components/schemas/SignatureInvitationStatus" }]
+              description: Always 'declined' on success.
+            contractNewStatus:
+              allOf: [{ $ref: "#/components/schemas/ContractStatus" }]
+              nullable: true
+              description: |
+                'rejected' when the declining signer was required (AC-S5-01).
+                NULL when the declining signer was a non-required witness (AC-S5-05).
+
+    SignatureStepProgress:
+      type: object
+      required: [stepOrder, totalRequired, signedCount, declinedCount, pendingCount]
+      properties:
+        stepOrder: { type: integer }
+        totalRequired: { type: integer }
+        signedCount: { type: integer }
+        declinedCount: { type: integer }
+        pendingCount: { type: integer }
+
+    SignatureListResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [contractId, currentStatus, signers, stepProgress]
+          properties:
+            contractId: { type: integer, format: int64 }
+            currentStatus: { $ref: "#/components/schemas/ContractStatus" }
+            signers:
+              type: array
+              items: { $ref: "#/components/schemas/SignatureParty" }
+              description: AC-S6-07 — ordered by stepOrder ASC, then created_at ASC. May be empty array.
+            stepProgress:
+              type: array
+              items: { $ref: "#/components/schemas/SignatureStepProgress" }
+
+    SignerQaSessionStartDto:
+      type: object
+      description: |
+        AC-S11-01. language defaults to invitation.language; LOCKED at session
+        start (AC-S11-05 / AN-2). Cannot be changed mid-session.
+      properties:
+        language:
+          allOf: [{ $ref: "#/components/schemas/SignatureLanguage" }]
+          nullable: true
+
+    SignerQaRateLimitMeta:
+      type: object
+      required: [maxMessagesPerHour, remaining]
+      properties:
+        maxMessagesPerHour:
+          type: integer
+          description: AC-S12-05 default = 20 (per-session, rolling 1-hour window).
+        remaining:
+          type: integer
+          description: Min(per-session-remaining, per-invitation-remaining).
+
+    SignerQaSessionStartResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [sessionTokenPlaintext, sessionId, rateLimit, language]
+          properties:
+            sessionTokenPlaintext:
+              type: string
+              description: |
+                @once-only — never persisted, never re-derivable. Plaintext
+                base64 (32-byte random). Caller stores transiently (sessionStorage)
+                for the X-Session-Token header on subsequent /qa/message calls.
+                Pino-redacted on egress.
+            sessionId: { type: integer, format: int64 }
+            rateLimit: { $ref: "#/components/schemas/SignerQaRateLimitMeta" }
+            language: { $ref: "#/components/schemas/SignatureLanguage" }
+
+    SignerQaRecordMessageDto:
+      type: object
+      required: [mode, tokensConsumed]
+      description: |
+        AC-S12-01..AC-S12-10. Two-call rate-limit pattern (DN-10 / AN-2):
+        - mode='GATE'   → tokensConsumed=0 (ignored). Reserves a slot or 429s.
+                          userMessage required for AI invocation (controller-side).
+        - mode='COMMIT' → tokensConsumed=<actual>. No re-check. userMessage omitted.
+      properties:
+        mode: { $ref: "#/components/schemas/SignerQaRecordMessageMode" }
+        tokensConsumed:
+          type: integer
+          minimum: 0
+          description: Must be 0 for GATE; actual usage for COMMIT.
+        userMessage:
+          type: string
+          nullable: true
+          description: |
+            Only used in GATE mode for the controller-side AI invocation.
+            NEVER persisted (G7 + DN-11 — no transcript storage). Pino-redacted
+            because `ai_prompt_payload` is in project.config sensitiveFields
+            (AC-S12-09).
+
+    SignerQaMessageStreamChunk:
+      type: object
+      description: |
+        SSE chunk shape for POST /api/v1/sign/:invitationToken/qa/message.
+        Wire format per chunk: `data: <JSON of SignerQaMessageStreamChunk>\n\n`.
+        Three terminal chunk types — `token` is non-terminal and may repeat;
+        `done` and `error` are terminal.
+      oneOf:
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { type: string, enum: [token] }
+            delta: { type: string, description: Streaming AI token delta. Multiple chunks per response. }
+        - type: object
+          required: [type, tokensConsumed]
+          properties:
+            type: { type: string, enum: [done] }
+            tokensConsumed: { type: integer, description: Terminal — controller follows with COMMIT call. }
+        - type: object
+          required: [type, code]
+          properties:
+            type: { type: string, enum: [error] }
+            code: { type: string, description: e.g. 'rate_limit_exceeded'. }
+            message: { type: string, nullable: true }
+            retryAfterSeconds: { type: integer, nullable: true }
+
   responses:
     Unauthenticated:
       description: UNAUTHORIZED - missing or invalid access token.
@@ -1786,6 +2432,17 @@ components:
           $ref: "#/components/headers/X-Request-ID"
         Retry-After:
           schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Gone:
+      description: |
+        GONE — single generic message that does NOT distinguish unknown /
+        expired / cancelled (AC-S3-04 / AC-S4-05 / AC-S5-04 / AC-S11-02 /
+        AC-S12-10). Introduced in M3 for the /sign/* namespace.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/X-Request-ID"
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -4002,4 +4659,691 @@ x-paths-root:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "429": { $ref: "#/components/responses/RateLimited" }
+
+  # =====================================================================
+  # M3 — Signatures + Signer Q&A AI
+  # =====================================================================
+  #
+  # 10 new endpoints across 4 routers (5 JWT + 5 verify_jwt=false). The
+  # public /sign/* router declares routes most-specific-first (W1 carry-over):
+  #   POST /qa/message  →  POST /qa/session  →  POST /sign  →  POST /decline
+  #   →  GET / (bare token last). Express otherwise resolves the GET first
+  #   and refuses to fall through.
+
+  /contracts/{id}/signature-parties:
+    post:
+      tags: [M3 — Signatures (Admin)]
+      operationId: signaturePartyCreateBulk
+      summary: Bulk-create the initial signer roster for an approved contract
+      description: |
+        Bulk-create the signature_party roster (1..20 signers per call).
+        Idempotent — `ON CONFLICT (contract_id, step_order, lower(signer_email))
+        WHERE is_active=TRUE DO NOTHING`. Skipped count is returned alongside
+        created count (AC-S1-08). Validates contract.status='approved' AND at
+        least one approval_chain row exists with status='approved'.
+
+        AC-S1-04: at least one signer MUST have signerSide='employer' AND
+        isRequired=TRUE. Validated by the fn_; Zod confirms structure only.
+        AC-S1-08: signer_email never echoed in error messages (sensitive).
+
+        DB function: `fn_signature_party_create_bulk` (INVOKER; SELECT FOR
+        UPDATE on contract head + per-party row in loop).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter]
+      x-requiredPermissions: [signature.send]
+      x-acsCovered: [AC-S1-01, AC-S1-02, AC-S1-03, AC-S1-04, AC-S1-05, AC-S1-06, AC-S1-07, AC-S1-08, AC-S1-09]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: BIGINT FK → contract(id)
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignaturePartyCreateBulkDto" }
+            example:
+              signers:
+                - signerSide: employer
+                  signerNameEn: "Faisal Al Mazrouei"
+                  signerEmail: "faisal@employer.example"
+                  stepOrder: 1
+                  isRequired: true
+                - signerSide: counterparty
+                  signerNameEn: "Lina Khoury"
+                  signerEmail: "lina@counterparty.example"
+                  stepOrder: 2
+                  isRequired: true
+      responses:
+        "201":
+          description: CREATED — roster persisted (or partially-skipped via idempotency).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignaturePartyCreateBulkResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: NOT_FOUND — contract not found or is_active=FALSE (AC-S1-06).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — precondition failed. Either
+            `precondition_failed:contract_status_not_approved` (AC-S1-02) or
+            `precondition_failed:no_approved_chain` (AC-S1-03).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/send-for-signature:
+    post:
+      tags: [M3 — Signatures (Admin)]
+      operationId: signatureSendForSignature
+      summary: Issue invitation tokens to lowest-step_order signers
+      description: |
+        Issues invitation_tokens for the lowest-step_order required signers
+        and transitions contract.status approved → awaiting_signature_employer.
+        Returns plaintext invitationToken ONCE per signer (persisted as
+        SHA-256 invitation_token_hash; pino-redacted on egress).
+
+        DB function: `fn_signature_send_for_signature` (INVOKER; SELECT FOR
+        UPDATE on contract + per-party in loop). Internally calls
+        fn_contract_status_update_internal (M2 026 canonical, byte-for-byte
+        preserved at M3 033 except allowed-transitions IF condition) and
+        fn_contract_activity_create with new activity_type='sent_for_signature'.
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter]
+      x-requiredPermissions: [signature.send]
+      x-acsCovered: [AC-S2-01, AC-S2-02, AC-S2-03, AC-S2-04, AC-S2-05, AC-S2-06, AC-S2-07, AC-S2-08, AC-S2-09]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendForSignatureDto" }
+      responses:
+        "200":
+          description: OK — invitations issued. invitationTokenPlaintext returned ONCE.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SendForSignatureResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: NOT_FOUND — contract not found (AC-S2-04).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — either `invalid_status_for_send` (current != approved,
+            AC-S2-04) or `no_signature_parties` (roster not yet created,
+            AC-S2-05 — call POST /contracts/:id/signature-parties first).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /contracts/{id}/signatures:
+    get:
+      tags: [M3 — Signatures (Admin)]
+      operationId: signatureListForContract
+      summary: Per-contract signature progress with per-signer status + step aggregates
+      description: |
+        Read API for the ContractDetail Signatures tab. Returns per-signer
+        status + invitation/event timestamps + step aggregates. Role-aware
+        email masking (AC-S6-04): full plaintext for legal_counsel /
+        platform_admin / Super Admin; masked (`j***@example.com`) otherwise.
+
+        AC-S6-05: signature_data and signature_image_url are NEVER returned
+        regardless of role.
+        AC-S6-07: signers ordered by stepOrder ASC, then created_at ASC.
+
+        DB function: `fn_signature_list_for_contract` (INVOKER STABLE).
+        currentInvitationId added by migration 038 (consumed by the cancel
+        dialog on the same tab); migration 039 fixed a step-4 nested-aggregate
+        latent bug surfaced by the 038 functional probe.
+      x-rateLimit: authedReadRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_recipient, executive]
+      x-requiredPermissions: [contract.read.* OR signature.read.all]
+      x-acsCovered: [AC-S6-01, AC-S6-02, AC-S6-03, AC-S6-04, AC-S6-05, AC-S6-06, AC-S6-07]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignatureListResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404":
+          description: NOT_FOUND — contract not found OR actor cannot read it (AC-S6-06).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /signature-parties/{id}/resend:
+    post:
+      tags: [M3 — Signatures (Admin)]
+      operationId: signatureInvitationResend
+      summary: Soft-deactivate prior invitation and issue a fresh one with extended expiry
+      description: |
+        Deactivates the existing active invitation for a signature_party and
+        creates a NEW invitation with fresh token + extended expiry
+        (NOW() + 14 days). Emits a 'resent' signature_event on the OLD
+        invitation with metadata.newInvitationId. AC-S7-03 — current status
+        must NOT be IN ('signed','declined','cancelled').
+
+        DB function: `fn_signature_invitation_resend` (INVOKER; FOR UPDATE
+        on signature_party + signature_invitation).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter]
+      x-requiredPermissions: [signature.send]
+      x-acsCovered: [AC-S7-01, AC-S7-02, AC-S7-03, AC-S7-04, AC-S7-05]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: BIGINT FK → signature_party(id)
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResendInvitationDto" }
+            example:
+              reason: "Original email bounced — corrected address."
+      responses:
+        "200":
+          description: OK — new invitationTokenPlaintext returned ONCE.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResendInvitationResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: NOT_FOUND — signature_party not found / inactive (AC-S7-05).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — `invalid_invitation_status_for_resend` (AC-S7-03;
+            invitation status IN ('signed','declined','cancelled')).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /signature-invitations/{id}/cancel:
+    post:
+      tags: [M3 — Signatures (Admin)]
+      operationId: signatureInvitationCancel
+      summary: Cancel an active invitation; conditionally roll the contract back to 'approved'
+      description: |
+        Sets invitation.status='cancelled'. When this was the LAST active
+        invitation at the current step, calls fn_contract_status_update_internal
+        to roll the contract back to 'approved' (contractRolledBack=true,
+        AC-S8-02). Required permission `signature.cancel` is **NOT** granted
+        to drafter — drafter cannot self-cancel (AC-S8-03).
+
+        DB function: `fn_signature_invitation_cancel` (INVOKER; FOR UPDATE
+        on contract + invitation + signature_party).
+      x-rateLimit: authedWriteRateLimiter
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [signature.cancel]
+      x-acsCovered: [AC-S8-01, AC-S8-02, AC-S8-03, AC-S8-04, AC-S8-05, AC-S8-06]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: BIGINT FK → signature_invitation(id)
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CancelInvitationDto" }
+            example:
+              reason: "Drafter requested re-issuance after counterparty rename."
+      responses:
+        "200":
+          description: OK — invitation cancelled; contractRolledBack reflects whether status reverted.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CancelInvitationResponse" }
+        "400":
+          description: VALIDATION_ERROR — missing reason (AC-S8-06).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: NOT_FOUND — invitation_id unknown.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — `invalid_invitation_status_for_cancel` (AC-S8-05;
+            invitation status NOT IN ('pending','viewed')).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /sign/{invitationToken}:
+    get:
+      tags: [M3 — Signer Public (verify_jwt=false)]
+      operationId: signatureGetByInvitationToken
+      summary: Public signer landing page — masked-email signer-safe contract excerpt
+      description: |
+        PUBLIC unauthenticated read. The plaintext invitationToken from the
+        URL path is hashed (SHA-256) and matched against
+        signature_invitation.invitation_token_hash inside a SECURITY DEFINER
+        fn_ (GRANT EXECUTE TO PUBLIC). Updates view_count + last_viewed_at;
+        emits a 'viewed' signature_event ONCE per invitation (gated on
+        first_viewed_at IS NULL, AC-S3-03).
+
+        Sensitive-field policy is the strictest in the project:
+        - signer.email ALWAYS masked (`j***@example.com`)
+        - signer.phone NEVER returned
+        - contract.body* TRUNCATED to LEFT(body_*, 4000) chars
+        - signature_data + signature_image_url NEVER returned (AC-S3-05)
+
+        Errors return SINGLE GENERIC `invitation_invalid_or_expired` (HTTP 410)
+        that does NOT distinguish unknown / expired / cancelled (AC-S3-04).
+
+        DB function: `fn_signature_get_by_invitation_token` (DEFINER VOLATILE
+        — touches view_count + first_viewed_at).
+      security: []
+      x-rateLimit: publicSignerRateLimiter (60 req/min/IP)
+      x-authentication: token-bearer (invitation_token in URL path; SHA-256 hash-and-match server-side)
+      x-acsCovered: [AC-S3-01, AC-S3-02, AC-S3-03, AC-S3-04, AC-S3-05, AC-S3-06, AC-S3-07]
+      parameters:
+        - name: invitationToken
+          in: path
+          required: true
+          description: |
+            SENSITIVE — plaintext base64 token. The fn_ hashes inside (AC-S3-06).
+            Pino-redacted at the request URL path; never logged in plaintext.
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: OK — signer-safe contract excerpt.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignaturePublicViewResponse" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /sign/{invitationToken}/sign:
+    post:
+      tags: [M3 — Signer Public (verify_jwt=false)]
+      operationId: signatureSign
+      summary: PUBLIC — record a signature with one of 4 methods (typed/drawn/uae_pass/ds_otp)
+      description: |
+        PUBLIC unauthenticated write. Records a signature; the step-completion
+        check (S2-18 NULL-safe via IS NOT DISTINCT FROM on step_order) advances
+        contract.status awaiting_signature_employer →
+        awaiting_signature_counterparty → fully_signed (AN-13: M3 stops at
+        fully_signed; the fully_signed → active transition is a contract-lifecycle
+        concern handled by future modules).
+
+        Method gating (validated by fn_, mirrored in Zod):
+        - typed     → signatureData required (>= 2 chars trimmed)
+        - drawn     → signatureData AND signatureImageUrl required
+        - uae_pass  → uaePassVerificationLevel required
+        - ds_otp    → metadata.otpReceipt required (non-empty)
+
+        AC-S4-09 — second sign on same invitation returns 409 already_signed
+        (idempotency-style — fn_ raises P0001 with the existing status).
+        AC-S4-10 — signatureData and signatureImageUrl NEVER returned in the
+        response. Audit trail JSONB redacts both via M3 034.
+
+        DB function: `fn_signature_sign` (DEFINER, GRANT EXECUTE TO PUBLIC).
+      security: []
+      x-rateLimit: publicSignerRateLimiter (60 req/min/IP)
+      x-authentication: token-bearer (invitation_token in URL path)
+      x-acsCovered: [AC-S4-01, AC-S4-02, AC-S4-03, AC-S4-04, AC-S4-05, AC-S4-06, AC-S4-07, AC-S4-08, AC-S4-09, AC-S4-10, AC-S4-11, AC-S4-12]
+      parameters:
+        - name: invitationToken
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignContractDto" }
+            examples:
+              typed:
+                summary: Typed signature
+                value:
+                  signatureMethod: typed
+                  signatureData: "Faisal Al Mazrouei"
+              uaePass:
+                summary: UAE Pass signature
+                value:
+                  signatureMethod: uae_pass
+                  uaePassVerificationLevel: verified
+                  metadata:
+                    uaePassAttestationId: "uap-mock-2026-05-04"
+              dsOtp:
+                summary: Digital Signature OTP
+                value:
+                  signatureMethod: ds_otp
+                  metadata:
+                    otpReceipt: "otp-receipt-c891"
+      responses:
+        "200":
+          description: OK — signed event recorded; contractNewStatus reflects step transition (or NULL if step incomplete).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignContractResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409":
+          description: |
+            CONFLICT — `already_signed` (AC-S4-09; invitation.status='signed' on entry).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /sign/{invitationToken}/decline:
+    post:
+      tags: [M3 — Signer Public (verify_jwt=false)]
+      operationId: signatureDecline
+      summary: PUBLIC — record a decline with required reason (5..2000 chars)
+      description: |
+        PUBLIC unauthenticated write. Records a decline; required-signer
+        decline halts the contract (awaiting_signature_* → 'rejected',
+        AC-S5-01); witness (non-required) decline records the event without
+        a status transition (AC-S5-05).
+
+        DB function: `fn_signature_decline` (DEFINER, GRANT EXECUTE TO PUBLIC;
+        FOR UPDATE on contract + invitation + signature_party).
+      security: []
+      x-rateLimit: publicSignerRateLimiter (60 req/min/IP)
+      x-authentication: token-bearer (invitation_token in URL path)
+      x-acsCovered: [AC-S5-01, AC-S5-02, AC-S5-03, AC-S5-04, AC-S5-05, AC-S5-06, AC-S5-07, AC-S5-08]
+      parameters:
+        - name: invitationToken
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeclineContractDto" }
+            example:
+              declineReason: "The indemnity clause requires legal review at our end."
+      responses:
+        "200":
+          description: OK — decline recorded; contractNewStatus is 'rejected' for required signers, NULL for witness.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeclineContractResponse" }
+        "400":
+          description: |
+            VALIDATION_ERROR — `reason_too_short` (< 5 chars, AC-S5-02) or
+            `reason_too_long` (> 2000 chars, AC-S5-03).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — `already_decided` (AC-S5-07; invitation.status IN
+            ('signed','declined','cancelled')).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /sign/{invitationToken}/qa/session:
+    post:
+      tags: [M3 — Signer Q&A AI (verify_jwt=false)]
+      operationId: signerQaSessionStart
+      summary: PUBLIC — open a Q&A chat session for the signer
+      description: |
+        PUBLIC unauthenticated. Opens a signer_qa_session row and returns
+        sessionTokenPlaintext ONCE — required as `X-Session-Token` header on
+        subsequent /qa/message calls. Sliding-window enforcement when 5+
+        active sessions per invitation (AN-12 Option A — soft-deactivate
+        oldest by created_at ASC; never returns 429 on this path).
+
+        Language is locked at session start (AC-S11-05 / AN-2 languageLock);
+        defaults to invitation.language when omitted.
+
+        DB function: `fn_signer_qa_session_start` (DEFINER, GRANT EXECUTE TO
+        PUBLIC).
+      security: []
+      x-rateLimit: publicSignerRateLimiter (60 req/min/IP)
+      x-authentication: token-bearer (invitation_token in URL path)
+      x-acsCovered: [AC-S11-01, AC-S11-02, AC-S11-03, AC-S11-04, AC-S11-05, AC-S11-06]
+      parameters:
+        - name: invitationToken
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignerQaSessionStartDto" }
+            example:
+              language: en
+      responses:
+        "201":
+          description: |
+            CREATED — sessionTokenPlaintext returned ONCE; rateLimit metadata
+            seeded with maxMessagesPerHour=20.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SignerQaSessionStartResponse" }
+        "410": { $ref: "#/components/responses/Gone" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /sign/{invitationToken}/qa/message:
+    post:
+      tags: [M3 — Signer Q&A AI (verify_jwt=false)]
+      operationId: signerQaSessionRecordMessage
+      summary: PUBLIC — submit Q&A message; AI response streams back via SSE
+      description: |
+        PUBLIC unauthenticated. **Server-Sent Events response** —
+        `Content-Type: text/event-stream`. The only streaming endpoint in
+        the project.
+
+        Two-call rate-limit pattern (DN-10 / AN-2):
+        - Pre-AI: controller invokes the fn_ in `mode='GATE'` to RESERVE a
+          slot; raises 429 with retryAfterSeconds when the per-session
+          (20/h rolling) or per-invitation (50/h rolling) cap is hit.
+        - During AI: controller streams OpenAI gpt-4o tokens as
+          `{ type: 'token', delta: '...' }` SSE chunks.
+        - Post-AI: controller invokes the fn_ in `mode='COMMIT'` with actual
+          tokensConsumed; emits terminal `{ type: 'done', tokensConsumed }`
+          chunk.
+        - On error past header-flip: emits terminal
+          `{ type: 'error', code, message?, retryAfterSeconds? }` chunk.
+
+        AI provider: OpenAI gpt-4o; system prompt loaded VERBATIM from
+        `prompts/ai-signer-qa.txt` at request time (Mustache-style
+        {{placeholder}} substitution; no auto-escaping). NO transcript is
+        persisted (AN-2 transcriptStorage; DN-11) — only the per-session
+        message_count + tokens_consumed counters.
+
+        Header `X-Session-Token` carries the plaintext session_token returned
+        ONCE by POST /qa/session; the fn_ hashes inside (SHA-256 hash-and-match).
+
+        SENSITIVE — `userMessage` is pino-redacted because `ai_prompt_payload`
+        is in project.config sensitiveFields (AC-S12-09).
+
+        DB function: `fn_signer_qa_session_record_message` (DEFINER, GRANT
+        EXECUTE TO PUBLIC).
+      security: []
+      x-rateLimit: publicSignerRateLimiter (60 req/min/IP) + per-session 20/h + per-invitation 50/h (fn_-enforced)
+      x-authentication: token-bearer (invitation_token in URL path) + session-token-bearer (X-Session-Token header)
+      x-acsCovered: [AC-S12-01, AC-S12-02, AC-S12-03, AC-S12-04, AC-S12-05, AC-S12-06, AC-S12-07, AC-S12-08, AC-S12-09, AC-S12-10]
+      parameters:
+        - name: invitationToken
+          in: path
+          required: true
+          schema: { type: string, minLength: 1 }
+        - name: X-Session-Token
+          in: header
+          required: true
+          description: |
+            SENSITIVE — plaintext session_token returned ONCE by
+            POST /qa/session. Pino-redacted on egress logs.
+          schema: { type: string, minLength: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SignerQaRecordMessageDto" }
+            examples:
+              gate:
+                summary: GATE — pre-AI slot reservation
+                value:
+                  mode: GATE
+                  tokensConsumed: 0
+                  userMessage: "What is the cancellation clause in section 7?"
+              commit:
+                summary: COMMIT — post-AI usage record
+                value:
+                  mode: COMMIT
+                  tokensConsumed: 142
+      responses:
+        "200":
+          description: |
+            OK — Server-Sent Events stream. Each chunk is `data: <JSON>\n\n`.
+            Three chunk variants — see SignerQaMessageStreamChunk schema.
+            Headers include:
+            - `Content-Type: text/event-stream; charset=utf-8`
+            - `Cache-Control: no-cache, no-transform`
+            - `Connection: keep-alive`
+            - `X-Accel-Buffering: no` (Nginx flush)
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            Content-Type:
+              schema: { type: string, enum: ["text/event-stream; charset=utf-8"] }
+            Cache-Control:
+              schema: { type: string, enum: ["no-cache, no-transform"] }
+            Connection:
+              schema: { type: string, enum: [keep-alive] }
+            X-Accel-Buffering:
+              schema: { type: string, enum: [no] }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each SSE event is `data: <JSON>\n\n` where JSON conforms to
+                  SignerQaMessageStreamChunk. Multiple `token` chunks may
+                  precede the terminal `done` (or `error`) chunk.
+              example: |
+                data: {"type":"token","delta":"The "}
+
+                data: {"type":"token","delta":"cancellation "}
+
+                data: {"type":"token","delta":"clause "}
+
+                data: {"type":"done","tokensConsumed":142}
+
+        "400":
+          description: |
+            VALIDATION_ERROR — Zod failure (mode/tokensConsumed/userMessage
+            discriminator violation).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "410":
+          description: |
+            GONE — `session_invalid_or_expired` (AC-S12-10; session_token
+            unknown or signer_qa_session.is_active=FALSE) OR
+            `invitation_invalid_or_expired` (when GATE finds invitation
+            already expired/cancelled).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: |
+            RATE_LIMITED — per-session (20/h) OR per-invitation (50/h) cap
+            hit (AC-S12-04 / AC-S12-05). Response includes
+            `retryAfterSeconds` field. Note: when 429 happens AFTER the SSE
+            header flip, it surfaces as a terminal SSE error chunk
+            (`{ type: 'error', code: 'rate_limit_exceeded', retryAfterSeconds }`)
+            instead of an HTTP 429 status.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 

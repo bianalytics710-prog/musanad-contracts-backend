@@ -156,7 +156,14 @@ export type ActivityType =
   | 'approval_decided'
   | 'approval_reassigned'
   | 'approval_escalated'
-  | 'approval_delegated';
+  | 'approval_delegated'
+  // M3 / AE-1 — migration 032 additions (6 new values; total 20)
+  | 'sent_for_signature'
+  | 'signer_viewed'
+  | 'signer_signed'
+  | 'signer_declined'
+  | 'fully_executed'
+  | 'signature_invalidated';
 
 /**
  * Contract-domain role keys (created in M1a CMSW-1). M0's existing roles

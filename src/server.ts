@@ -50,6 +50,10 @@ import {
   startApprovalEscalationCron,
   stopApprovalEscalationCron,
 } from './services/approval-escalation.cron.service';
+import {
+  startSignatureExpirationCron,
+  stopSignatureExpirationCron,
+} from './services/signature-expiration.cron.service';
 
 const app = express();
 
@@ -133,6 +137,12 @@ const server = app.listen(port, () => {
   // simply schedules the cron task; the first sweep fires per the cron
   // expression (default every 15 minutes).
   startApprovalEscalationCron();
+
+  // M3 / S9 — start signature-expiration cron driver (mirrors approval
+  // escalation pattern; per DN-13 + cron driver contract). No-op in
+  // NODE_ENV=test. SYSTEM_ACTOR sentinel sets app.current_user_id='0'
+  // before each fn_signature_invitation_expire_due call.
+  startSignatureExpirationCron();
 });
 
 // --- Graceful shutdown ---
@@ -142,6 +152,8 @@ const shutdown = async (signal: string): Promise<void> => {
     // Stop the approval-escalation cron driver before draining requests so
     // no new sweep starts mid-shutdown.
     stopApprovalEscalationCron();
+    // M3 — stop signature-expiration cron driver as well.
+    stopSignatureExpirationCron();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

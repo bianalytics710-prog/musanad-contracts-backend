@@ -31,6 +31,7 @@
 import { Router } from 'express';
 import { contractsController } from '../../controllers/contracts.controller';
 import { approvalController } from '../../controllers/approval.controller';
+import { signatureController } from '../../controllers/signature.controller';
 import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import {
@@ -59,6 +60,10 @@ import {
   RouteInitPreviewSchema,
   SubmitForApprovalSchema,
 } from '../../schemas/approval.schemas';
+import {
+  SendForSignatureDtoSchema,
+  SignaturePartyCreateBulkDtoSchema,
+} from '../../schemas/signature.schemas';
 
 const router = Router();
 
@@ -181,6 +186,44 @@ router.get(
   authoriseAnyOf(READ_ANY),
   validate(ContractIdParamSchema, 'params'),
   approvalController.chainGetByContract,
+);
+
+// ============================================================
+// M3 :id-prefixed sub-routes (W1 — POST literals before bare :id):
+//   POST /:id/signature-parties     — S1 (bulk-create roster)
+//   POST /:id/send-for-signature    — S2 (issue invitations + status flip)
+//   GET  /:id/signatures            — S6 (per-contract signature progress)
+// ============================================================
+
+// POST /api/v1/contracts/:id/signature-parties — S1
+router.post(
+  '/:id/signature-parties',
+  authedWriteRateLimiter,
+  authorise(['signature.send']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(SignaturePartyCreateBulkDtoSchema, 'body'),
+  signatureController.createPartiesBulk,
+);
+
+// POST /api/v1/contracts/:id/send-for-signature — S2
+router.post(
+  '/:id/send-for-signature',
+  authedWriteRateLimiter,
+  authorise(['signature.send']),
+  validate(ContractIdParamSchema, 'params'),
+  validate(SendForSignatureDtoSchema, 'body'),
+  signatureController.sendForSignature,
+);
+
+// GET /api/v1/contracts/:id/signatures — S6
+//   Permission: contract.read.* (any) — caller is a contract participant or
+//   privileged role. Email masking is role-aware inside the fn_.
+router.get(
+  '/:id/signatures',
+  authedReadRateLimiter,
+  authoriseAnyOf([...READ_ANY, 'signature.read.all']),
+  validate(ContractIdParamSchema, 'params'),
+  signatureController.listForContract,
 );
 
 // ============================================================

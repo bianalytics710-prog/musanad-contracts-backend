@@ -84,6 +84,10 @@ const envSchema = z.object({
   // M2 — Approval escalation cron (S9). Default '*/15 * * * *' (every 15
   // minutes). Disabled in NODE_ENV=test (smoke harness short-circuit).
   APPROVAL_ESCALATION_INTERVAL_CRON: z.string().min(1).default('*/15 * * * *'),
+
+  // M3 — Signature invitation expiration cron (S9). Default '*/15 * * * *'
+  // (every 15 minutes). Disabled in NODE_ENV=test (smoke harness owns scheduling).
+  SIGNATURE_EXPIRATION_INTERVAL_CRON: z.string().min(1).default('*/15 * * * *'),
 });
 
 export type Env = z.infer<typeof envSchema>;

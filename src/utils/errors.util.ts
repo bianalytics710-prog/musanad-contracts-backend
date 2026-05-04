@@ -88,9 +88,23 @@ export class LockedError extends ApiError {
 }
 
 export class RateLimitError extends ApiError {
-  constructor(message = 'Rate limit exceeded') {
-    super(429, 'RATE_LIMITED', message);
+  constructor(message = 'Rate limit exceeded', fields?: ApiErrorFields) {
+    super(429, 'RATE_LIMITED', message, fields);
     this.name = 'RateLimitError';
+  }
+}
+
+/**
+ * 410 Gone — used for M3 token-bearer endpoints when the invitation or
+ * session token is no longer usable (unknown / expired / cancelled). Per
+ * AC-S3-04 / AC-S4-05 / AC-S5-04 / AC-S11-02 / AC-S12-10 the message MUST
+ * be a single generic value that does not distinguish between the failure
+ * modes — that information is reserved for the auth layer + audit log.
+ */
+export class GoneError extends ApiError {
+  constructor(message = 'Resource is no longer available', fields?: ApiErrorFields) {
+    super(410, 'GONE', message, fields);
+    this.name = 'GoneError';
   }
 }
 

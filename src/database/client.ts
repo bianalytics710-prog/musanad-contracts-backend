@@ -24,9 +24,11 @@ import {
   ApiError,
   ConflictError,
   ForbiddenError,
+  GoneError,
   InternalError,
   LockedError,
   NotFoundError,
+  RateLimitError,
   UnprocessableEntityError,
   ValidationError,
 } from '../utils/errors.util';
@@ -161,13 +163,71 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
         // Map to 409 CONFLICT with the structured field:message preserved.
         // fn_approval_decide / fn_contract_status_update_user / fn_approval_route_init
         // use P0001 for all "valid request but rejected by current state" cases.
+        //
+        // M3 introduces unstructured P0001 raises (no field prefix) that need
+        // distinct HTTP status codes:
+        //   - 'invitation_invalid_or_expired'  → 410 GONE (single generic msg)
+        //   - 'session_invalid_or_expired'      → 410 GONE
+        //   - 'rate_limit_exceeded'             → 429 RATE_LIMITED
+        //   - 'already_signed' / 'already_decided' → 409 CONFLICT (default)
         {
           const firstLine = message.split('\n')[0]?.trim() ?? message;
-          const m = STRUCTURED_RAISE_RE.exec(firstLine);
-          if (m) {
-            const field = m[2] ?? '_root';
-            const msg = m[3]?.trim() ?? 'Conflict';
+          const structured = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (structured) {
+            const field = structured[2] ?? '_root';
+            const msg = structured[3]?.trim() ?? 'Conflict';
             return new ConflictError(msg, { [field]: msg });
+          }
+          // M3 unstructured raises: extract message after `fn_X: `
+          const unstructured = /^(fn_[a-z0-9_]+):\s*(.+)$/i.exec(firstLine);
+          if (unstructured) {
+            const msg = unstructured[2]?.trim() ?? '';
+            // 410 GONE — token-bearer "no longer valid" (AC-S3-04 / AC-S4-05 /
+            // AC-S5-04 / AC-S11-02 / AC-S12-10). Single generic message —
+            // does not distinguish unknown / expired / cancelled.
+            if (msg === 'invitation_invalid_or_expired') {
+              return new GoneError('Invitation is invalid or expired');
+            }
+            if (msg === 'session_invalid_or_expired') {
+              return new GoneError('Session is invalid or expired');
+            }
+            // 429 RATE_LIMITED — per-session 20/h or per-invitation 50/h cap
+            // (AC-S12-04 / AC-S12-05). RateLimitError surfaces a generic
+            // message; retryAfterSeconds is computed at the controller layer
+            // when needed (the fn does not return it on the raise path).
+            if (msg === 'rate_limit_exceeded') {
+              return new RateLimitError('Q&A rate limit exceeded — try again later');
+            }
+            // 409 CONFLICT — idempotency / already-decided cases.
+            if (msg === 'already_signed') {
+              return new ConflictError('Invitation has already been signed', {
+                invitationStatus: 'signed',
+              });
+            }
+            if (msg === 'already_decided') {
+              return new ConflictError('Invitation has already been decided');
+            }
+            // M3 P0001 catch-all that carries a status snippet inside parens —
+            // e.g. 'invalid_status_for_send (current=draft,expected=approved)'
+            // or 'invalid_invitation_status_for_resend (current=signed)'.
+            // Surface as 409 with the cleaned message; the controller's
+            // structured handler may further refine.
+            if (
+              msg.startsWith('invalid_status_for_send') ||
+              msg.startsWith('invalid_invitation_status_for_resend') ||
+              msg.startsWith('invalid_invitation_status_for_cancel') ||
+              msg === 'no_signature_parties' ||
+              msg === 'no_approved_chain'
+            ) {
+              return new ConflictError(msg);
+            }
+            // 'precondition_failed:<sub>' style — used by
+            // fn_signature_party_create_bulk + fn_signature_send_for_signature.
+            if (msg.startsWith('precondition_failed:')) {
+              return new ConflictError(msg);
+            }
+            // Otherwise: default to 409
+            return new ConflictError(msg);
           }
         }
         return new ConflictError(`${fnName}: state conflict`);

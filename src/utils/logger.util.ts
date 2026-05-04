@@ -407,6 +407,110 @@ const SENSITIVE_PATHS: string[] = [
   '*.matrix_snapshot',
   '*.*.matrix_snapshot',
 
+  // -- M3 — invitationToken / invitation_token (plaintext + hash) --
+  //    The fn_ persists invitation_token_hash only; plaintext is returned
+  //    ONCE on creation. Both names redacted here to defeat any code path
+  //    that logs the plaintext or the hash.
+  'invitationToken',
+  'req.body.invitationToken',
+  'req.body.*.invitationToken',
+  'req.query.invitationToken',
+  'req.params.invitationToken',
+  '*.invitationToken',
+  '*.*.invitationToken',
+  'invitation_token',
+  'req.body.invitation_token',
+  'req.body.*.invitation_token',
+  'req.query.invitation_token',
+  'req.params.invitation_token',
+  '*.invitation_token',
+  '*.*.invitation_token',
+  'invitationTokenPlaintext',
+  'req.body.invitationTokenPlaintext',
+  'req.body.*.invitationTokenPlaintext',
+  '*.invitationTokenPlaintext',
+  '*.*.invitationTokenPlaintext',
+  'invitationTokenHash',
+  '*.invitationTokenHash',
+  '*.*.invitationTokenHash',
+  'invitation_token_hash',
+  '*.invitation_token_hash',
+  '*.*.invitation_token_hash',
+
+  // -- M3 — sessionToken / session_token (plaintext + hash) --
+  'sessionToken',
+  'req.body.sessionToken',
+  'req.body.*.sessionToken',
+  'req.query.sessionToken',
+  'req.params.sessionToken',
+  '*.sessionToken',
+  '*.*.sessionToken',
+  'session_token',
+  'req.body.session_token',
+  'req.body.*.session_token',
+  'req.query.session_token',
+  'req.params.session_token',
+  '*.session_token',
+  '*.*.session_token',
+  'sessionTokenPlaintext',
+  'req.body.sessionTokenPlaintext',
+  'req.body.*.sessionTokenPlaintext',
+  '*.sessionTokenPlaintext',
+  '*.*.sessionTokenPlaintext',
+  'sessionTokenHash',
+  '*.sessionTokenHash',
+  '*.*.sessionTokenHash',
+  'session_token_hash',
+  '*.session_token_hash',
+  '*.*.session_token_hash',
+
+  // -- M3 — X-Session-Token header --
+  'req.headers.x-session-token',
+  'req.headers.X-Session-Token',
+
+  // -- M3 — signatureData / signature_data (typed/drawn payload) --
+  //    SENSITIVE — the verbatim signature payload (typed signature text or
+  //    base64 canvas data). Never returned by any read path. Audit-log
+  //    redacted by fn_audit_trigger via M3 034.
+  'signatureData',
+  'req.body.signatureData',
+  'req.body.*.signatureData',
+  'req.query.signatureData',
+  'req.params.signatureData',
+  '*.signatureData',
+  '*.*.signatureData',
+  'signature_data',
+  'req.body.signature_data',
+  'req.body.*.signature_data',
+  '*.signature_data',
+  '*.*.signature_data',
+
+  // -- M3 — signatureImageUrl / signature_image_url --
+  //    SENSITIVE — storage URL of canvas-rendered signature PNG. Distinct
+  //    from M1a `signature_image` (already redacted above) — different
+  //    column on signature_event. Audit-log redacted in M3 034.
+  'signatureImageUrl',
+  'req.body.signatureImageUrl',
+  'req.body.*.signatureImageUrl',
+  'req.query.signatureImageUrl',
+  'req.params.signatureImageUrl',
+  '*.signatureImageUrl',
+  '*.*.signatureImageUrl',
+  'signature_image_url',
+  'req.body.signature_image_url',
+  'req.body.*.signature_image_url',
+  '*.signature_image_url',
+  '*.*.signature_image_url',
+
+  // -- M3 — userMessage (signer Q&A user prompt — ai_prompt_payload alias) --
+  //    AC-S12-09: NEVER logged at controller level. Pino still applies as a
+  //    safety net.
+  'userMessage',
+  'req.body.userMessage',
+  'req.body.*.userMessage',
+  '*.userMessage',
+  '*.*.userMessage',
+
   // -- Response envelope: passwordHash on res.body / res.user --
   //    Preserved from M0 — covers the auth login response shape.
   'res.body.passwordHash',

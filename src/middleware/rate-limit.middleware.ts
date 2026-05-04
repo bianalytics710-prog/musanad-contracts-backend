@@ -39,6 +39,10 @@ const refreshLimiter = buildLimiter({ points: 10, durationSeconds: 15 * 60 });
 const logoutLimiter = buildLimiter({ points: 10, durationSeconds: 5 * 60 });
 const authedReadLimiter = buildLimiter({ points: 120, durationSeconds: 60 });
 const authedWriteLimiter = buildLimiter({ points: 60, durationSeconds: 60 });
+// M3 — public signer namespace (verify_jwt=false). Coarser per-IP limit
+// because callers are unauthenticated. The fn-level rate limits (per-session
+// 20/h, per-invitation 50/h on signer Q&A) are enforced by the DB.
+const publicSignerLimiter = buildLimiter({ points: 60, durationSeconds: 60 });
 
 // req.ip honours `app.set('trust proxy', 1)`. We MUST NOT read X-Forwarded-For
 // directly: that bypasses the trust-proxy hop count and lets attackers spoof
@@ -79,3 +83,12 @@ export const refreshRateLimiter = consume(refreshLimiter, ipKey);
 export const logoutRateLimiter = consume(logoutLimiter, ipKey);
 export const authedReadRateLimiter = consume(authedReadLimiter, userKey);
 export const authedWriteRateLimiter = consume(authedWriteLimiter, userKey);
+/**
+ * M3 — Public signer namespace rate limiter.
+ *
+ * Used by /api/v1/sign/* routes (verify_jwt=false). Per-IP because there is
+ * no authenticated user. The fn_signer_qa_session_record_message GATE/COMMIT
+ * pattern enforces additional, finer-grained limits (per-session 20/h,
+ * per-invitation 50/h aggregate) inside the DB.
+ */
+export const publicSignerRateLimiter = consume(publicSignerLimiter, ipKey);
