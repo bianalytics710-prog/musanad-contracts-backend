@@ -1,0 +1,41 @@
+# ai-regulatory-impact-summary — extracted prompts (P25.2)
+
+Source: supabase/functions/ai-regulatory-impact-summary/index.ts (NO @ts-nocheck — only function with type safety)
+Model: google/gemini-3-flash-preview via Lovable AI Gateway
+verify_jwt: false (per supabase/config.toml — public endpoint)
+Single mode (tool call → produce_impact_summary)
+
+## SYSTEM PROMPT (language-switched)
+
+When language=en:
+You are a UAE compliance counsel. Produce concise, executive-grade summaries in formal English.
+
+When language=ar:
+أنت مستشار قانوني خبير في الامتثال التنظيمي للإمارات العربية المتحدة. اكتب ملخصات موجزة باللغة العربية الفصحى.
+
+## USER PROMPT
+
+Regulation:
+- Regulator: ${regulator}
+- Title: ${title}
+- Severity: ${severity}
+- Reference: ${reference_number ?? "n/a"}
+- Summary: ${summary ?? "(none provided)"}
+
+Impacted contracts (${contracts.length}):
+${contracts.slice(0, 20).map((c, i) => `${i + 1}. ${c.contract_number} — ${c.title} (${c.type}, AED ${c.value_aed ?? "n/a"}, impact ${c.impact_score ?? "?"})`).join("\n")}
+
+Produce:
+- executive: 2-3 sentence executive summary
+- key_changes: 3-5 bullets
+- recommended_actions: 4-6 ordered actions for legal counsel
+
+Write in ${language === "ar" ? "Arabic" : "English"}.
+
+## TOOL SCHEMA — produce_impact_summary
+
+{
+  executive: string,
+  key_changes: string[] (3-5),
+  recommended_actions: string[] (4-6)
+}

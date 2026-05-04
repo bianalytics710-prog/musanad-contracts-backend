@@ -39,7 +39,29 @@ info:
     project. Cron-driven invitation expiry (`fn_signature_invitation_expire_due`)
     runs in-process via `SIGNATURE_EXPIRATION_INTERVAL_CRON` and is not exposed
     via HTTP.
-  version: 0.6.0
+
+    M4 introduces 10 new endpoints: 6 AI invocation endpoints under
+    `/api/v1/ai/*` (5 JWT-authenticated + 1 PUBLIC behind a signed-PDF-token)
+    and 4 admin observability endpoints under `/api/v1/admin/ai/*` (JWT,
+    `ai.observability.read`). Three AI invocation endpoints stream Server-Sent
+    Events (`/ai/contract-insights` modes summary/rewrite,
+    `/ai/drafting-assistant` modes chat/explain/rewrite, `/ai/regulatory-impact`
+    modes explain/amendment) — bringing the project SSE endpoint count from 1
+    to 4. M4 introduces a NEW security scheme `signedPdfToken` (HMAC-validated
+    short-lived token; `aud='regulatory-impact-pdf'`, validated at the Express
+    middleware layer before the controller invokes `neondb_owner`-only fn_'s)
+    — distinct from M3's `verify_jwt=false` PUBLIC namespace, and the first
+    `signed-token` auth mode in the project. **PUBLIC EXECUTE on fn_'s remains
+    at exactly the M3 set of 5 names** (Q3 Option A; M4 contributes 0 new
+    PUBLIC fn_ grants — S2-21 promotion criterion satisfied). M4 introduces a
+    3rd in-process cron driver (`fn_ai_insight_evict_expired` — 15-minute
+    sweep of expired ai_insight cache rows; `AI_INSIGHT_EVICTION_INTERVAL_CRON`
+    env var). AI provider: OpenAI `gpt-4o` (and `gpt-4o-mini` for the cheaper
+    executive-anomalies + version-diff-summary prompts) — reuses the M0
+    AIProvider abstraction unchanged. Six prompt files in `[backend]/prompts/`
+    are loaded VERBATIM at boot (G7 — Mustache-style placeholder substitution
+    only at runtime; never edit the prompt body).
+  version: 0.7.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -151,6 +173,75 @@ tags:
       Email is ALWAYS masked on the public read; `signature_data` and
       `signature_image_url` are NEVER returned. Rate limit:
       `publicSignerRateLimiter` (60 req/min/IP).
+  - name: M4 — AI (Contract + Drafting + Executive)
+    description: |
+      AI invocation endpoints (M4) for contract-scoped insights, drafting
+      assistance, and executive anomaly detection. 3 endpoints under
+      `/api/v1/ai/*`: `POST /contract-insights` (S1 — summary/key_terms/risks/
+      obligations/regulatory/rewrite; SSE on summary+rewrite, JSON tool-call
+      otherwise; cache via ai_insight 24h; persists summary + risk score to
+      contract.ai_summary_*/ai_risk_score), `POST /drafting-assistant` (S2 —
+      suggest/chat/explain/rewrite; SSE on chat/explain/rewrite; NO caching;
+      separate hourly + daily rate limits per prompt), `POST /executive-anomalies`
+      (S3 — non-streaming tool-call; cache via ai_insight 1h; entity_type=
+      'executive_dashboard' with entity_id=NULL). Permission gates:
+      `ai.invoke.contract` (Super Admin / platform_admin / legal_counsel /
+      contract_drafter), `ai.invoke.executive` (Super Admin / platform_admin /
+      executive). Sensitive fields: `selectedText`, `chatHistory`,
+      `draftSummary`, `ai_prompt_payload` — pino-redacted at controller; DB
+      defence-in-depth via `payload` redact in `fn_audit_trigger` post-
+      migration 041. Each invocation appends one `ai_request_log` row in a
+      controller `finally{}` block (success / error / cache_hit / rate_limited
+      / timeout / cancelled). All fn_'s are `neondb_owner`-only DEFINER /
+      INVOKER — NO PUBLIC EXECUTE grants (S2-21 invariant).
+  - name: M4 — AI (Regulatory Impact)
+    description: |
+      Regulatory-update impact endpoints (M4). 2 endpoints under `/api/v1/ai/*`:
+      `POST /regulatory-impact` (S4 — JWT; SSE explain/amendment streaming;
+      stateless / payload-driven because the `regulatory_update` table doesn't
+      exist yet — Q1 deferred to M5+; cache via ai_insight 24h with
+      entity_type='regulatory_update' + entity_id=NULL), and `POST
+      /regulatory-impact-summary` (S5 — PUBLIC behind a signed-PDF-token;
+      consumed server-side by the future PDF generator pipeline; cache 30 days
+      content-addressed by SHA-256 of canonicalised inputs). Permission gate
+      for S4: `ai.invoke.regulatory` (Super Admin / platform_admin /
+      legal_counsel). S5 is token-bearer authenticated — see the
+      `signedPdfToken` security scheme. M4 introduces this `signed-token`
+      auth mode; the underlying `fn_ai_regulatory_impact_summary_*` fn_'s are
+      `neondb_owner`-only — NOT in the PUBLIC EXECUTE allowlist (Q3 Option A).
+      Sensitive fields: `summaryEn`, `signedToken`, `ai_prompt_payload`. The
+      S5 controller enforces a per-token in-memory hourly rate limit (10/h)
+      because there is no actor user id; this caveat is documented in
+      BE-IMPL-INFO-2 (single-replica only; switch to Redis when scaling).
+  - name: M4 — AI (Version Diff Summary)
+    description: |
+      Plain-language AI summary of differences between two contract versions
+      (M4 — S6). Single endpoint `POST /api/v1/ai/version-diff-summary`. JWT;
+      `ai.invoke.contract` permission. Non-streaming. Persists the resulting
+      summary to `contract_version.diff_summary` via the DEFINER carve-out
+      `fn_contract_version_diff_summary_persist` — the ONLY allowed UPDATE
+      path on that column (table is otherwise append-only at M1a). Cache via
+      ai_insight 7 days, entity_type='contract_version'. Sensitive fields:
+      `additions`, `deletions`, `modifiedClauses`, `ai_prompt_payload`.
+      Migration 045 patches the fn_ body for the column-existence escape
+      caught by the Testing Agent (DEFECT-1; UPDATE clause referenced
+      nonexistent `updated_at`/`updated_by` on `contract_version`); the post-
+      patch fn signature and JSONB return shape are byte-identical to 043 —
+      controller bindings unchanged.
+  - name: M4 — Admin AI Observability
+    description: |
+      Admin observability + read endpoints for the AI subsystem (M4 — S11/S12/
+      S13). 4 endpoints under `/api/v1/admin/ai/*`: `GET /insights` (paginated
+      cache contents — fn_ai_insight_list), `GET /requests` (paginated
+      ai_request_log with filters — fn_ai_request_log_list), `GET /cost-report`
+      (aggregated by promptId + optional userId; 90-day max window —
+      fn_ai_request_log_cost_report), `GET /prompts` (list registered AI
+      prompts and their default model + rate limits; read-only in M4 —
+      fn_ai_prompt_list). All require JWT + `ai.observability.read` permission
+      (Super Admin / platform_admin). Sensitive fields surfaced in payloads
+      (`payload`, `errorMessage`) are pino-redacted on log lines; the API
+      response itself returns the data verbatim because admins legitimately
+      need to inspect cache contents and provider error messages for debug.
   - name: M3 — Signer Q&A AI (verify_jwt=false)
     description: |
       Public signer Q&A endpoints (M3). 2 endpoints under `/api/v1/sign/:invitationToken/qa/*`.
@@ -181,6 +272,48 @@ components:
         Refreshed via `POST /api/v1/auth/refresh` (rotation: both access AND
         refresh tokens are rotated; old refresh is blacklisted server-side).
         Logout blacklists the supplied refresh token via `fn_auth_blacklist_token`.
+
+    signedPdfToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        **M4 — NEW security scheme.** Short-lived HMAC-signed token bearer
+        authentication for the single PUBLIC AI endpoint
+        `POST /api/v1/ai/regulatory-impact-summary` (S5). The token is a
+        compact JWT (HS256) issued by the future PDF generator pipeline;
+        it is NOT a session JWT and does NOT carry a user id.
+
+        **Validation chain** (`signedPdfTokenMiddleware`):
+        - Algorithm: HS256 only.
+        - Audience (`aud`): MUST equal `SIGNED_PDF_TOKEN_AUDIENCE`
+          (default `regulatory-impact-pdf`).
+        - Issuer (`iss`): MUST equal `SIGNED_PDF_TOKEN_ISSUER` (default
+          `musanad-contracts-pdf`).
+        - Expiry (`exp`): enforced by `jsonwebtoken.verify`.
+        - Nonce (`jti`): single-use guard (in-process Set; per-replica only).
+        - Header source: `Authorization: Bearer <token>` OR `X-Signed-Pdf-Token: <token>`.
+
+        **Required environment variable:** `SIGNED_PDF_TOKEN_SECRET` — if
+        unset at boot, S5 returns `503 service_unavailable` (intentional;
+        S5 is the only endpoint affected; documented in BE-IMPL-INFO-2 +
+        ops-runbook M4 section).
+
+        **Rate limit:** in-process per-token bucket (10 calls / hour) —
+        BE-IMPL-INFO-2 single-replica caveat. Substituted for
+        `fn_ai_request_log_check_rate_limit` because the public endpoint has
+        no actor user id; one `ai_request_log` row is still appended per
+        invocation with `actor_user_id=NULL` so cost telemetry is preserved.
+
+        **Important:** the underlying database functions
+        (`fn_ai_insight_get_cached`, `fn_ai_insight_upsert`,
+        `fn_ai_prompt_get`, `fn_ai_request_log_create`) remain
+        `neondb_owner`-only DEFINER — NOT in the PUBLIC EXECUTE allowlist.
+        This is Q3 Option A: controller-mediated PUBLIC; underlying fn_'s
+        keep DB-layer least-privilege. Loses DB-layer defence-in-depth for
+        the public path; trade-off documented in db-design.md DN-3.
+        S2-21 invariant: PUBLIC EXECUTE on fn_'s stays at exactly the M3 set
+        of 5 names (M4 contributes 0 new PUBLIC fn_ grants).
 
   parameters:
     PageQuery:
@@ -2391,6 +2524,831 @@ components:
             code: { type: string, description: e.g. 'rate_limit_exceeded'. }
             message: { type: string, nullable: true }
             retryAfterSeconds: { type: integer, nullable: true }
+
+    # ===== M4 — AI Features schemas (introduced 2026-05-04) =====
+
+    AiLanguage:
+      type: string
+      enum: [en, ar, bilingual]
+      description: |
+        ai_insight + ai_request_log language CHECK enum. S5 narrows to
+        `en | ar` only (bilingual rejected at validation).
+
+    AiProvider:
+      type: string
+      enum: [openai, anthropic]
+      description: ai_insight + ai_request_log provider CHECK enum.
+
+    AiRequestOutcome:
+      type: string
+      enum: [success, error, timeout, rate_limited, cancelled]
+      description: ai_request_log.outcome CHECK enum.
+
+    AiInsightEntityType:
+      type: string
+      enum: [contract, contract_version, regulatory_update, regulatory_update_summary, executive_dashboard]
+      description: |
+        Open-set in DB (no CHECK constraint), but the closed union here lists
+        the values currently in use. Future modules MAY add new values without
+        schema migration; the matching RLS clause MUST be added in tandem.
+
+    AiInsightType:
+      type: string
+      enum:
+        - contract_summary
+        - contract_key_terms
+        - contract_risks
+        - contract_obligations
+        - contract_regulatory
+        - contract_rewrite
+        - version_diff_summary
+        - executive_anomalies
+        - regulatory_impact_explain
+        - regulatory_impact_amendment
+        - regulatory_impact_summary
+      description: |
+        Open-set in DB (free-text VARCHAR(60)). Closed union for editor
+        ergonomics. Future modules adding new values MUST extend the union
+        OR widen via M5_INSIGHT_TYPE_EXTENSIONS pattern.
+
+    M4PromptId:
+      type: string
+      enum:
+        - ai-contract-insights
+        - ai-drafting-assistant
+        - ai-executive-anomalies
+        - ai-regulatory-impact
+        - ai-regulatory-impact-summary
+        - ai-version-diff-summary
+      description: ai_prompt.prompt_id (code-PK). Mirrors the 6 seed rows in migration 044.
+
+    AiContractInsightsMode:
+      type: string
+      enum: [summary, key_terms, risks, obligations, regulatory, rewrite]
+
+    AiDraftingAssistantMode:
+      type: string
+      enum: [suggest, explain, rewrite, chat]
+
+    AiDraftingAssistantTone:
+      type: string
+      enum: [simpler, formal, stronger, balanced]
+
+    AiRegulatoryImpactMode:
+      type: string
+      enum: [explain, amendment]
+
+    AiInsightsStreamChunk:
+      type: object
+      description: |
+        SSE chunk shape for `POST /api/v1/ai/contract-insights` modes
+        `summary` and `rewrite`. Wire format per chunk: `data: <JSON>\n\n`.
+        Mirrors M3 SignerQaMessageStreamChunk pattern; one parser handles
+        all four streaming endpoints in the project.
+      oneOf:
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { type: string, enum: [token] }
+            delta: { type: string }
+        - type: object
+          required: [type, tokensConsumed]
+          properties:
+            type: { type: string, enum: [done] }
+            tokensConsumed: { type: integer }
+            persisted:
+              nullable: true
+              description: |
+                Returned only on mode='summary' when fn_contract_ai_summary_persist
+                ran successfully. Shape = ContractAiSummaryPersistData.
+              $ref: "#/components/schemas/ContractAiSummaryPersistData"
+        - type: object
+          required: [type, code]
+          properties:
+            type: { type: string, enum: [error] }
+            code: { type: string }
+            message: { type: string, nullable: true }
+            retryAfterSeconds: { type: integer, nullable: true }
+
+    AiDraftingAssistantStreamChunk:
+      type: object
+      description: |
+        SSE chunk shape for `POST /api/v1/ai/drafting-assistant` modes
+        `chat`, `explain`, `rewrite`. mode='suggest' is non-streaming and
+        returns AiDraftingAssistantSuggestResponse synchronously.
+      oneOf:
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { type: string, enum: [token] }
+            delta: { type: string }
+        - type: object
+          required: [type, tokensConsumed]
+          properties:
+            type: { type: string, enum: [done] }
+            tokensConsumed: { type: integer }
+        - type: object
+          required: [type, code]
+          properties:
+            type: { type: string, enum: [error] }
+            code: { type: string }
+            message: { type: string, nullable: true }
+            retryAfterSeconds: { type: integer, nullable: true }
+
+    AiRegulatoryImpactStreamChunk:
+      type: object
+      description: |
+        SSE chunk shape for `POST /api/v1/ai/regulatory-impact` modes
+        `explain` and `amendment`.
+      oneOf:
+        - type: object
+          required: [type, delta]
+          properties:
+            type: { type: string, enum: [token] }
+            delta: { type: string }
+        - type: object
+          required: [type, tokensConsumed]
+          properties:
+            type: { type: string, enum: [done] }
+            tokensConsumed: { type: integer }
+        - type: object
+          required: [type, code]
+          properties:
+            type: { type: string, enum: [error] }
+            code: { type: string }
+            message: { type: string, nullable: true }
+            retryAfterSeconds: { type: integer, nullable: true }
+
+    # ----- ai_insight payload variants (discriminated union by insightType) -----
+
+    AiContractSummaryPayload:
+      type: object
+      required: [insightType, summary, language]
+      properties:
+        insightType: { type: string, enum: [contract_summary] }
+        summary: { type: string }
+        riskScore:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        language: { $ref: "#/components/schemas/AiLanguage" }
+
+    AiContractKeyTerm:
+      type: object
+      required: [label, value]
+      properties:
+        label: { type: string }
+        value: { type: string }
+        clauseAnchor: { type: string, nullable: true }
+        clauseExcerpt: { type: string, nullable: true }
+
+    AiContractKeyTermsPayload:
+      type: object
+      required: [insightType, keyTerms]
+      properties:
+        insightType: { type: string, enum: [contract_key_terms] }
+        keyTerms:
+          type: array
+          items: { $ref: "#/components/schemas/AiContractKeyTerm" }
+
+    AiContractRisk:
+      type: object
+      required: [title, severity, clauseAnchor, clauseExcerpt, rationale]
+      properties:
+        title: { type: string }
+        severity: { type: string, enum: [high, medium, low] }
+        clauseAnchor: { type: string }
+        clauseExcerpt: { type: string }
+        rationale: { type: string }
+
+    AiContractRisksPayload:
+      type: object
+      required: [insightType, risks]
+      properties:
+        insightType: { type: string, enum: [contract_risks] }
+        risks:
+          type: array
+          items: { $ref: "#/components/schemas/AiContractRisk" }
+
+    AiContractObligation:
+      type: object
+      required: [party, obligation]
+      properties:
+        party: { type: string }
+        obligation: { type: string }
+        deadline: { type: string, nullable: true }
+        clauseAnchor: { type: string, nullable: true }
+
+    AiContractObligationsPayload:
+      type: object
+      required: [insightType, obligations]
+      properties:
+        insightType: { type: string, enum: [contract_obligations] }
+        obligations:
+          type: array
+          items: { $ref: "#/components/schemas/AiContractObligation" }
+
+    AiContractRegulatoryItem:
+      type: object
+      required: [citation, relevance]
+      properties:
+        citation: { type: string }
+        relevance: { type: string }
+        clauseAnchor: { type: string, nullable: true }
+
+    AiContractRegulatoryPayload:
+      type: object
+      required: [insightType, regulations]
+      properties:
+        insightType: { type: string, enum: [contract_regulatory] }
+        regulations:
+          type: array
+          items: { $ref: "#/components/schemas/AiContractRegulatoryItem" }
+
+    AiContractRewritePayload:
+      type: object
+      required: [insightType, rewrittenText]
+      properties:
+        insightType: { type: string, enum: [contract_rewrite] }
+        rewrittenText: { type: string }
+
+    AiExecutiveAnomaly:
+      type: object
+      required: [insight, severity, drillDownFilter]
+      properties:
+        insight: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        drillDownFilter: { type: string }
+
+    AiExecutiveAnomaliesPayload:
+      type: object
+      required: [insightType, anomalies, generatedAt]
+      properties:
+        insightType: { type: string, enum: [executive_anomalies] }
+        anomalies:
+          type: array
+          items: { $ref: "#/components/schemas/AiExecutiveAnomaly" }
+        generatedAt: { type: string, format: date-time }
+
+    AiVersionDiffSummaryPayload:
+      type: object
+      required: [insightType, summary]
+      properties:
+        insightType: { type: string, enum: [version_diff_summary] }
+        summary: { type: string }
+
+    AiRegulatoryImpactPayload:
+      type: object
+      required: [insightType, text]
+      properties:
+        insightType:
+          type: string
+          enum: [regulatory_impact_explain, regulatory_impact_amendment]
+        text: { type: string }
+
+    AiRegulatoryImpactSummaryPayload:
+      type: object
+      required: [insightType, executive, keyChanges, recommendedActions]
+      properties:
+        insightType: { type: string, enum: [regulatory_impact_summary] }
+        executive: { type: string }
+        keyChanges:
+          type: array
+          items: { type: string }
+        recommendedActions:
+          type: array
+          items: { type: string }
+
+    AiInsightPayload:
+      description: |
+        Discriminated union of ai_insight.payload variants by `insightType`.
+        The discriminator is normalised onto the JSONB payload by the
+        controller layer (the prompt itself does not always emit it).
+      oneOf:
+        - $ref: "#/components/schemas/AiContractSummaryPayload"
+        - $ref: "#/components/schemas/AiContractKeyTermsPayload"
+        - $ref: "#/components/schemas/AiContractRisksPayload"
+        - $ref: "#/components/schemas/AiContractObligationsPayload"
+        - $ref: "#/components/schemas/AiContractRegulatoryPayload"
+        - $ref: "#/components/schemas/AiContractRewritePayload"
+        - $ref: "#/components/schemas/AiExecutiveAnomaliesPayload"
+        - $ref: "#/components/schemas/AiVersionDiffSummaryPayload"
+        - $ref: "#/components/schemas/AiRegulatoryImpactPayload"
+        - $ref: "#/components/schemas/AiRegulatoryImpactSummaryPayload"
+      discriminator:
+        propertyName: insightType
+        mapping:
+          contract_summary: "#/components/schemas/AiContractSummaryPayload"
+          contract_key_terms: "#/components/schemas/AiContractKeyTermsPayload"
+          contract_risks: "#/components/schemas/AiContractRisksPayload"
+          contract_obligations: "#/components/schemas/AiContractObligationsPayload"
+          contract_regulatory: "#/components/schemas/AiContractRegulatoryPayload"
+          contract_rewrite: "#/components/schemas/AiContractRewritePayload"
+          executive_anomalies: "#/components/schemas/AiExecutiveAnomaliesPayload"
+          version_diff_summary: "#/components/schemas/AiVersionDiffSummaryPayload"
+          regulatory_impact_explain: "#/components/schemas/AiRegulatoryImpactPayload"
+          regulatory_impact_amendment: "#/components/schemas/AiRegulatoryImpactPayload"
+          regulatory_impact_summary: "#/components/schemas/AiRegulatoryImpactSummaryPayload"
+
+    # ----- AI insight + request log entity shapes -----
+
+    AiInsight:
+      type: object
+      description: |
+        Polymorphic AI cache row. SELECT-only via fn_ai_insight_get_cached
+        (controller cache lookup) and fn_ai_insight_list (admin observability).
+        INSERT/UPDATE/DELETE deny-direct via RLS — only the DEFINER
+        fn_ai_insight_upsert + fn_ai_insight_evict_expired (cron) write.
+      required:
+        - id
+        - entityType
+        - insightType
+        - language
+        - promptId
+        - provider
+        - modelUsed
+        - payload
+        - payloadHash
+        - expiresAt
+        - createdAt
+      properties:
+        id: { type: integer, format: int64 }
+        entityType: { $ref: "#/components/schemas/AiInsightEntityType" }
+        entityId:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            NULL allowed for executive_dashboard rows (cross-contract). The
+            composite UNIQUE INDEX uses COALESCE(entity_id, 0::BIGINT) to
+            enforce uniqueness across NULL entity_ids.
+        insightType: { $ref: "#/components/schemas/AiInsightType" }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+        promptId: { $ref: "#/components/schemas/M4PromptId" }
+        provider: { $ref: "#/components/schemas/AiProvider" }
+        modelUsed: { type: string }
+        payload: { $ref: "#/components/schemas/AiInsightPayload" }
+        payloadHash:
+          type: string
+          description: SHA-256 of canonicalised inputs (entity content + prompt_id + language).
+        tokensInput: { type: integer, nullable: true }
+        tokensOutput: { type: integer, nullable: true }
+        costUsdMicros: { type: integer, format: int64, nullable: true }
+        expiresAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    AiInsightListItem:
+      allOf:
+        - $ref: "#/components/schemas/AiInsight"
+        - type: object
+          required: [isActive]
+          properties:
+            isActive: { type: boolean }
+
+    AiInsightListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AiInsightListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    AiRequestLogActor:
+      type: object
+      description: Joined from "user" via fn_user_get_by_id (M1c precedent). NULL for public-endpoint requests (S5 signed-PDF-token path).
+      required: [id, email, fullName]
+      properties:
+        id: { type: integer }
+        email: { type: string, format: email }
+        fullName: { type: string }
+
+    AiRequestLogListItem:
+      type: object
+      required:
+        - id
+        - requestId
+        - promptId
+        - language
+        - provider
+        - modelUsed
+        - cacheHit
+        - streamMode
+        - outcome
+        - createdAt
+      properties:
+        id: { type: integer, format: int64 }
+        requestId: { type: string, format: uuid }
+        promptId: { $ref: "#/components/schemas/M4PromptId" }
+        mode: { type: string, nullable: true }
+        actor:
+          oneOf:
+            - $ref: "#/components/schemas/AiRequestLogActor"
+            - type: "null"
+        entityType: { type: string, nullable: true }
+        entityId: { type: integer, format: int64, nullable: true }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+        provider: { $ref: "#/components/schemas/AiProvider" }
+        modelUsed: { type: string }
+        tokensInput: { type: integer, nullable: true }
+        tokensOutput: { type: integer, nullable: true }
+        costUsdMicros: { type: integer, format: int64, nullable: true }
+        latencyMs: { type: integer, nullable: true }
+        cacheHit: { type: boolean }
+        streamMode: { type: boolean }
+        outcome: { $ref: "#/components/schemas/AiRequestOutcome" }
+        errorClass: { type: string, nullable: true }
+        errorMessage:
+          type: string
+          nullable: true
+          description: |
+            SENSITIVE — pino-redacted on log lines; pre-sanitized at controller
+            before fn_ai_request_log_create write (AC-S10-07). Defence-in-depth:
+            fn_audit_trigger v_redact_fields includes `error_message` post-
+            migration 041.
+        createdAt: { type: string, format: date-time }
+
+    AiRequestLogListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AiRequestLogListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    AiCostReportRow:
+      type: object
+      required: [promptId, totalCostUsdMicros, totalTokensInput, totalTokensOutput, successCount, errorCount]
+      properties:
+        promptId: { $ref: "#/components/schemas/M4PromptId" }
+        actor:
+          oneOf:
+            - $ref: "#/components/schemas/AiRequestLogActor"
+            - type: "null"
+          description: Present only when `groupByUser=true`.
+        totalCostUsdMicros: { type: integer, format: int64 }
+        totalTokensInput: { type: integer, format: int64 }
+        totalTokensOutput: { type: integer, format: int64 }
+        successCount: { type: integer }
+        errorCount: { type: integer }
+        avgLatencyMs: { type: number, nullable: true }
+        cacheHitRatio:
+          type: number
+          nullable: true
+          description: NULL when denominator (success+error) is 0.
+
+    AiCostReportResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AiCostReportRow" }
+
+    AiPrompt:
+      type: object
+      description: ai_prompt reference row (code-PK; AUDIT TRIGGER OMITTED per DB-IMPL-I-1).
+      required:
+        - promptId
+        - descriptionEn
+        - descriptionAr
+        - defaultModel
+        - defaultTemperature
+        - defaultMaxTokens
+        - defaultTtlSeconds
+        - supportsStreaming
+        - supportsToolCall
+        - publicEndpoint
+        - promptFilePath
+        - rateLimitPerUserPerHour
+        - rateLimitPerUserPerDay
+        - isActive
+      properties:
+        promptId: { $ref: "#/components/schemas/M4PromptId" }
+        descriptionEn: { type: string }
+        descriptionAr: { type: string }
+        defaultModel: { type: string, example: gpt-4o }
+        defaultTemperature: { type: number, minimum: 0, maximum: 2 }
+        defaultMaxTokens: { type: integer, minimum: 1 }
+        defaultTtlSeconds:
+          type: integer
+          minimum: 0
+          description: 0 = no caching (currently only ai-drafting-assistant).
+        supportsStreaming: { type: boolean }
+        supportsToolCall: { type: boolean }
+        publicEndpoint: { type: boolean }
+        promptFilePath: { type: string, example: prompts/ai-contract-insights.txt }
+        rateLimitPerUserPerHour: { type: integer, minimum: 1 }
+        rateLimitPerUserPerDay: { type: integer, minimum: 1 }
+        isActive: { type: boolean }
+
+    AiPromptListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/AiPrompt" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ----- Persist response shapes (S1 + S6 DEFINER carve-outs) -----
+
+    ContractAiSummaryPersistData:
+      type: object
+      description: fn_contract_ai_summary_persist response payload (writes contract.ai_summary_*/ai_risk_score reserved columns).
+      required: [contractId, updatedAt]
+      properties:
+        contractId: { type: integer, format: int64 }
+        aiSummaryEn: { type: string, nullable: true }
+        aiSummaryAr: { type: string, nullable: true }
+        aiRiskScore:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        updatedAt: { type: string, format: date-time }
+
+    ContractVersionDiffSummaryPersistData:
+      type: object
+      description: |
+        fn_contract_version_diff_summary_persist response payload. After
+        DEFECT-1 patch (migration 045) the fn body materialises updatedAt
+        locally because contract_version is append-only at the table level
+        (no updated_at/updated_by columns). The JSONB return shape is
+        byte-identical to the pre-patch design.
+      required: [contractVersionId, diffSummary, updatedAt]
+      properties:
+        contractVersionId: { type: integer, format: int64 }
+        diffSummary: { type: string }
+        updatedAt: { type: string, format: date-time }
+
+    # ----- Request DTOs -----
+
+    AiContractInsightsRequest:
+      type: object
+      required: [contractId, mode, language]
+      properties:
+        contractId: { type: integer, format: int64, minimum: 1 }
+        mode: { $ref: "#/components/schemas/AiContractInsightsMode" }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+        selectedText:
+          type: string
+          description: |
+            SENSITIVE — pino-redacted. Required when `mode='rewrite'` (max
+            20000 chars); ignored otherwise.
+
+    AiContractInsightsResponseBody:
+      description: |
+        Non-streaming response body (JSON tool-call) for `mode IN
+        (key_terms | risks | obligations | regulatory)`. Streaming modes
+        (`summary`, `rewrite`) emit AiInsightsStreamChunk SSE events instead.
+      oneOf:
+        - type: object
+          required: [mode, payload]
+          properties:
+            mode: { type: string, enum: [key_terms] }
+            payload: { $ref: "#/components/schemas/AiContractKeyTermsPayload" }
+        - type: object
+          required: [mode, payload]
+          properties:
+            mode: { type: string, enum: [risks] }
+            payload: { $ref: "#/components/schemas/AiContractRisksPayload" }
+        - type: object
+          required: [mode, payload]
+          properties:
+            mode: { type: string, enum: [obligations] }
+            payload: { $ref: "#/components/schemas/AiContractObligationsPayload" }
+        - type: object
+          required: [mode, payload]
+          properties:
+            mode: { type: string, enum: [regulatory] }
+            payload: { $ref: "#/components/schemas/AiContractRegulatoryPayload" }
+
+    AiDraftingAssistantChatTurn:
+      type: object
+      required: [role, content]
+      properties:
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string, maxLength: 4000 }
+
+    AiDraftingAssistantRequest:
+      type: object
+      required:
+        - mode
+        - contractType
+        - partyA
+        - draftSummary
+        - existingClauseCategories
+        - language
+      properties:
+        mode: { $ref: "#/components/schemas/AiDraftingAssistantMode" }
+        contractType: { type: string }
+        partyA: { type: string }
+        partyB: { type: string }
+        draftSummary:
+          type: string
+          description: SENSITIVE — pino-redacted.
+        existingClauseCategories:
+          type: array
+          items: { type: string }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+        selectedText:
+          type: string
+          description: SENSITIVE — required for mode `explain | rewrite`.
+        tone:
+          $ref: "#/components/schemas/AiDraftingAssistantTone"
+        chatHistory:
+          type: array
+          items: { $ref: "#/components/schemas/AiDraftingAssistantChatTurn" }
+          maxItems: 20
+          description: |
+            SENSITIVE — required for mode='chat'. Last 20 turns; each turn
+            content ≤ 4000 chars (server-enforced).
+
+    AiDraftingAssistantSuggestion:
+      type: object
+      required: [kind, title, rationale, proposedText]
+      properties:
+        kind: { type: string, enum: [missing_clause, weak_clause, regulatory] }
+        title: { type: string }
+        rationale: { type: string }
+        proposedText: { type: string }
+
+    AiDraftingAssistantSuggestResponse:
+      type: object
+      required: [suggestions]
+      properties:
+        suggestions:
+          type: array
+          maxItems: 4
+          items: { $ref: "#/components/schemas/AiDraftingAssistantSuggestion" }
+
+    AiExecutiveAnomaliesStats:
+      type: object
+      description: |
+        Open-shape stats payload — controller stringifies + slices to ≤ 8000
+        chars before prompt substitution.
+      additionalProperties: true
+      properties:
+        totalActiveValueAed: { type: number }
+        contractsByStatus:
+          type: object
+          additionalProperties: { type: integer }
+        expiryCliffs:
+          type: array
+          items:
+            type: object
+            properties:
+              window: { type: string }
+              count: { type: integer }
+        supplierConcentration:
+          type: array
+          items:
+            type: object
+            properties:
+              supplier: { type: string }
+              share: { type: number }
+
+    AiExecutiveAnomaliesRequest:
+      type: object
+      required: [stats, language]
+      properties:
+        stats: { $ref: "#/components/schemas/AiExecutiveAnomaliesStats" }
+        dateRange:
+          type: object
+          properties:
+            fromDate: { type: string, format: date }
+            toDate: { type: string, format: date }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+
+    AiExecutiveAnomaliesResponse:
+      type: object
+      required: [anomalies, generatedAt]
+      properties:
+        anomalies:
+          type: array
+          items: { $ref: "#/components/schemas/AiExecutiveAnomaly" }
+        generatedAt: { type: string, format: date-time }
+
+    AiRegulatoryImpactSampleContract:
+      type: object
+      required: [contractNumber, titleEn, contractType]
+      properties:
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        contractType: { type: string }
+        valueAed: { type: number, nullable: true }
+
+    AiRegulatoryImpactRequest:
+      type: object
+      required:
+        - mode
+        - regulator
+        - titleEn
+        - affectedClauseCategories
+        - sampleContracts
+        - language
+      properties:
+        mode: { $ref: "#/components/schemas/AiRegulatoryImpactMode" }
+        regulator: { type: string }
+        referenceNumber: { type: string }
+        titleEn: { type: string }
+        summaryEn:
+          type: string
+          description: SENSITIVE — pino-redacted.
+        effectiveDate: { type: string, format: date }
+        complianceDeadline: { type: string, format: date }
+        affectedClauseCategories:
+          type: array
+          items: { type: string }
+        impactedCount: { type: integer, minimum: 0 }
+        sampleContracts:
+          type: array
+          maxItems: 5
+          items: { $ref: "#/components/schemas/AiRegulatoryImpactSampleContract" }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+        impactCategoryName: { type: string }
+        impactCategoryGuidance: { type: string }
+
+    AiRegulatoryImpactSummaryContract:
+      type: object
+      required: [contractNumber, title, type]
+      properties:
+        contractNumber: { type: string }
+        title: { type: string }
+        type: { type: string }
+        valueAed: { type: number, nullable: true }
+        impactScore: { type: number, nullable: true }
+
+    AiRegulatoryImpactSummaryRequest:
+      type: object
+      required: [regulator, title, severity, contracts, language]
+      properties:
+        regulator: { type: string }
+        title: { type: string }
+        severity: { type: string }
+        referenceNumber: { type: string }
+        summary: { type: string }
+        contracts:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { $ref: "#/components/schemas/AiRegulatoryImpactSummaryContract" }
+        language: { type: string, enum: [en, ar] }
+
+    AiRegulatoryImpactSummaryResponse:
+      type: object
+      required: [executive, keyChanges, recommendedActions, cacheHit]
+      properties:
+        executive: { type: string }
+        keyChanges:
+          type: array
+          items: { type: string }
+        recommendedActions:
+          type: array
+          items: { type: string }
+        cacheHit:
+          type: boolean
+          description: Mirrors the X-AI-Cache header (HIT|MISS).
+
+    AiVersionDiffSummaryModifiedClause:
+      type: object
+      required: [clauseName]
+      properties:
+        clauseName: { type: string }
+        before: { type: string }
+        after: { type: string }
+
+    AiVersionDiffSummaryRequest:
+      type: object
+      required: [contractId, leftVersionId, rightVersionId, additions, deletions, modifiedClauses, language]
+      properties:
+        contractId: { type: integer, format: int64, minimum: 1 }
+        leftVersionId: { type: integer, format: int64, minimum: 1 }
+        rightVersionId: { type: integer, format: int64, minimum: 1 }
+        additions:
+          type: string
+          description: SENSITIVE — pino-redacted. Sliced ≤ 9000 chars per AC-S6-06.
+        deletions:
+          type: string
+          description: SENSITIVE — pino-redacted.
+        modifiedClauses:
+          type: array
+          description: SENSITIVE — pino-redacted (clause names + before/after).
+          items: { $ref: "#/components/schemas/AiVersionDiffSummaryModifiedClause" }
+        language: { $ref: "#/components/schemas/AiLanguage" }
+
+    AiVersionDiffSummaryResponse:
+      type: object
+      required: [summary, persisted, cacheHit]
+      properties:
+        summary:
+          type: string
+          description: 1-line headline + max 5 bullets prefixed with `•` (controller post-processes).
+        persisted: { $ref: "#/components/schemas/ContractVersionDiffSummaryPersistData" }
+        cacheHit: { type: boolean }
 
   responses:
     Unauthenticated:
@@ -5347,3 +6305,617 @@ x-paths-root:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
 
+
+  # ===== M4 — AI Features (introduced 2026-05-04) =====
+
+  /ai/contract-insights:
+    post:
+      tags: [M4 — AI (Contract + Drafting + Executive)]
+      operationId: aiContractInsights
+      summary: Request AI insights on a contract (S1)
+      description: |
+        Modes: `summary | key_terms | risks | obligations | regulatory | rewrite`.
+        - `summary` and `rewrite` stream Server-Sent Events
+          (`Content-Type: text/event-stream`) — chunks conform to
+          `AiInsightsStreamChunk`. The `done` chunk on mode='summary' carries
+          `persisted: ContractAiSummaryPersistData` when fn_contract_ai_summary_persist
+          succeeded.
+        - The other 4 modes return synchronous JSON (`AiContractInsightsResponseBody`)
+          via OpenAI tool-call.
+        - Cache via `fn_ai_insight_get_cached` / `fn_ai_insight_upsert`
+          (24 h TTL; entity_type='contract').
+        - Rate limit pre-flight via `fn_ai_request_log_check_rate_limit`
+          (60/h, 240/d defaults from ai_prompt seed).
+        - Telemetry: one `ai_request_log` row per invocation in a
+          `finally{}` block, regardless of cache_hit / success / error.
+      x-rateLimit: fn_ai_request_log_check_rate_limit (per ai_prompt seed; 60/h, 240/d)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+        - contract_drafter
+      x-requiredPermissions: ai.invoke.contract + contract.read.<scope>
+      x-authMode: jwt
+      x-storyId: S1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiContractInsightsRequest" }
+      responses:
+        "200":
+          description: |
+            OK — synchronous tool-call JSON for non-streaming modes
+            (`key_terms | risks | obligations | regulatory`) OR Server-Sent
+            Events stream for `summary | rewrite`.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            X-AI-Cache:
+              description: HIT|MISS (cache layer indicator).
+              schema: { type: string, enum: [HIT, MISS] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiContractInsightsResponseBody" }
+                  requestId: { type: string, format: uuid }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each SSE event is `data: <JSON of AiInsightsStreamChunk>\n\n`.
+                  Multiple `token` chunks may precede the terminal `done` /
+                  `error` chunk.
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: Provider error (sanitised; logged via fn_ai_request_log_create with `outcome='error'`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "504":
+          description: Provider timeout (logged with `outcome='timeout'`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/drafting-assistant:
+    post:
+      tags: [M4 — AI (Contract + Drafting + Executive)]
+      operationId: aiDraftingAssistant
+      summary: Drafting assistant — chat / suggest / explain / rewrite (S2)
+      description: |
+        Modes: `suggest | chat | explain | rewrite`.
+        - `suggest` returns synchronous JSON (`AiDraftingAssistantSuggestResponse` —
+          tool-call; max 4 suggestions).
+        - `chat`, `explain`, `rewrite` stream SSE
+          (`AiDraftingAssistantStreamChunk`).
+        - **NO caching** — ai-drafting-assistant has `default_ttl_seconds=0`
+          on its ai_prompt seed row; each invocation hits the provider.
+        - Rate limit pre-flight via `fn_ai_request_log_check_rate_limit`
+          (60/h, 300/d defaults).
+        - Telemetry: one `ai_request_log` row per invocation.
+      x-rateLimit: fn_ai_request_log_check_rate_limit (60/h, 300/d)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - contract_drafter
+        - legal_counsel
+      x-requiredPermissions: ai.invoke.contract + (contract.draft OR contract.edit)
+      x-authMode: jwt
+      x-storyId: S2
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiDraftingAssistantRequest" }
+      responses:
+        "200":
+          description: OK — synchronous tool-call JSON for `suggest`; SSE stream for `chat | explain | rewrite`.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiDraftingAssistantSuggestResponse" }
+                  requestId: { type: string, format: uuid }
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each SSE event is `data: <JSON of AiDraftingAssistantStreamChunk>\n\n`.
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: Provider error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "504":
+          description: Provider timeout.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/executive-anomalies:
+    post:
+      tags: [M4 — AI (Contract + Drafting + Executive)]
+      operationId: aiExecutiveAnomalies
+      summary: Executive dashboard anomaly detection (S3)
+      description: |
+        Non-streaming tool-call. Detects anomalies (spend spikes, expiry
+        cliffs, supplier concentration) given a stats payload. Cache via
+        ai_insight (`entity_type='executive_dashboard'`, `entity_id=NULL`,
+        TTL 1 h). NULL entity_id is handled in the composite UNIQUE INDEX
+        via `COALESCE(entity_id, 0::BIGINT)` (DN-2). Model: `gpt-4o-mini`.
+      x-rateLimit: fn_ai_request_log_check_rate_limit (20/h, 80/d)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - executive
+      x-requiredPermissions: ai.invoke.executive
+      x-authMode: jwt
+      x-storyId: S3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiExecutiveAnomaliesRequest" }
+      responses:
+        "200":
+          description: OK — anomalies array.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            X-AI-Cache:
+              schema: { type: string, enum: [HIT, MISS] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiExecutiveAnomaliesResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: Provider error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/regulatory-impact:
+    post:
+      tags: [M4 — AI (Regulatory Impact)]
+      operationId: aiRegulatoryImpact
+      summary: Streaming regulatory-update impact explanation / amendment draft (S4)
+      description: |
+        SSE stream (`AiRegulatoryImpactStreamChunk`) for `mode='explain'` or
+        `'amendment'`. STATELESS — payload-driven. Per Q1 the
+        `regulatory_update` table doesn't exist yet (M5+); the cache row
+        uses `entity_type='regulatory_update'` with `entity_id=NULL`. Cache
+        TTL 24 h. Model: `gpt-4o`. Up to 5 `sampleContracts` accepted
+        (Lovable prompt limit). Streaming timeout 120 s.
+      x-rateLimit: fn_ai_request_log_check_rate_limit (30/h, 120/d)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - legal_counsel
+      x-requiredPermissions: ai.invoke.regulatory
+      x-authMode: jwt
+      x-storyId: S4
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRegulatoryImpactRequest" }
+      responses:
+        "200":
+          description: OK — SSE stream of AiRegulatoryImpactStreamChunk events.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            X-AI-Cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            Content-Type:
+              schema: { type: string, enum: ["text/event-stream; charset=utf-8"] }
+            Cache-Control:
+              schema: { type: string, enum: ["no-cache, no-transform"] }
+            Connection:
+              schema: { type: string, enum: [keep-alive] }
+            X-Accel-Buffering:
+              schema: { type: string, enum: [no] }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Each SSE event is `data: <JSON of AiRegulatoryImpactStreamChunk>\n\n`.
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: Provider error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "504":
+          description: Provider timeout (120 s for streaming).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/regulatory-impact-summary:
+    post:
+      tags: [M4 — AI (Regulatory Impact)]
+      operationId: aiRegulatoryImpactSummary
+      summary: PUBLIC — regulatory-impact PDF summary, signed-PDF-token authenticated (S5)
+      description: |
+        **PUBLIC endpoint** behind a signed-PDF-token (HMAC-validated at
+        Express middleware). Returns a structured executive summary of a
+        regulatory update for inclusion in the regulatory-impact PDF.
+
+        **Auth:** see the `signedPdfToken` security scheme. Token is sent in
+        either `Authorization: Bearer <token>` OR `X-Signed-Pdf-Token`.
+        Middleware validates HMAC + `aud=regulatory-impact-pdf` + `iss` +
+        `exp` + nonce.
+
+        **Cache:** 30 days, content-addressed by SHA-256 of canonicalised
+        inputs (`regulator + title + severity + contracts[] + language`).
+
+        **Rate limit:** in-process per-token bucket (10/h) — substituted
+        for `fn_ai_request_log_check_rate_limit` because the public path
+        has no actor user id. BE-IMPL-INFO-2: per-replica memory only —
+        switch to Redis when scaling beyond 1 replica.
+
+        **fn_ai_regulatory_impact_summary_get is `neondb_owner`-only DEFINER**
+        — NOT in the PUBLIC EXECUTE allowlist (Q3 Option A). The 5 PUBLIC
+        EXECUTE grants stay exactly the M3 set.
+
+        **Service unavailable:** if `SIGNED_PDF_TOKEN_SECRET` is unset at
+        boot, S5 returns 503 (intentional; documented in M4-SMOKE-BE-INFO-2;
+        recommend env-validation upgrade).
+      x-rateLimit: in-process per-token bucket (10/h) — single-replica only (BE-IMPL-INFO-2)
+      x-authorisedRoles: []
+      x-authMode: signed-token
+      x-storyId: S5
+      security:
+        - signedPdfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiRegulatoryImpactSummaryRequest" }
+      responses:
+        "200":
+          description: OK — executive summary payload.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            X-AI-Cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            Cache-Control:
+              schema: { type: string, enum: ["private, no-store"] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiRegulatoryImpactSummaryResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — contracts must be 1..20; language `en|ar` only (bilingual rejected).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Token invalid / expired / aud mismatch / nonce reused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429":
+          description: RATE_LIMITED — per-token cap (10/h).
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          description: Provider error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: |
+            SERVICE_UNAVAILABLE — `SIGNED_PDF_TOKEN_SECRET` env var is unset
+            (M4-SMOKE-BE-INFO-2). Operator must set the secret and restart
+            the backend.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /ai/version-diff-summary:
+    post:
+      tags: [M4 — AI (Version Diff Summary)]
+      operationId: aiVersionDiffSummary
+      summary: Plain-language AI summary of differences between two contract versions (S6)
+      description: |
+        Non-streaming. Persists summary to `contract_version.diff_summary`
+        for `rightVersionId` via the DEFINER carve-out
+        `fn_contract_version_diff_summary_persist` — the ONLY allowed UPDATE
+        path on that column (table is otherwise append-only at M1a). Cache
+        via ai_insight 7 days, `entity_type='contract_version'`. Idempotent
+        per AC-S6-04: re-invoking on the same `rightVersionId` overwrites
+        the prior summary.
+
+        **Defect note (DEFECT-1, patched in migration 045):** the original
+        fn body in 043 referenced nonexistent `updated_at`/`updated_by`
+        columns on `contract_version`. Migration 045 drops the columns
+        from the UPDATE clause and materialises `updatedAt` locally; the
+        JSONB return shape is byte-identical to 043 — controller bindings
+        unchanged. Stage 2 lesson S2-22 (column-existence verification)
+        codified to prevent recurrence.
+      x-rateLimit: fn_ai_request_log_check_rate_limit (30/h, 120/d)
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+        - contract_drafter
+        - legal_counsel
+      x-requiredPermissions: ai.invoke.contract + contract.read.<scope>
+      x-authMode: jwt
+      x-storyId: S6
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AiVersionDiffSummaryRequest" }
+      responses:
+        "200":
+          description: OK — summary + persisted echo.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+            X-AI-Cache:
+              schema: { type: string, enum: [HIT, MISS] }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiVersionDiffSummaryResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — versions equal, version not found, or contract scope mismatch.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Version not found / inactive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "500":
+          description: Provider error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/ai/insights:
+    get:
+      tags: [M4 — Admin AI Observability]
+      operationId: adminAiInsightsList
+      summary: List ai_insight cache rows (paginated, filterable) (S11)
+      description: |
+        Admin observability — paginated list of `ai_insight` rows (cache
+        contents) with filters. Visible to `ai.observability.read` (Super
+        Admin / platform_admin) via RLS narrowing on
+        `fn_ai_insight_select_scope`.
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+      x-requiredPermissions: ai.observability.read
+      x-authMode: jwt
+      x-storyId: S11
+      parameters:
+        - { $ref: "#/components/parameters/PageQuery" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+        - name: entityType
+          in: query
+          schema: { $ref: "#/components/schemas/AiInsightEntityType" }
+        - name: insightType
+          in: query
+          schema: { $ref: "#/components/schemas/AiInsightType" }
+        - name: language
+          in: query
+          schema: { $ref: "#/components/schemas/AiLanguage" }
+        - name: provider
+          in: query
+          schema: { $ref: "#/components/schemas/AiProvider" }
+        - name: includeExpired
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Paginated list of ai_insight rows.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiInsightListResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/ai/requests:
+    get:
+      tags: [M4 — Admin AI Observability]
+      operationId: adminAiRequestsList
+      summary: List ai_request_log rows (paginated, filterable) (S11)
+      description: |
+        Admin observability — paginated list of `ai_request_log` rows with
+        filters (actor, prompt, outcome, date range). The list joins to
+        `"user"` via `fn_user_get_by_id` for actor hydration. RLS narrows
+        to self OR `ai.observability.read` OR `audit.read.all`.
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+      x-requiredPermissions: ai.observability.read
+      x-authMode: jwt
+      x-storyId: S11
+      parameters:
+        - { $ref: "#/components/parameters/PageQuery" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: actorUserId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: promptId
+          in: query
+          schema: { $ref: "#/components/schemas/M4PromptId" }
+        - name: outcome
+          in: query
+          schema: { $ref: "#/components/schemas/AiRequestOutcome" }
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Paginated list of ai_request_log rows with hydrated actor.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiRequestLogListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: fromDate must be on or before toDate.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/ai/cost-report:
+    get:
+      tags: [M4 — Admin AI Observability]
+      operationId: adminAiCostReport
+      summary: AI cost / usage report aggregated by promptId (and optionally userId) (S12)
+      description: |
+        Aggregated cost + usage report for a date range. 90-day max window
+        enforced inside the fn (AC-S12-04). Aggregations: total cost
+        (USD micros), total tokens, success/error counts, average latency,
+        cache-hit ratio. When `groupByUser=true` rows include the actor
+        joined via `fn_user_get_by_id`.
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+      x-requiredPermissions: ai.observability.read
+      x-authMode: jwt
+      x-storyId: S12
+      parameters:
+        - name: fromDate
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: groupByUser
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Aggregated cost report rows.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiCostReportResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: Date range > 90 days OR fromDate > toDate.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /admin/ai/prompts:
+    get:
+      tags: [M4 — Admin AI Observability]
+      operationId: adminAiPromptsList
+      summary: List registered AI prompts (read-only in M4) (S13)
+      description: |
+        Returns all 6 ai_prompt rows + their default model + temperature +
+        max tokens + TTL + rate limits + streaming/tool-call/public flags.
+        Read-only in M4 — no PATCH/PUT endpoint (platform_admin would
+        adjust by direct INSERT/UPDATE via psql / a future admin UI).
+      x-authorisedRoles:
+        - Super Admin
+        - platform_admin
+      x-requiredPermissions: ai.observability.read
+      x-authMode: jwt
+      x-storyId: S13
+      parameters:
+        - name: includeInactive
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Paginated list (envelope retained for parity; M4 has 6 rows on a single page).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiPromptListResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }

@@ -88,6 +88,19 @@ const envSchema = z.object({
   // M3 — Signature invitation expiration cron (S9). Default '*/15 * * * *'
   // (every 15 minutes). Disabled in NODE_ENV=test (smoke harness owns scheduling).
   SIGNATURE_EXPIRATION_INTERVAL_CRON: z.string().min(1).default('*/15 * * * *'),
+
+  // M4 — AI insight cache eviction cron (S8). Default '*/15 * * * *' (every
+  // 15 minutes). Disabled in NODE_ENV=test. Sweep is system-actor (S2-20
+  // sentinel) — fn_ai_insight_evict_expired is neondb_owner-only DEFINER.
+  AI_INSIGHT_EVICTION_INTERVAL_CRON: z.string().min(1).default('*/15 * * * *'),
+
+  // M4 / S5 — HMAC secret for the signed-PDF-token middleware. Token aud is
+  // 'regulatory-impact-pdf'. Optional: when unset the public S5 endpoint
+  // returns 503 (configuration not present). Required for production
+  // PDF-export integrations.
+  SIGNED_PDF_TOKEN_SECRET: z.string().optional(),
+  SIGNED_PDF_TOKEN_ISSUER: z.string().default('musanad-contracts-pdf'),
+  SIGNED_PDF_TOKEN_AUDIENCE: z.string().default('regulatory-impact-pdf'),
 });
 
 export type Env = z.infer<typeof envSchema>;

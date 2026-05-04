@@ -54,6 +54,10 @@ import {
   startSignatureExpirationCron,
   stopSignatureExpirationCron,
 } from './services/signature-expiration.cron.service';
+import {
+  startAiInsightEvictionCron,
+  stopAiInsightEvictionCron,
+} from './services/ai-insight-eviction.cron.service';
 
 const app = express();
 
@@ -143,6 +147,11 @@ const server = app.listen(port, () => {
   // NODE_ENV=test. SYSTEM_ACTOR sentinel sets app.current_user_id='0'
   // before each fn_signature_invitation_expire_due call.
   startSignatureExpirationCron();
+
+  // M4 / S8 — start AI insight cache eviction cron (3rd cron driver in the
+  // codebase). No-op in NODE_ENV=test. SYSTEM_ACTOR sentinel sets
+  // app.current_user_id='0' before each fn_ai_insight_evict_expired call.
+  startAiInsightEvictionCron();
 });
 
 // --- Graceful shutdown ---
@@ -154,6 +163,8 @@ const shutdown = async (signal: string): Promise<void> => {
     stopApprovalEscalationCron();
     // M3 — stop signature-expiration cron driver as well.
     stopSignatureExpirationCron();
+    // M4 — stop AI insight eviction cron driver.
+    stopAiInsightEvictionCron();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

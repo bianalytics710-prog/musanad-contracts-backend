@@ -515,6 +515,81 @@ const SENSITIVE_PATHS: string[] = [
   //    Preserved from M0 — covers the auth login response shape.
   'res.body.passwordHash',
   'res.body.*.passwordHash',
+
+  // -- M4 — ai_insight.payload (AI response — may echo contract excerpts) --
+  //    Defence-in-depth alongside DB-layer redaction in fn_audit_trigger
+  //    (migration 041 added 'payload' to v_redact_fields). Generic key — at
+  //    risk of false-positive masking on unrelated 'payload' fields, so we
+  //    scope to req.body / req.body.* / response envelope nesting only.
+  'req.body.payload',
+  'req.body.*.payload',
+  '*.payload',
+  '*.*.payload',
+  'res.body.data.payload',
+  'res.body.data.*.payload',
+
+  // -- M4 — ai_request_log.error_message (sanitised at controller before fn_) --
+  //    AC-S10-07: pre-redact at controller via Pino. fn_audit_trigger v_redact_fields
+  //    extension (migration 041) is defence-in-depth.
+  'errorMessage',
+  'req.body.errorMessage',
+  'req.body.*.errorMessage',
+  '*.errorMessage',
+  '*.*.errorMessage',
+  'error_message',
+  'req.body.error_message',
+  'req.body.*.error_message',
+  '*.error_message',
+  '*.*.error_message',
+
+  // -- M4 — signedToken (S5 signed-PDF-token, short-lived JWT) --
+  'signedToken',
+  'req.body.signedToken',
+  'req.body.*.signedToken',
+  '*.signedToken',
+  '*.*.signedToken',
+  'req.headers.x-signed-pdf-token',
+  'req.headers.X-Signed-Pdf-Token',
+
+  // -- M4 — selectedText (S1/S2 — verbatim contract excerpt; ai_prompt_payload alias) --
+  'selectedText',
+  'req.body.selectedText',
+  'req.body.*.selectedText',
+  '*.selectedText',
+  '*.*.selectedText',
+
+  // -- M4 — chatHistory (S2 — multi-turn drafting Q&A; ai_prompt_payload alias) --
+  'chatHistory',
+  'req.body.chatHistory',
+  '*.chatHistory',
+  '*.*.chatHistory',
+
+  // -- M4 — draftSummary (S2 — drafter context; ai_prompt_payload alias) --
+  'draftSummary',
+  'req.body.draftSummary',
+  '*.draftSummary',
+  '*.*.draftSummary',
+
+  // -- M4 — additions / deletions / modifiedClauses (S6 version-diff inputs;
+  //    ai_prompt_payload alias) --
+  'additions',
+  'req.body.additions',
+  '*.additions',
+  '*.*.additions',
+  'deletions',
+  'req.body.deletions',
+  '*.deletions',
+  '*.*.deletions',
+  'modifiedClauses',
+  'req.body.modifiedClauses',
+  '*.modifiedClauses',
+  '*.*.modifiedClauses',
+
+  // -- M4 — summaryEn (S4 regulatory-impact summary input; ai_prompt_payload alias) --
+  'summaryEn',
+  'req.body.summaryEn',
+  '*.summaryEn',
+  '*.*.summaryEn',
 ];
 
 const baseConfig = {

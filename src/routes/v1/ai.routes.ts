@@ -22,25 +22,49 @@
  * (Express matches in declaration order — same convention as M1a/M1b).
  */
 import { Router } from 'express';
-import { authenticate, authorise } from '../../middleware/auth.middleware';
+import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import { authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
 import { extractContractBulkController } from '../../controllers/ai/extract-contract-bulk.controller';
 import { ExtractContractBulkSchema } from '../../schemas/import-batch.schemas';
+import { contractInsightsController } from '../../controllers/ai/contract-insights.controller';
+import { draftingAssistantController } from '../../controllers/ai/drafting-assistant.controller';
+import { executiveAnomaliesController } from '../../controllers/ai/executive-anomalies.controller';
+import { regulatoryImpactController } from '../../controllers/ai/regulatory-impact.controller';
+import { regulatoryImpactSummaryController } from '../../controllers/ai/regulatory-impact-summary.controller';
+import { versionDiffSummaryController } from '../../controllers/ai/version-diff-summary.controller';
+import {
+  aiContractInsightsRequestSchema,
+  aiDraftingAssistantRequestSchema,
+  aiExecutiveAnomaliesRequestSchema,
+  aiRegulatoryImpactRequestSchema,
+  aiRegulatoryImpactSummaryRequestSchema,
+  aiVersionDiffSummaryRequestSchema,
+} from '../../schemas/ai.schemas';
+import { verifySignedPdfTokenMiddleware } from '../../middleware/signed-pdf-token.middleware';
 
 const router = Router();
 
-// Every AI endpoint requires authentication.
+// ---------------------------------------------------------------
+// PUBLIC routes (verify_jwt: false) — declared BEFORE the global
+// authenticate gate so they bypass JWT validation.
+//
+// S5 — POST /api/v1/ai/regulatory-impact-summary
+//   Signed-PDF-token (HMAC) at Express middleware. fn_'s remain
+//   neondb_owner-only DEFINER (Q3 Option A).
+// ---------------------------------------------------------------
+router.post(
+  '/regulatory-impact-summary',
+  verifySignedPdfTokenMiddleware,
+  validate(aiRegulatoryImpactSummaryRequestSchema, 'body'),
+  regulatoryImpactSummaryController.invoke,
+);
+
+// Every other AI endpoint requires authentication.
 router.use(authenticate);
 
 // ---------------------------------------------------------------
-// POST /api/v1/ai/extract-contract-bulk — M1c S8 STUB (no fn_).
-//   AC-S8-02: requires import.run permission
-//   AC-S8-05: rate-limited (authedWriteRateLimiter)
-//   AC-S8-06: extractedText is treated as ai_prompt_payload (pino-redacted
-//             via logger.util.ts SENSITIVE_PATHS '*.extractedText').
-//   AC-S8-07: M4 replaces the controller body without changing route /
-//             auth / DTOs. Frozen contract.
+// M1c S8 — POST /api/v1/ai/extract-contract-bulk (legacy stub kept).
 // ---------------------------------------------------------------
 router.post(
   '/extract-contract-bulk',
@@ -48,6 +72,66 @@ router.post(
   authorise(['import.run']),
   validate(ExtractContractBulkSchema, 'body'),
   extractContractBulkController.extract,
+);
+
+// ---------------------------------------------------------------
+// M4 / S1 — POST /api/v1/ai/contract-insights
+//   Per api-contracts.json ep_ai_contract_insights:
+//   - permissions: ai.invoke.contract  (controller checks contract scope via fn_contract_get_by_id)
+// ---------------------------------------------------------------
+router.post(
+  '/contract-insights',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.contract']),
+  validate(aiContractInsightsRequestSchema, 'body'),
+  contractInsightsController.invoke,
+);
+
+// ---------------------------------------------------------------
+// M4 / S2 — POST /api/v1/ai/drafting-assistant
+//   - permissions: ai.invoke.contract AND (contract.draft OR contract.edit)
+// ---------------------------------------------------------------
+router.post(
+  '/drafting-assistant',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.contract']),
+  authoriseAnyOf(['contract.draft', 'contract.edit']),
+  validate(aiDraftingAssistantRequestSchema, 'body'),
+  draftingAssistantController.invoke,
+);
+
+// ---------------------------------------------------------------
+// M4 / S3 — POST /api/v1/ai/executive-anomalies
+// ---------------------------------------------------------------
+router.post(
+  '/executive-anomalies',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.executive']),
+  validate(aiExecutiveAnomaliesRequestSchema, 'body'),
+  executiveAnomaliesController.invoke,
+);
+
+// ---------------------------------------------------------------
+// M4 / S4 — POST /api/v1/ai/regulatory-impact (SSE)
+// ---------------------------------------------------------------
+router.post(
+  '/regulatory-impact',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.regulatory']),
+  validate(aiRegulatoryImpactRequestSchema, 'body'),
+  regulatoryImpactController.invoke,
+);
+
+// ---------------------------------------------------------------
+// M4 / S6 — POST /api/v1/ai/version-diff-summary
+//   Persists to contract_version.diff_summary via DEFINER carve-out fn_.
+// ---------------------------------------------------------------
+router.post(
+  '/version-diff-summary',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.contract']),
+  validate(aiVersionDiffSummaryRequestSchema, 'body'),
+  versionDiffSummaryController.invoke,
 );
 
 export default router;
