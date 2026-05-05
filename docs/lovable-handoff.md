@@ -958,4 +958,227 @@ This kind of escape is exactly the Codex blind spot Stage 2+4 must absorb in the
 
 ---
 
+# M6 Migration — Lovable Insights Surface → v2.6
+
+> **Module:** M6 (ninth module — Dashboards & Reporting).
+> **Generated:** 2026-05-05.
+> **Pipeline:** Lovable Modernization v3.2 (Mode A — Lovable only).
+> **Source:** `C:/Users/azureadmin/projects/musanad-contracts-hub` (Lovable prototype).
+> **Target:** `musanad-contracts-frontend` + `musanad-contracts-backend`.
+> **Codex review:** SKIPPED per Dexian decision 2026-05-04. **6th consecutive validation** through M2/M3/M4/M5/M6 — pattern fully entrenched. Stage 2 + Stage 4 absorb the safety net via S2-16..S2-23 (S2-22b JOIN-target-column tracing recommended for codification post M6-DB-IMPL-DEFECT-1).
+
+---
+
+## Milestone — M6 complete
+
+✅ **M6 milestone CHECKED.** All upstream gates PASS. DB live (both branches v57 incl. patch 057). BE+FE built and tsc clean. Integration Verifier (PASS round 1, 10/10 endpoints), Smoke Test, Testing Agent (92/92 net-new + 18 pre-existing TEST-DEBT-M1 carry-forward), QA Stage 4 all PASS first-run. Documentation generated (this run). Migrations 054..056 + 057 applied to both `test` and `m0-foundation` branches.
+
+✅ **M4-FE-OI-2 CLOSED — both halves.**
+- **S9 (half 1) — `ExecutiveAnomaliesCard` mounted into `ExecutiveDashboard`.** The new M6 `ExecutiveDashboard` (regenerated) derives `anomaliesStats` via `useMemo` from its own KPIs (`totalActiveValueAed`, `contractsByStatus`, `expiryCliffs`, supplierConcentration as counterparty share). The existing M4 `ExecutiveAnomaliesCard` is rendered with `autoFetch={true}` so it self-fires once stats arrive. NO modifications to the M4 card itself.
+- **S10 (half 2) — `VersionDiffSummaryPanel` mounted into `ContractVersionList`.** No standalone `VersionCompareDialog` component existed in v2.6 (`ContractVersionList` was the closest mount point per the post-M1a frontend structure). Edited `src/features/contracts/components/ContractVersionList.tsx` to add a `VersionDiffSummaryPanel` slot inside the expanded version row when an adjacent older version exists (idx + 1 in newest-first list). `additions` = current.bodyEn, `deletions` = older.bodyEn (full-blob — M6-FE-OI-4 documents the simplification; future iteration could add client-side diff via `diff-match-patch`). `modifiedClauses` = []. `autoFetch={false}` so the M4 AI call only fires when the user clicks regenerate (avoids accidental cost). NO modifications to the M4 panel itself.
+
+---
+
+## Summary
+
+This module was built using the Lovable Modernization pipeline. The backend was fully regenerated. **6 of 6 Lovable insights/*.tsx components in scope were REGENERATED rather than hardened — the most extreme regenerate ratio yet (100%).** All 6 imported `supabase` directly and queried non-existent tables (`audit_summary_admin`, `dashboard_admin_kpi`, `supabase.functions.invoke('executive-anomalies')`, etc.). Pre-flagged in Phase 1 as DASH-OI-B; the Phase 2 inspection confirmed for the remaining 5 dashboards as well.
+
+**M6 also introduces 6 net-new components** (no Lovable precedent): the dashboard router, executive anomalies history viewer, AI cost panel, admin health shell, shared dashboard primitives, and the data-layer service / hooks / types modules.
+
+**Plus 2 mount-only edits to existing M4 components** (S9 + S10 — closes M4-FE-OI-2) and **1 reuse via variant prop** (S13 — admin tile-grid landing reuses the same backend as S1 with `variant='tile-grid'`).
+
+**Component fates:** 0 hardened, 6 regenerated, 6 net-new, 2 mount-only edits, 1 reuse.
+
+---
+
+## Component Transformation Log
+
+| Component | Source (Lovable) | Target (v2.6) | Fate | Cycles | Transformations Applied |
+|---|---|---|---|---|---|
+| AdminDashboard | `src/components/insights/AdminDashboard.tsx` (450L; supabase-coupled) | `src/features/dashboards/components/AdminDashboard.tsx` (regenerated; variant='insights'\|'tile-grid') | regenerated | 0 (audit-report mandate + supabase coupling) | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+| DrafterDashboard | `src/components/insights/DrafterDashboard.tsx` (809L; supabase-coupled) | `src/features/dashboards/components/DrafterDashboard.tsx` (regenerated) | regenerated | 0 | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+| ApproverDashboard | `src/components/insights/ApproverDashboard.tsx` (674L; supabase-coupled; assumed assigned_at column) | `src/features/dashboards/components/ApproverDashboard.tsx` (regenerated) | regenerated | 0 | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+| LegalCounselDashboard | `src/components/insights/LegalCounselDashboard.tsx` (1236L; mixed regulation-list + impact-list + audit-summary into one supabase-coupled wall) | `src/features/dashboards/components/LegalCounselDashboard.tsx` (regenerated; lighter projection) | regenerated | 0 | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+| RecipientDashboard | `src/components/insights/RecipientDashboard.tsx` (476L; referenced non-existent signer_user_id / signed_at / outcome) | `src/features/dashboards/components/RecipientDashboard.tsx` (regenerated) | regenerated | 0 | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+| ExecutiveDashboard | `src/components/insights/ExecutiveDashboard.tsx` (1825L; heavily supabase-coupled — DASH-OI-B confirmed) | `src/features/dashboards/components/ExecutiveDashboard.tsx` (regenerated; mounts ExecutiveAnomaliesCard for S9 closure) | regenerated | 0 (DASH-OI-B carry-forward) | T1, T2, T3, T4, T5, T6, T7, T11, T12 |
+
+**3-cycle rule outcome:** all 6 regenerates hit zero cycles because the audit-report (Phase L1) recommended REGENERATE for at least 1 (DASH-OI-B / ExecutiveDashboard) and Phase 2 inspection confirmed the same for the other 5. Net regenerate count across the project: M1a 0/11, M1b 0/4, M1c 0/3, M2 4/8, M3 5/12, M4 5/5, M5 5/6 (83%), **M6 6/6 (100%)**. Every increment reaffirms `feedback_regenerate_when_lovable_too_coupled.md`. M6 is the first module where ZERO Lovable insights/*.tsx components were retained.
+
+---
+
+## New components (6 — v2.6 native, no Lovable precedent)
+
+Lovable did not have:
+- A dashboard routing helper (Lovable rendered all dashboards from a single combined view).
+- A standalone executive anomalies history viewer.
+- An admin AI cost sidebar panel.
+- An admin observability health shell distinct from M0's public liveness.
+- Shared dashboard primitives (Lovable inlined KPI tile components in each dashboard file).
+- A clean data layer (Lovable wired `supabase.from()` reads directly inside JSX `useEffect`s).
+
+M6 builds these net-new:
+
+| Component | Story | Notes |
+|---|---|---|
+| `InsightsRouter` | S6 | Auto-redirect entry route at `/app/dashboards/insights`. Calls `useDashboardRouter`, then navigates to the role's specific dashboard. Closed `DashboardKey` map drives the navigate path; one localised `as any` cast for the runtime-computed `to` (alternative is a switch statement compiling to the same router call). |
+| `ExecutiveAnomaliesHistoryCard` | S8 | Standalone history viewer reading from M4 `ai_insight` cache via `fn_dashboard_executive_anomalies_history`. AC-S8-02 empty-array semantics (NOT 404). |
+| `AICostPanel` | S11 | Per DASH-OI-G — mounts independently into admin dashboard sidebar via React Query (separate query key); NOT bundled into `/admin` payload. windowDays clamped to 1..90 (M4 cap). |
+| `AdminHealth` | S12 | Distinct from M0 public liveness `/api/health`. Admin-scoped. `db.latestMigration` depends on `schema_migrations_select_admin` policy from migration 054. aria-live='polite' on overall banner. |
+| `dashboard-primitives` | shared | Shared `KpiTile` / `PlaceholderKpiTile` / `TimeRangeSelector` / `DashboardLoadingSkeleton` / `DashboardErrorState` / `DashboardEmptyState` / `DashboardSection` + currency / percent / number formatters. |
+| Data layer | shared | `dashboards.service.ts` (10 thin axios methods), `useDashboards.ts` (10 React Query hooks 1:1 with the endpoints), `dashboards.types.ts` (11 response interfaces + 14 embedded shapes + 4 enums). |
+
+10 new routes mounted under `src/routes/app/`:
+- `/app/dashboards/admin` (S1).
+- `/app/dashboards/drafter` (S2).
+- `/app/dashboards/approver` (S3).
+- `/app/dashboards/legal-counsel` (S4).
+- `/app/dashboards/recipient` (S5).
+- `/app/dashboards/insights` (S6 — InsightsRouter).
+- `/app/dashboards/executive` (S7).
+- `/app/dashboards/executive/anomalies` (S8).
+- `/app/admin/health` (S12).
+- `/app/admin/index` (S13 — admin tile-grid landing reusing AdminDashboard with `variant='tile-grid'`).
+
+All 10 routes wrap their view in `<ErrorBoundary>` (M5 admin.regulations.tsx pattern).
+
+> **M6-FE-OI-3 (recurring with M5-FE-OI-4 / M4-FE-OI-1):** `routeTree.gen.ts` was manually patched to register the 10 new routes. The TanStack router-plugin overwrites this on next vite dev/build because the .tsx files exist — re-emission is automatic; no operator action required.
+
+---
+
+## Harden-vs-regenerate decision matrix (M6)
+
+| Driver | Lovable insights components | Decision |
+|---|---|---|
+| Service imports | 6 of 6 components import `supabase` directly + reference non-existent tables (`audit_summary_admin`, `dashboard_admin_kpi`) and edge functions (`supabase.functions.invoke('executive-anomalies')`). | All 6 forced to regenerate — adapter layer would be > 50% of each file. |
+| Wire shape | `fn_dashboard_*` returns role-specific `kpis + (trends \| lists)` shapes that are materially different from Lovable's view-driven projections. | Faster to regenerate with the new contract directly. |
+| Missing source tables | Lovable assumed `audit_summary_admin` / `dashboard_admin_kpi` / `executive_anomalies` views/edge-fn that don't exist in v2.6 — those were "future" surfaces in the prototype. | Cannot harden against tables/views that don't exist; M6 ships the correct telemetry surface and rebuilds the dashboards fresh. |
+| Architectural coupling | Lovable mixed query, transform, and render into single supabase-bound components. v2.6 splits these: data layer (service + React Query hook) → presentation (component) → route shell (ErrorBoundary). | Hardening would replace ~85% of file content per component without preserving meaningful visual fidelity (the Lovable look-and-feel was driven by hand-built supabase queries, not by visual primitives). Regenerate is cleaner. |
+| Pre-flagged in Phase 1 | DASH-OI-B explicitly flagged `ExecutiveDashboard.tsx` (1825L) as REGENERATE — the largest of the 6 dashboards. | The audit-report mandate confirmed early; Phase 2 inspection confirmed the same for the other 5. |
+| Net-new admin / observability surfaces | Lovable had no admin observability health probe (S12), no standalone AI cost panel (S11), no executive anomalies history viewer (S8), no dashboard router helper (S6). | 6 net-new components — no Lovable precedent. |
+
+When in doubt, prefer regenerate over forced-harden. M6 reaffirms the M2/M3/M4/M5 precedent at maximum strength: when EVERY Lovable component in scope is supabase-coupled AND references non-existent tables AND ships a fundamentally different wire shape, regenerate is the right answer for ALL of them — not a workaround.
+
+---
+
+## Preserved from Lovable
+
+- **The dashboard concept set** — the 5 role-scoped dashboards (admin / drafter / approver / legal-counsel / recipient) + executive overview were Lovable's idea. M6 preserves the role split; the wire layer + data plane are reconstituted.
+- **The KPI tile UX** — "tile of headline number + small label + optional sparkline" is preserved across all 5 role dashboards. The `dashboard-primitives.KpiTile` component is the v2.6 canonical implementation.
+- **The time-range selector pattern** — Lovable had a "Last 7d / 30d / 90d / Custom" pill set. M6's `TimeRangeSelector` preserves this UX with v2.6 a11y additions (`aria-pressed`, `aria-label` on custom-days input).
+- **The expiry-cliff buckets** (next30d / next60d / next90d on executive dashboard) — preserved verbatim with the v2.6 monotonic invariant (AC-S7-03).
+- **The value-distribution histogram buckets** (`<100k` / `100k-1M` / `1M-10M` / `10M+`) — preserved verbatim.
+- **The admin landing tile-grid concept** (S13) — preserved as the `AdminDashboard variant='tile-grid'` reuse path.
+
+---
+
+## Rebuilt from scratch
+
+- The entire **backend** for M6 (4 plain views + 10 fn_'s + 1 RLS policy + 1 permission code + 3 grants + the M6-DB-IMPL-DEFECT-1 patch) — Lovable had no production backend for these features (its dashboards queried views and edge functions that didn't exist).
+- All **6 regenerated FE dashboards** as enumerated above.
+- The **dashboard router helper** (S6) — Lovable's FE used a hand-rolled `if (role === 'admin') ...` ladder inside route shells; M6's `InsightsRouter` calls a backend fn to make the decision, reducing FE coupling to the role naming.
+- The **single-source-of-compute AI cost path** (Q5 lock — `fn_ai_request_log_cost_report` wrapped by `fn_dashboard_ai_cost_summary`) — Lovable had `vw_ai_cost_rollup` planned but not implemented; M6 explicitly DROPS the view in favour of the wrapped fn_.
+- The **ARCH-NEW-3 option (c) RLS SELECT policy** on `schema_migrations` — Lovable had no admin health probe of comparable depth.
+- The **placeholder KPI envelope** (`{value:0, placeholder:true}`) — Lovable hardcoded 0 / "N/A" string for slots whose source tables didn't exist; M6 introduces an explicit envelope so the FE renders disabled tiles with "feature pending" tooltips, distinguishable from a real zero-value count.
+
+---
+
+## Discarded from Lovable
+
+| Discarded | Reason |
+|---|---|
+| All 6 Lovable insights/*.tsx dashboards (~5,470 LOC total) | Pervasively supabase-coupled + referenced non-existent tables + assumed wire shapes that don't match v2.6 fn_ outputs. Regenerated. |
+| `audit_summary_admin` view reference | Replaced by `fn_dashboard_legal_counsel.kpis.auditSummary` aggregating directly from `audit_log.table_name` (S2-22-FIX-4). |
+| `dashboard_admin_kpi` view reference | Replaced by `fn_dashboard_admin` composing live `contract` / `approval_step` / `signature_invitation` / `regulatory_impact` / `audit_log` reads. |
+| `supabase.functions.invoke('executive-anomalies')` | Replaced by GET `/api/v1/dashboards/executive/anomalies-history` reading the M4 `ai_insight` cache + the existing M4 POST `/api/v1/ai/executive-anomalies` for refresh (NOT redefined in M6). |
+| Lovable's `signer_user_id` / `signed_at` / `outcome` references | Replaced by live `signature_event.actor_user_id + created_at + event_type='signed' AND is_active=TRUE` (S2-22-FIX-1). |
+| Lovable's `assigned_to` / `assigned_at` references | Replaced by `COALESCE(delegated_to, reassigned_to, approver_user_id)` (S2-22-FIX-2a) and `step.created_at` (S2-22-FIX-2b). |
+| Lovable's `audit_log.entity_type` reference | Replaced by `audit_log.table_name` (S2-22-FIX-4). |
+| Lovable's flat `roleName` extraction | Replaced by COALESCE chain on nested `role:{id,name}` (S2-22-WARN-3-FIX). |
+| Lovable's `decision IN ('approved','rejected')` past-tense literals | Replaced by present-tense `'approve'/'reject'` matching the live CHECK enum (S2-22-WARN-1-FIX). |
+| Lovable's `audit_log.action='ERROR'` probe | DROPPED entirely (S2-22-WARN-2-FIX) — CHECK enum is INSERT/UPDATE/DELETE only; literal could never match. Error signal sourced exclusively from `ai_request_log.outcome`. |
+
+---
+
+## Throwaway Tax Summary
+
+| Layer | Lovable LOC discarded | Reason |
+|---|---|---|
+| AdminDashboard | ~450 | supabase-coupled + non-existent dashboard_admin_kpi view |
+| DrafterDashboard | ~809 | supabase-coupled |
+| ApproverDashboard | ~674 | supabase-coupled + assumed non-existent assigned_at column |
+| LegalCounselDashboard | ~1,236 | mixed concerns + supabase-coupled |
+| RecipientDashboard | ~476 | supabase-coupled + referenced non-existent signature_event columns |
+| ExecutiveDashboard | ~1,825 | DASH-OI-B (heavily supabase-coupled; Lovable's largest dashboard) |
+| **Total discarded LOC (FE)** | **~5,470** | |
+| Lovable supabase RLS policies on insights views | (DB only) | Replaced by M6 RLS on `schema_migrations` (1 new policy) + M0..M5 RLS unchanged. |
+
+This is the largest throwaway tax for a single module to date (~5,470 LOC vs M5's ~3,287 / M4's ~3,449). Principled in the same way: every discarded line was either supabase-coupled (incompatible with v2.6 architecture), dependent on tables/views that didn't exist, or assumed wire shapes that don't match v2.6 fn_ outputs.
+
+---
+
+## Developer waivers
+
+**No waivers.** All 6 regenerated components moved straight to regenerate per the audit-report mandate (DASH-OI-B for ExecutiveDashboard) + Phase 2 confirmation (the other 5); no component shipped with failing harden checklist items requiring developer override. There were no harden cycles to fail in the first place.
+
+M6 follows the M2 + M3 + M4 + M5 precedent: when the source is fundamentally incompatible (supabase coupling, missing tables, materially-different wire shape), regenerate is the right answer — not a workaround.
+
+---
+
+## i18n keys added during M6
+
+**+202 keys per locale** (en + ar — parity match=true; programmatically verified via `scripts/m6-i18n-inject.cjs` which aborts on mismatch).
+
+Pre-M6 totals: en=4,125 / ar=4,125 (post-M5). Post-M6 totals: en=4,327 / ar=4,327.
+
+Namespaces added (all under top-level `dashboards.*`):
+- `dashboards.common.*` — shared UI strings (windowDays, time-range pills, severity labels, empty-state CTA, etc.).
+- `dashboards.admin.*` — S1 admin dashboard (also serves S13 tile-grid).
+- `dashboards.drafter.*` — S2.
+- `dashboards.approver.*` — S3.
+- `dashboards.legalCounsel.*` — S4.
+- `dashboards.recipient.*` — S5.
+- `dashboards.insightsRouter.*` — S6 (loading state + fallback).
+- `dashboards.executive.*` — S7.
+- `dashboards.executiveAnomalies.*` — S8.
+- `dashboards.aiCost.*` — S11.
+- `dashboards.adminHealth.*` — S12 (overall status banner + db / ai sections).
+
+Namespaces extended: none. M6 added a single new top-level namespace (`dashboards.*`) with 11 sub-namespaces — minimised cross-talk with existing M0..M5 namespaces.
+
+---
+
+## Design token adjustments
+
+None. M6 reuses the existing M0-Foundation Design System tokens unchanged. Severity badges use the established M5 pattern (`terracotta-tint` / `amber-tint` / `sage-tint` / `muted`). Status pills use the existing semantic scales already sanctioned by M2/M3/M4 patterns. KPI tiles use `ink` / `ink-muted` / `ink-subtle` / `gold` / `border` / `card` / `surface` foreground tokens — no raw hex codes; no Tailwind defaults.
+
+---
+
+## DEFECT-1 retrospective
+
+The DB Implementation Agent caught a CRITICAL escape that Stage 2 (round 2 PASS) did not — **JOIN-target column drift** that lazy-compiled past `pg_proc` registration and surfaced only on first realistic invocation. See `dev-handoff.md` M6 Implementation Notes and `data-dictionary.md` M6 Key DB Impl outcomes for the full narrative.
+
+**Same shape as M3-DEFECT / M4-DEFECT / M5-DEFECT — third consecutive escape in the column-existence family.** The S2-22 sweep at design time + the `report-don't-fix` discipline at DB-Impl successfully escalated all four to named patch migrations rather than silent rewrites. The codification proposal extends S2-22 with a new sub-rule (S2-22b) — JOIN-target-column tracing — which would have caught this earlier. Recommended for memory promotion at module close.
+
+This kind of escape is exactly the Codex blind spot Stage 2+4 must absorb in the post-Codex-skip era. The S2-22b codification is the canonical response — design-time verification + DB-Impl Step 4 functional probe extension to include all qualified column references against live target-side DDL.
+
+---
+
+## What carries forward (M7+ scope hints from M6)
+
+- **Counterparty / parties module** (M6-FE-OI-2 — DASH-OI-A): `topCounterpartiesByValue5` returns `counterpartyId` only — no name (no parties table yet). FE shows `'ID #{id}'` with a 'Name pending' chip per AC-S7-04. When the parties module ships, the BE projection should add `nameEn`/`nameAr` and the FE should render those preferentially. Same applies to `RecipientMyContractsRow.counterpartyId` (always null until parties module).
+- **Templates module** (DASH-OI-A): `LegalCounselDashboardKpis.templateUsageThisWindow` is a `{value:0, placeholder:true}` envelope. When the templates module ships, replace the placeholder with the real count.
+- **Obligations module** (DASH-OI-A): `RecipientDashboardKpis.myObligationsCount` is a `{value:0, placeholder:true}` envelope. When the obligations module ships, replace the placeholder.
+- **TimeRangeSelector debounce** (M6-FE-OI-1): custom-range typing fires immediate refetch on each digit. A 300ms debounce would tighten this. Out of scope for M6; logged for future polish.
+- **ContractVersionList client-side diff** (M6-FE-OI-4): S10 mount passes full bodyEn for both additions and deletions (no client-side diff). A future iteration could add `diff-match-patch` for sharper M4 prompts.
+- **`/api/v1/regulators` admin CRUD** (M5 carry-forward / REG-OI-B): still open from M5. M6 didn't add it.
+- **Polite supersession-pairing UX** (M5-FE-OI-2): still open.
+- **Compliance deadline on impact banner** (M5-FE-OI-5): still open.
+- **S2-22b codification** (M6 retrospective): JOIN-target-column tracing — promoted to memory follow-up at module close.
+- **Q11 carry-forward**: 4 sibling M5 fn_'s lack the canonical FK pre-check. DEFERRED — apply the canonical S2-23 template when next AC requires the 400 envelope.
+- **ARCH-NEW-1 carry-forward**: M4 `audit.read.all` drift fix still DEFERRED.
+- **Materialise heaviest dashboard view if read latency exceeds SLA**: would introduce a 4th cron driver. M5 carry-forward note about extracting a shared `cron-runner.ts` becomes more pressing if M7+ adds a refresh scheduler.
+- **Regenerate trend tracking**: cumulative — M2 4/8 → M3 5/12 → M4 5/5 → M5 5/6 → M6 6/6 (100%). The trend has plateaued at "everything Lovable-bearing in dashboard scope is incompatible." M7+ scope (likely adjacent to existing telemetry rather than building on Lovable surfaces) may break the trend or cement it further.
+
+---
+
 *Generated by Documentation Generator from M5 fe-implementation-summary.json + audit-report.md (Phase L1) + gate2-decisions.md + 053-defect1-patch-summary.md + qa-stage4-report.json. No Codex FE review run for M5 (Dexian decision 2026-05-04; 4th consecutive validated).*

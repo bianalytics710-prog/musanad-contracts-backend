@@ -20,6 +20,7 @@ import {
   regulatoryImpactsRouter,
   impactCategoriesRouter,
 } from './regulatory.routes';
+import dashboardsRouter from './dashboards.routes';
 
 const v1Router = Router();
 
@@ -53,5 +54,13 @@ v1Router.use('/regulations', regulationsRouter);
 v1Router.use('/regulatory-updates', regulatoryUpdatesRouter);
 v1Router.use('/regulatory-impacts', regulatoryImpactsRouter);
 v1Router.use('/impact-categories', impactCategoriesRouter);
+
+// M6 — Dashboards & Reporting (9 endpoints under /dashboards/*; the 10th
+// — admin observability health probe — is mounted under /admin/health
+// from admin/index.ts). All JWT-authenticated; zero new PUBLIC fn_'s
+// (Q1 confirmed); zero new auth modes. See
+// src/routes/v1/dashboards.routes.ts header for the per-endpoint
+// permission / role-gate strategy.
+v1Router.use('/dashboards', dashboardsRouter);
 
 export default v1Router;

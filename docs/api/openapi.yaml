@@ -95,7 +95,38 @@ info:
     branches. M5 also closes M4-FE-OI-3 — `RegulatoryImpactPanel.sampleContracts`
     prop wired (surgical 2-line additive change to the M4 panel; no M0..M4
     type files modified).
-  version: 0.8.0
+
+    M6 introduces 10 new endpoints under two namespaces — 9 under
+    `/api/v1/dashboards/*` (admin / drafter / approver / legal-counsel /
+    recipient / router / executive / executive/anomalies-history /
+    ai-cost-summary) plus 1 admin observability probe under
+    `/api/v1/admin/health`. All 10 are JWT-authenticated (zero new PUBLIC
+    fn_'s; **PUBLIC EXECUTE on fn_'s remains at exactly the M3 set of 5
+    names** — S2-21 sustained at sixth-consecutive-clean module). M6 is a
+    READ-ONLY module: 0 new tables, 0 ALTER TABLE, 0 new columns, 0 new cron
+    drivers. The DB surface is 4 plain views (`vw_contract_status_summary`,
+    `vw_approval_queue_metrics`, `vw_signature_status_summary`,
+    `vw_regulatory_impact_summary`), 10 new fn_'s (all SECURITY INVOKER), 1
+    new permission code (`insights.executive`) seeded with 3 role grants
+    (executive + platform_admin + Super Admin), and 1 new RLS SELECT policy
+    (`schema_migrations_select_admin` — ARCH-NEW-3 option (c) — enables
+    `fn_health_check.db.latestMigration` to read `MAX(version)` while the
+    pre-existing RESTRICTIVE deny-all continues to block writes for non-
+    superusers). Migrations applied: 054..056 (3 designed) + 057
+    (M6-DB-IMPL-DEFECT-1 patch — `CREATE OR REPLACE` of `fn_dashboard_approver`
+    correcting the JOIN-target column drift on `step.contract_id`; the
+    correct join chain is `approval_step JOIN approval_chain JOIN contract`).
+    `schema_migrations.version=57` on both `test` and `m0-foundation`
+    branches. The `fn_dashboard_executive.kpis.aiCostUsdWindow` field is
+    inline (Q5 single-source-of-compute lock — both S7 inline and S11
+    standalone read from `fn_ai_request_log_cost_report` via the wrapping
+    `fn_dashboard_ai_cost_summary`; `vw_ai_cost_rollup` was intentionally
+    not designed). M6 also closes **M4-FE-OI-2** (both halves) — the
+    `ExecutiveAnomaliesCard` (M4) is now mounted into the new
+    `ExecutiveDashboard` (S9), and the `VersionDiffSummaryPanel` (M4) is
+    now mounted into `ContractVersionList` (S10) — pure FE wiring, zero
+    M4 BE changes.
+  version: 0.9.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -358,6 +389,57 @@ tags:
       (idiomatic upsert; differs from regulation/regulatory-update create
       which return 201). `config.manage` permission required (AC-S15-05 —
       legal_counsel cannot manage impact categories — platform_admin only).
+  - name: M6 — Dashboards
+    description: |
+      Dashboards & Reporting (M6 — S1..S8 + S11). 9 endpoints under
+      `/api/v1/dashboards/*` covering 5 role-scoped dashboards (admin /
+      drafter / approver / legal-counsel / recipient), 1 dashboard router
+      helper (S6), the executive enterprise overview (S7) plus its anomalies
+      history viewer (S8), and the standalone AI cost summary (S11). Each
+      role-scoped dashboard returns a `kpis + (trends|lists)` snapshot
+      derived from M0..M5 telemetry — contract / approval_step /
+      approval_decision / signature_event / signature_invitation /
+      regulatory_impact / ai_request_log / ai_insight — without introducing
+      any new persistent tables. All 9 are JWT-authed. Permission posture:
+      role-based gates inside the fn body (RAISE 42501 → HTTP 403); the
+      executive dashboard adds an **OR** path on the new `insights.executive`
+      permission code (3 role grants seeded in migration 054); S11 requires
+      the M4-seeded `ai.observability.read` (defence-in-depth pre-gate at
+      route + fn body). The router endpoint (S6) accepts no params; all
+      others accept `windowDays` (1..365 for operational dashboards; 1..90
+      for `ai-cost-summary`; default 30 for operational, 90 for executive,
+      30 for ai-cost; default `limit=10` range 1..50 for
+      `executive/anomalies-history`). Q5 single-source-of-compute lock:
+      `fn_dashboard_executive.kpis.aiCostUsdWindow` (S7 inline) and the
+      standalone `fn_dashboard_ai_cost_summary` (S11) BOTH read from
+      `fn_ai_request_log_cost_report` (M4 043). The S7 inline field returns
+      `null` (no error) when the caller lacks `ai.observability.read`. S6
+      `dashboardKey` is computed via the live nested `role:{id,name}` shape
+      from `fn_user_get_by_id` (S2-22-WARN-3-FIX COALESCE chain). All 10
+      M6 fn_'s are SECURITY INVOKER; **zero new PUBLIC EXECUTE grants**
+      (S2-21 sustained at the M3 set of 5 — sixth consecutive validation).
+      No cron driver added (M6 is read-only).
+  - name: M6 — Admin Health
+    description: |
+      Admin observability health probe (M6 — S12). Single endpoint
+      `GET /api/v1/admin/health` — distinct from M0's existing public
+      liveness `/api/health` (no version prefix; no auth). Admin-scoped:
+      JWT + `platform_admin` OR Super Admin role check inside the fn body.
+      Returns `db` (status / latestMigration / currentTimestamp), `ai`
+      (lastSuccessfulRequestAt / lastFailureAt / estimatedHealthy), and
+      `overall` (`'ok'` | `'degraded'` | `'unhealthy'`) computed from the
+      composition. `db.latestMigration` reads
+      `MAX(schema_migrations.version)` and **requires the new RLS SELECT
+      policy** `schema_migrations_select_admin` from migration 054
+      (ARCH-NEW-3 option (c)) — without it the deny-all RLS would block
+      the read on a non-superuser pool connection and `latestMigration`
+      would return NULL. The audit probe (errorCountLastHour + lastErrorAt)
+      was DROPPED in design Patch Round 1 (S2-22-WARN-2-FIX) — the
+      `audit_log.action` CHECK enum is `'INSERT','UPDATE','DELETE'` only,
+      so the `'ERROR'` literal could never match; the error signal is now
+      sourced exclusively from `ai_request_log.outcome`. `fn_health_check`
+      stays SECURITY INVOKER (no DEFINER carve-out); the new permissive
+      SELECT policy is what unlocks the latestMigration read.
 
 components:
   securitySchemes:
@@ -4086,6 +4168,621 @@ components:
           description: AC-S13-02 — derived as `resolution_action <> 'pending'`.
         resolutionAction: { $ref: "#/components/schemas/RegulatoryImpactResolutionAction" }
         updatedAt: { type: string, format: date-time }
+
+    # ----------------------------------------------------------------
+    # M6 — Dashboards & Reporting (10 endpoints)
+    # ----------------------------------------------------------------
+
+    DashboardKey:
+      type: string
+      enum: [admin, drafter, approver, legal_counsel, recipient, executive]
+      description: |
+        Computed dashboard key returned by `fn_dashboard_router` (S6).
+        Decision tree codified in `db-design.md` §3.6 step 4. Default
+        fallback is `recipient` (least-privilege view).
+
+    HealthStatusOverall:
+      type: string
+      enum: [ok, degraded, unhealthy]
+      description: Composed from `db.status` + `ai.estimatedHealthy`.
+
+    HealthDbStatus:
+      type: string
+      enum: [ok, degraded]
+      description: Derived from `CURRENT_TIMESTAMP` + `pg_is_in_recovery()`.
+
+    PlaceholderKpi:
+      type: object
+      description: |
+        Placeholder envelope for dashboard slots whose underlying domain
+        tables do not yet exist (per Lovable S29 ACs referencing `parties` /
+        `obligations`). FE renders disabled tiles with "feature pending"
+        tooltips. Used in `LegalCounselDashboardKpis.templateUsageThisWindow`
+        and `RecipientDashboardKpis.myObligationsCount`.
+      required: [value, placeholder]
+      properties:
+        value:
+          type: integer
+          enum: [0]
+          description: Always 0 for placeholder slots.
+        placeholder:
+          type: boolean
+          enum: [true]
+          description: Distinguishes from a real zero-value count.
+
+    TrendDayCount:
+      type: object
+      description: "Daily trend point — date (YYYY-MM-DD) + count integer."
+      required: [date, count]
+      properties:
+        date: { type: string, format: date }
+        count: { type: integer }
+
+    ApprovalDecisionDayPoint:
+      type: object
+      description: |
+        Daily approval decision point — separates approved vs rejected counts.
+        Source uses present-tense `decision='approve'/'reject'` literals
+        (S2-22-WARN-1-FIX — past-tense `'approved'/'rejected'` would never
+        match the live CHECK enum).
+      required: [date, approved, rejected]
+      properties:
+        date: { type: string, format: date }
+        approved: { type: integer }
+        rejected: { type: integer }
+
+    TrendMonthCount:
+      type: object
+      description: "Monthly trend point — month (YYYY-MM) + count integer."
+      required: [month, count]
+      properties:
+        month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$" }
+        count: { type: integer }
+
+    TrendMonthValueAed:
+      type: object
+      description: Monthly value point — used by `fn_dashboard_executive.trends.valueOverTimeByMonth`.
+      required: [month, totalValueAed]
+      properties:
+        month: { type: string, pattern: "^[0-9]{4}-[0-9]{2}$" }
+        totalValueAed: { type: number }
+
+    DashboardContractRow:
+      type: object
+      description: |
+        Lightweight contract projection used by dashboard list slots
+        (`myDrafts5` / `awaitingMyAction5` / `myContracts5`). NEVER
+        includes `contract_body` or any other sensitive fields. Distinct
+        from M1a `Contract` — M1a's full shape is unchanged in M6.
+      required: [id, contractNumber, titleEn, status]
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        status: { type: string }
+        valueAed: { type: number, nullable: true }
+        updatedAt: { type: string, format: date-time }
+
+    DrafterAwaitingActionRow:
+      type: object
+      description: Drafter awaiting-action row — extends `DashboardContractRow` with `lastDecisionNote`.
+      required: [id, contractNumber, titleEn, status]
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        status: { type: string }
+        lastDecisionNote:
+          type: string
+          nullable: true
+          description: Most recent reject / request_resubmission note. SENSITIVE — pino-redacted on logs (M2 precedent); included in API response for the drafter only.
+
+    ApproverPendingQueueRow:
+      type: object
+      description: |
+        Joined `approval_step + contract` row — projected by
+        `fn_dashboard_approver.lists.pendingQueue5`.
+        post-057 patch: join chain is `approval_step JOIN approval_chain
+        ON ch.id = step.approval_chain_id JOIN contract ON c.id =
+        ch.contract_id` (M6-DB-IMPL-DEFECT-1 fix; original design referenced
+        non-existent `step.contract_id`).
+      required: [stepId, contractId, contractNumber, titleEn, requestedAt, hoursWaiting]
+      properties:
+        stepId: { type: integer }
+        contractId: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        valueAed: { type: number, nullable: true }
+        requestedAt:
+          type: string
+          format: date-time
+          description: |
+            `approval_step.created_at` — replaces non-existent `assigned_at`
+            per S2-22-FIX-2b. Rows are immutable post-create
+            (`trg_approval_step_immutable_fields`).
+        hoursWaiting:
+          type: number
+          description: "EXTRACT(EPOCH FROM (NOW() - step.created_at))/3600 — decimal hours."
+
+    RecipientMyContractsRow:
+      type: object
+      description: |
+        Joined `contract + signature_party` row — projected by
+        `fn_dashboard_recipient.lists.myContracts5`. Recipient is identified
+        via `signature_party.signer_email = current_user.email`
+        (case-insensitive). `counterpartyId` is always null until the
+        parties module ships (db-design.md §3.5 explicit).
+      required: [id, contractNumber, titleEn, status, ourPartyId]
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        status: { type: string }
+        ourPartyId: { type: integer }
+        counterpartyId:
+          type: integer
+          nullable: true
+          enum: [null]
+
+    RecipientPendingSignatureRow:
+      type: object
+      description: |
+        Joined `signature_invitation + signature_party + contract` row —
+        projected by `fn_dashboard_recipient.lists.pendingSignatures5`.
+        `sentAt` aliased from `invitation_sent_at`; `expiresAt` aliased
+        from `invitation_expires_at` (S2-22-FIX-5a — non-aliased columns
+        were design-time references that don't exist on the live table).
+      required: [invitationId, contractId, contractNumber, sentAt]
+      properties:
+        invitationId: { type: integer }
+        contractId: { type: integer }
+        contractNumber: { type: string }
+        sentAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+
+    DashboardRegulatoryUpdateRow:
+      type: object
+      description: |
+        Recent regulatory-update row — lighter projection than M5
+        `RegulatoryUpdate`. Embeds a `RegulatorRef`-like sub-object.
+        Projected by `fn_dashboard_legal_counsel.lists.recentRegulatoryUpdates5`.
+      required: [id, titleEn, severity, regulator]
+      properties:
+        id: { type: integer }
+        titleEn: { type: string }
+        severity: { type: string }
+        effectiveDate: { type: string, format: date, nullable: true }
+        regulator:
+          type: object
+          required: [id, nameEn]
+          properties:
+            id: { type: integer }
+            nameEn: { type: string }
+
+    DashboardOpenImpactRow:
+      type: object
+      description: |
+        Open regulatory-impact row — lighter projection than M5
+        `RegulatoryImpact`. Projected by
+        `fn_dashboard_legal_counsel.lists.openImpacts5`.
+      required: [id, contractId, contractNumber, regulationTitleEn, severity, detectedAt]
+      properties:
+        id: { type: integer }
+        contractId: { type: integer }
+        contractNumber: { type: string }
+        regulationTitleEn: { type: string }
+        severity:
+          type: string
+          description: "COALESCE(regulatory_update.severity, 'unknown') — db-design.md §3.4."
+        detectedAt: { type: string, format: date-time }
+
+    CounterpartyConcentrationRow:
+      type: object
+      description: |
+        Counterparty concentration row — projected by
+        `fn_dashboard_executive.kpis.topCounterpartiesByValue5`.
+        `counterpartyName` is not joined (no parties table yet); FE shows
+        `counterpartyId` with a "Name pending" fallback chip per AC-S7-04.
+      required: [counterpartyId, totalValueAed, contractCount]
+      properties:
+        counterpartyId: { type: integer }
+        totalValueAed: { type: number }
+        contractCount: { type: integer }
+
+    ValueDistributionBucket:
+      type: object
+      description: |
+        Value-distribution histogram bucket — projected by
+        `fn_dashboard_executive.kpis.valueDistribution`.
+        Bucket labels: `<100k` / `100k-1M` / `1M-10M` / `10M+`.
+      required: [bucket, count]
+      properties:
+        bucket: { type: string }
+        count: { type: integer }
+
+    AiCostTopPromptRow:
+      type: object
+      description: Top-prompt cost row — projected by `fn_dashboard_ai_cost_summary.topPromptsByCost5`.
+      required: [promptId, requestCount, totalCostUsd]
+      properties:
+        promptId: { type: integer }
+        requestCount:
+          type: integer
+          description: "successCount + errorCount per fn_ai_request_log_cost_report (M4 043)."
+        totalCostUsd:
+          type: number
+          description: "totalCostUsdMicros / 1_000_000 — projected as USD with 2dp at FE per AC-S11-07."
+        cacheHitRatio:
+          type: number
+          nullable: true
+          description: NULL when prompt has zero successful requests in the window (S2-18 NULL semantic).
+
+    ExecutiveAnomaly:
+      type: object
+      description: |
+        One anomaly row — reshaped from M4 `fn_ai_insight_list` rows where
+        `entity_type='executive_anomalies'`. `detectedAt` sourced from
+        `ai_insight.created_at` (no `detected_at` column exists on
+        `ai_insight`).
+      required: [id, severity, detectedAt]
+      properties:
+        id: { type: integer }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        severity:
+          type: string
+          description: |
+            Open string union (forward-compat with M4 ai_insight payload).
+            M5 `RegulatorySeverity` is a different scope.
+        detectedAt: { type: string, format: date-time }
+        payload:
+          type: object
+          nullable: true
+          description: Free-form payload from M4 `ai_insight.payload`.
+          additionalProperties: true
+
+    AdminDashboardKpis:
+      type: object
+      required: [totalContractsActive, totalContractsByStatus, expiringWithin30d, expiringWithin90d, pendingApprovals, pendingSignatures, openRegulatoryImpacts, recentAuditEvents, totalActiveUsers]
+      properties:
+        totalContractsActive: { type: integer }
+        totalContractsByStatus:
+          type: object
+          additionalProperties: { type: integer }
+          description: jsonb_object_agg(contract.status, count). Open key set — M1a may grow status literals; FE renders whatever keys come back.
+        expiringWithin30d: { type: integer }
+        expiringWithin90d:
+          type: integer
+          description: "AC-S1-04 monotonic — expiringWithin30d <= expiringWithin90d."
+        pendingApprovals: { type: integer }
+        pendingSignatures: { type: integer }
+        openRegulatoryImpacts:
+          type: integer
+          description: "WHERE resolved = FALSE AND is_active = TRUE (CRIT-1 rewrite — no resolved_at column)."
+        recentAuditEvents: { type: integer }
+        totalActiveUsers: { type: integer }
+
+    AdminDashboardTrends:
+      type: object
+      required: [contractsCreatedByDay, approvalDecisionsByDay]
+      properties:
+        contractsCreatedByDay:
+          type: array
+          items: { $ref: "#/components/schemas/TrendDayCount" }
+        approvalDecisionsByDay:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalDecisionDayPoint" }
+
+    AdminDashboardSnapshot:
+      type: object
+      required: [kpis, trends]
+      properties:
+        kpis: { $ref: "#/components/schemas/AdminDashboardKpis" }
+        trends: { $ref: "#/components/schemas/AdminDashboardTrends" }
+
+    DrafterDashboardKpis:
+      type: object
+      required: [myDraftsCount, awaitingMyActionCount, readyToSendCount, myRecentlyApprovedCount]
+      properties:
+        myDraftsCount: { type: integer }
+        awaitingMyActionCount: { type: integer }
+        readyToSendCount:
+          type: integer
+          description: "WHERE drafted_by = caller AND status = 'approved' AND id NOT IN (signature_invitation)."
+        myRecentlyApprovedCount: { type: integer }
+
+    DrafterDashboardLists:
+      type: object
+      required: [myDrafts5, awaitingMyAction5]
+      properties:
+        myDrafts5:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardContractRow" }
+        awaitingMyAction5:
+          type: array
+          items: { $ref: "#/components/schemas/DrafterAwaitingActionRow" }
+
+    DrafterDashboardSnapshot:
+      type: object
+      required: [kpis, lists]
+      properties:
+        kpis: { $ref: "#/components/schemas/DrafterDashboardKpis" }
+        lists: { $ref: "#/components/schemas/DrafterDashboardLists" }
+
+    ApproverDashboardKpis:
+      type: object
+      required: [pendingMyApprovalCount, decidedByMeCount]
+      properties:
+        pendingMyApprovalCount:
+          type: integer
+          description: |
+            COUNT WHERE COALESCE(delegated_to, reassigned_to,
+            approver_user_id) IS NOT DISTINCT FROM v_user_id AND
+            status='pending' (S2-22-FIX-2a override-chain + S2-18 NULL-safe).
+        decidedByMeCount:
+          type: integer
+          description: "ad.decided_by = caller AND ad.decided_at >= NOW() - p_window_days days (S2-22-FIX-3)."
+        averageDecisionHoursMine:
+          type: number
+          nullable: true
+          description: "AVG hours via approval_step.created_at (S2-22-FIX-2b). NULL when 0 decisions in window."
+        averageDecisionHoursTeam:
+          type: number
+          nullable: true
+          description: Same shape, OTHER users with the same approver_role.
+
+    ApproverDashboardLists:
+      type: object
+      required: [pendingQueue5]
+      properties:
+        pendingQueue5:
+          type: array
+          items: { $ref: "#/components/schemas/ApproverPendingQueueRow" }
+
+    ApproverDashboardSnapshot:
+      type: object
+      required: [kpis, lists]
+      properties:
+        kpis: { $ref: "#/components/schemas/ApproverDashboardKpis" }
+        lists: { $ref: "#/components/schemas/ApproverDashboardLists" }
+
+    LegalCounselDashboardKpis:
+      type: object
+      required: [regulatoryUpdatesThisWindow, openRegulatoryImpacts, criticalSeverityCount, regulationCatalogSize, templateUsageThisWindow]
+      properties:
+        regulatoryUpdatesThisWindow: { type: integer }
+        openRegulatoryImpacts:
+          type: integer
+          description: "WHERE resolved = FALSE AND is_active = TRUE (CRIT-1 rewrite)."
+        criticalSeverityCount: { type: integer }
+        regulationCatalogSize: { type: integer }
+        templateUsageThisWindow:
+          $ref: "#/components/schemas/PlaceholderKpi"
+        auditSummary:
+          type: object
+          nullable: true
+          additionalProperties: { type: integer }
+          description: |
+            jsonb_object_agg(table_name, count) FROM audit_log — keys are
+            LIVE `audit_log.table_name` values (S2-22-FIX-4 — was
+            `entity_type` which doesn't exist). NULL when caller lacks
+            `audit.read` permission (CRIT-4 lock — NOT `audit.read.all`).
+
+    LegalCounselDashboardLists:
+      type: object
+      required: [recentRegulatoryUpdates5, openImpacts5]
+      properties:
+        recentRegulatoryUpdates5:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardRegulatoryUpdateRow" }
+        openImpacts5:
+          type: array
+          items: { $ref: "#/components/schemas/DashboardOpenImpactRow" }
+
+    LegalCounselDashboardSnapshot:
+      type: object
+      required: [kpis, lists]
+      properties:
+        kpis: { $ref: "#/components/schemas/LegalCounselDashboardKpis" }
+        lists: { $ref: "#/components/schemas/LegalCounselDashboardLists" }
+
+    RecipientDashboardKpis:
+      type: object
+      required: [myContractsCount, pendingMySignatureCount, signedByMeWindow, myObligationsCount]
+      properties:
+        myContractsCount:
+          type: integer
+          description: DISTINCT contracts where caller is a `signature_party` (lower(email) match).
+        pendingMySignatureCount:
+          type: integer
+          description: "signature_invitation rows assigned to caller's email AND status='pending'."
+        signedByMeWindow:
+          type: integer
+          description: |
+            signature_event WHERE actor_user_id = caller AND
+            event_type='signed' AND created_at >= NOW() - p_window_days
+            AND is_active=TRUE (S2-22-FIX-1 — was signer_user_id /
+            signed_at / outcome; none exist). DN-19 semantic limitation:
+            actor_user_id IS NULL for external-only invitation signers
+            and they are NOT counted (acceptable trade-off — internal /
+            UAE-PASS / app-authenticated recipients DO populate
+            actor_user_id and ARE counted).
+        myObligationsCount:
+          $ref: "#/components/schemas/PlaceholderKpi"
+
+    RecipientDashboardLists:
+      type: object
+      required: [myContracts5, pendingSignatures5]
+      properties:
+        myContracts5:
+          type: array
+          items: { $ref: "#/components/schemas/RecipientMyContractsRow" }
+        pendingSignatures5:
+          type: array
+          items: { $ref: "#/components/schemas/RecipientPendingSignatureRow" }
+
+    RecipientDashboardSnapshot:
+      type: object
+      required: [kpis, lists]
+      properties:
+        kpis: { $ref: "#/components/schemas/RecipientDashboardKpis" }
+        lists: { $ref: "#/components/schemas/RecipientDashboardLists" }
+
+    DashboardPermissionsSummary:
+      type: object
+      required: [canViewAdminDashboard, canViewExecutiveDashboard]
+      properties:
+        canViewAdminDashboard: { type: boolean }
+        canViewExecutiveDashboard: { type: boolean }
+
+    DashboardRouterResponse:
+      type: object
+      description: |
+        Returned by `fn_dashboard_router` (S6) — db-design.md §3.6.
+        Honours the authoritative DB design over the orchestrator's earlier
+        `{ roleSlug, dashboardSlug }` shorthand per
+        `feedback_db_impl_report_dont_fix.md`.
+      required: [userId, primaryRole, dashboardKey, permissionsSummary]
+      properties:
+        userId: { type: integer }
+        primaryRole:
+          type: string
+          description: |
+            Raw role.name as resolved via `fn_user_get_by_id`
+            `v_user->'role'->>'name'` with COALESCE fallback to `'unknown'`
+            (S2-22-WARN-3-FIX). Live shape is nested `role:{id,name}` —
+            NOT flat `roleName`.
+        dashboardKey: { $ref: "#/components/schemas/DashboardKey" }
+        permissionsSummary: { $ref: "#/components/schemas/DashboardPermissionsSummary" }
+
+    ExecutiveExpiryCliffs:
+      type: object
+      required: [next30d, next60d, next90d]
+      properties:
+        next30d: { type: integer }
+        next60d:
+          type: integer
+          description: "AC-S7-03 monotonic: next30d <= next60d <= next90d."
+        next90d: { type: integer }
+
+    ExecutiveDashboardKpis:
+      type: object
+      required: [totalActiveValueAed, contractsByStatus, expiryCliffs, topCounterpartiesByValue5, valueDistribution, openRegulatoryImpactsCritical]
+      properties:
+        totalActiveValueAed: { type: number }
+        contractsByStatus:
+          type: object
+          additionalProperties: { type: integer }
+        expiryCliffs: { $ref: "#/components/schemas/ExecutiveExpiryCliffs" }
+        topCounterpartiesByValue5:
+          type: array
+          items: { $ref: "#/components/schemas/CounterpartyConcentrationRow" }
+        valueDistribution:
+          type: array
+          items: { $ref: "#/components/schemas/ValueDistributionBucket" }
+        openRegulatoryImpactsCritical:
+          type: integer
+          description: WHERE ri.resolved = FALSE AND ru.severity = 'critical' (CRIT-1 + M5 join).
+        aiCostUsdWindow:
+          type: number
+          nullable: true
+          description: |
+            Q5 inline figure derived from `fn_ai_request_log_cost_report`
+            (M4 043). NULL when caller lacks `ai.observability.read` (no
+            error — AC-S7-05 explicit panel marker). 90-day cap inherited
+            from M4 even when `windowDays > 90` via the LEAST clause
+            inside the fn_.
+
+    ExecutiveDashboardTrends:
+      type: object
+      required: [valueOverTimeByMonth, contractsCreatedByMonth]
+      properties:
+        valueOverTimeByMonth:
+          type: array
+          items: { $ref: "#/components/schemas/TrendMonthValueAed" }
+        contractsCreatedByMonth:
+          type: array
+          items: { $ref: "#/components/schemas/TrendMonthCount" }
+
+    ExecutiveDashboardSnapshot:
+      type: object
+      required: [kpis, trends]
+      properties:
+        kpis: { $ref: "#/components/schemas/ExecutiveDashboardKpis" }
+        trends: { $ref: "#/components/schemas/ExecutiveDashboardTrends" }
+
+    ExecutiveAnomaliesHistoryResponse:
+      type: object
+      required: [anomalies]
+      properties:
+        anomalies:
+          type: array
+          description: Empty array (NOT 404) when ai_insight cache empty — AC-S8-02.
+          items: { $ref: "#/components/schemas/ExecutiveAnomaly" }
+
+    AiCostSummary:
+      type: object
+      description: |
+        Used by S11 standalone endpoint AND by S7 inline (`kpis.aiCostUsdWindow`
+        is derived from this same fn_'s `totalCostUsdWindow`). Q5 architect
+        lock: `vw_ai_cost_rollup` was DROPPED — single source of compute is
+        `fn_ai_request_log_cost_report` (M4 043) wrapped by
+        `fn_dashboard_ai_cost_summary`.
+      required: [totalCostUsdWindow, totalRequestsWindow, topPromptsByCost5]
+      properties:
+        totalCostUsdWindow: { type: number }
+        totalRequestsWindow: { type: integer }
+        cacheHitRatioOverall:
+          type: number
+          nullable: true
+          description: NULL when totalRequestsWindow = 0 (S2-18 NULL semantic).
+        topPromptsByCost5:
+          type: array
+          items: { $ref: "#/components/schemas/AiCostTopPromptRow" }
+
+    HealthCheckDb:
+      type: object
+      required: [status, currentTimestamp]
+      properties:
+        status: { $ref: "#/components/schemas/HealthDbStatus" }
+        latestMigration:
+          type: integer
+          nullable: true
+          description: |
+            MAX(version) FROM schema_migrations. NULL when the
+            `schema_migrations_select_admin` RLS SELECT policy (migration
+            054 / ARCH-NEW-3 option (c)) is missing OR the table is empty.
+        currentTimestamp: { type: string, format: date-time }
+
+    HealthCheckAi:
+      type: object
+      required: [estimatedHealthy]
+      properties:
+        lastSuccessfulRequestAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: MAX(ai_request_log.created_at) WHERE outcome = 'success'.
+        lastFailureAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: "MAX(ai_request_log.created_at) WHERE outcome IN ('error','timeout','rate_limited','cancelled')."
+        estimatedHealthy:
+          type: boolean
+          description: lastSuccessfulRequestAt IS NOT NULL AND (lastFailureAt IS NULL OR lastSuccessfulRequestAt > lastFailureAt).
+
+    HealthCheckSnapshot:
+      type: object
+      required: [db, ai, overall]
+      properties:
+        db: { $ref: "#/components/schemas/HealthCheckDb" }
+        ai: { $ref: "#/components/schemas/HealthCheckAi" }
+        overall: { $ref: "#/components/schemas/HealthStatusOverall" }
 
   responses:
     Unauthenticated:
@@ -8370,6 +9067,522 @@ x-paths-root:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403":
           description: Insufficient permission (`config.manage`; legal_counsel denied — AC-S15-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ----------------------------------------------------------------
+  # M6 — Dashboards & Reporting (10 endpoints)
+  # ----------------------------------------------------------------
+
+  /dashboards/admin:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardAdmin
+      summary: Admin landing dashboard (S1 + S13)
+      description: |
+        System-wide KPIs (totalContracts by status / expiry buckets /
+        pendingApprovals / pendingSignatures / openRegulatoryImpacts /
+        recentAuditEvents / totalActiveUsers) + trends
+        (contractsCreatedByDay gap-filled via `generate_series` /
+        approvalDecisionsByDay split by approve vs reject — present-tense
+        literals per S2-22-WARN-1-FIX). S13 admin landing tile grid reuses
+        this same backend with a different FE shell.
+        DB function: `fn_dashboard_admin`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S1
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Admin dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AdminDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023 → AC-S1-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not platform_admin / Super Admin (42501 → AC-S1-02).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/drafter:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardDrafter
+      summary: Drafter-scoped dashboard (S2)
+      description: |
+        Drafter dashboard — myDraftsCount / awaitingMyActionCount /
+        readyToSendCount / myRecentlyApprovedCount + lists.myDrafts5 +
+        lists.awaitingMyAction5. Filters projection to
+        `drafted_by = current_user_id`.
+        DB function: `fn_dashboard_drafter`.
+      x-authorisedRoles: [Super Admin, platform_admin, contract_drafter]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S2
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Drafter dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/DrafterDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not drafter / admin / Super Admin (42501 → AC-S2-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/approver:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardApprover
+      summary: Approver-scoped dashboard (S3)
+      description: |
+        Approver dashboard — pendingMyApprovalCount / decidedByMeCount /
+        averageDecisionHoursMine / averageDecisionHoursTeam +
+        lists.pendingQueue5. Effective-assignee derived as
+        `COALESCE(delegated_to, reassigned_to, approver_user_id)` per the
+        M2 override-chain semantic (S2-22-FIX-2a). `step.created_at`
+        replaces non-existent `assigned_at` (S2-22-FIX-2b).
+
+        **Live fn_ is post-057 patch (M6-DB-IMPL-DEFECT-1):** join chain
+        is `approval_step JOIN approval_chain ON ch.id =
+        step.approval_chain_id JOIN contract ON c.id = ch.contract_id` —
+        original design referenced non-existent `step.contract_id`.
+        DB function: `fn_dashboard_approver` (post-057).
+      x-authorisedRoles: [Super Admin, platform_admin, contract_approver, contract_approver_2]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S3
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Approver dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ApproverDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not approver / admin / Super Admin (42501 → AC-S3-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/legal-counsel:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardLegalCounsel
+      summary: Legal counsel dashboard (S4)
+      description: |
+        Legal counsel dashboard — regulatoryUpdatesThisWindow /
+        openRegulatoryImpacts (CRIT-1: WHERE resolved=FALSE; no resolved_at
+        column) / criticalSeverityCount / regulationCatalogSize /
+        templateUsageThisWindow (placeholder) / auditSummary (gated on
+        `audit.read` per CRIT-4 — NOT `audit.read.all`; null when caller
+        lacks the permission) + lists.recentRegulatoryUpdates5 +
+        lists.openImpacts5. auditSummary keys are live `audit_log.table_name`
+        values (S2-22-FIX-4 — was `entity_type` which doesn't exist).
+        DB function: `fn_dashboard_legal_counsel`.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: (audit.read — gates auditSummary slot only; null when missing)
+      x-authMode: jwt
+      x-storyId: S4
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Legal counsel dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/LegalCounselDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not legal_counsel / admin / Super Admin (42501 → AC-S4-07).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/recipient:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardRecipient
+      summary: Recipient-scoped dashboard (S5)
+      description: |
+        Recipient dashboard — myContractsCount / pendingMySignatureCount /
+        signedByMeWindow (S2-22-FIX-1: `signature_event.actor_user_id +
+        created_at + event_type='signed' AND is_active=TRUE` — original
+        design referenced non-existent `signer_user_id` / `signed_at` /
+        `outcome`) / myObligationsCount (placeholder) + lists.myContracts5
+        + lists.pendingSignatures5 (`sentAt` aliased from
+        `invitation_sent_at`, `expiresAt` from `invitation_expires_at` per
+        S2-22-FIX-5a). Recipient identifies via
+        `signature_party.signer_email = current_user.email`
+        (case-insensitive).
+
+        DN-19 semantic limitation: `signedByMeWindow` excludes external-only
+        invitation signers (their `actor_user_id` is NULL). Internal
+        recipients (UAE-PASS / app-authenticated) ARE counted.
+        DB function: `fn_dashboard_recipient`.
+      x-authorisedRoles: [Super Admin, platform_admin, contract_recipient]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S5
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+      responses:
+        "200":
+          description: Recipient dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RecipientDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not recipient / admin / Super Admin (42501 → AC-S5-07).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/router:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardRouter
+      summary: Dashboard routing helper (S6)
+      description: |
+        Given the current_user, returns
+        `{ userId, primaryRole, dashboardKey, permissionsSummary }`.
+        `dashboardKey` decision tree codified at db-design.md §3.6 step 4
+        (platform_admin / Super Admin → 'admin'; default fallback →
+        'recipient'). `v_role` extraction via
+        `COALESCE(v_user->'role'->>'name', v_user->>'roleName', 'unknown')`
+        per S2-22-WARN-3-FIX — live `fn_user_get_by_id` returns nested
+        `{role:{id,name}}`, NOT flat `roleName`.
+        DB function: `fn_dashboard_router` (CALLs `fn_user_get_by_id`).
+      x-authorisedRoles: [any authenticated user]
+      x-requiredPermissions: (none beyond JWT)
+      x-authMode: jwt
+      x-storyId: S6
+      responses:
+        "200":
+          description: Dashboard router decision payload.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/DashboardRouterResponse" }
+                  requestId: { type: string, format: uuid }
+        "401":
+          description: Unauthenticated — no JWT or app.current_user_id NULL (42501 → AC-S6-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/executive:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardExecutive
+      summary: Executive enterprise overview (S7)
+      description: |
+        Executive enterprise overview — totalActiveValueAed /
+        contractsByStatus / expiryCliffs (next30/60/90d, monotonic per
+        AC-S7-03) / topCounterpartiesByValue5 (counterpartyId only — no
+        parties table yet) / valueDistribution histogram /
+        openRegulatoryImpactsCritical (CRIT-1 + critical join) /
+        aiCostUsdWindow (INLINE — Q5 lock; null when caller lacks
+        `ai.observability.read` per AC-S7-05) + trends.valueOverTimeByMonth
+        + trends.contractsCreatedByMonth.
+
+        Default windowDays=90 (range 1..365). AI sub-call truncates to last
+        90 days via `LEAST(windowDays, 90)` — matches M4 cap. CRIT-3
+        confirmed: `contract_select_role_aware` includes `executive` — fn_
+        stays SECURITY INVOKER, no DEFINER carve-out.
+        DB function: `fn_dashboard_executive` (CALLs
+        `fn_ai_request_log_cost_report` + `fn_current_user_has_permission`).
+      x-authorisedRoles: [Super Admin, platform_admin, executive]
+      x-requiredPermissions: (insights.executive — alternate gate path; OR-of role gate)
+      x-authMode: jwt
+      x-storyId: S7
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 90 }
+      responses:
+        "200":
+          description: Executive dashboard snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ExecutiveDashboardSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,365] (22023 → AC-S7-07).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: |
+            Caller lacks executive role / admin role AND lacks
+            `insights.executive` permission (42501 → AC-S7-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/executive/anomalies-history:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardExecutiveAnomaliesHistory
+      summary: Cached AI executive anomalies history (S8)
+      description: |
+        GET-only history endpoint reading from M4 `ai_insight` cache where
+        `entity_type='executive_anomalies'`. Returns
+        `{ anomalies: [...] }`; **empty array (NOT 404) when cache empty**
+        per AC-S8-02. Detection refresh action reuses M4's existing
+        `POST /api/v1/ai/executive-anomalies` — NOT duplicated as a write
+        endpoint here. p_limit default 10, range 1..50.
+        DB function: `fn_dashboard_executive_anomalies_history`
+        (wraps M4 `fn_ai_insight_list`).
+      x-authorisedRoles: [Super Admin, platform_admin, executive]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S8
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Cached anomalies history (empty array if cache empty).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ExecutiveAnomaliesHistoryResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — limit out of [1,50] (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not executive / admin / Super Admin (42501).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /dashboards/ai-cost-summary:
+    get:
+      tags: [M6 — Dashboards]
+      operationId: dashboardAiCostSummary
+      summary: AI cost rollup summary (S11)
+      description: |
+        AI cost rollup for admin dashboard sidebar — totalCostUsdWindow /
+        totalRequestsWindow / cacheHitRatioOverall (NULL when
+        totalRequestsWindow=0 per S2-18) / topPromptsByCost5 (ordered by
+        totalCostUsd DESC, fixed LIMIT 5 per Q7).
+
+        STANDALONE endpoint per Agent 5 DASH-OI-G — NOT bundled into the
+        `/admin` payload. Single source of compute (Q5 lock): both S7
+        inline and S11 standalone read from `fn_ai_request_log_cost_report`
+        via the wrapping fn_. windowDays range **1..90** (matches M4
+        90-day cap convention per AC-S11-05).
+
+        Pre-gate at route layer: `authorise(['ai.observability.read'])`
+        fires before the controller invokes the fn (defence-in-depth — fn
+        body re-validates).
+        DB function: `fn_dashboard_ai_cost_summary` (wraps M4
+        `fn_ai_request_log_cost_report`).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: ai.observability.read
+      x-authMode: jwt
+      x-storyId: S11
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 90, default: 30 }
+      responses:
+        "200":
+          description: AI cost summary.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AiCostSummary" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: VALIDATION_ERROR — windowDays out of [1,90] (22023 → AC-S11-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks `ai.observability.read` (42501 → AC-S11-04).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/health:
+    get:
+      tags: [M6 — Admin Health]
+      operationId: adminHealth
+      summary: Admin observability health probe (S12)
+      description: |
+        Admin observability probe — `db` (status from CURRENT_TIMESTAMP +
+        pg_is_in_recovery() / latestMigration / currentTimestamp), `ai`
+        (lastSuccessfulRequestAt / lastFailureAt / estimatedHealthy),
+        `overall` (`'ok'` | `'degraded'` | `'unhealthy'`).
+
+        **DISTINCT from M0 public liveness `/api/health`** (no version
+        prefix, no auth). This admin endpoint is JWT + platform_admin /
+        Super Admin role required.
+
+        `db.latestMigration` reads `MAX(schema_migrations.version)` and
+        REQUIRES the new RLS SELECT policy `schema_migrations_select_admin`
+        (migration 054, ARCH-NEW-3 option (c)). Without it, the deny-all
+        RLS would return NULL on a non-superuser pool connection.
+
+        Audit block (errorCountLastHour + lastErrorAt) DROPPED in design
+        Patch Round 1 per S2-22-WARN-2-FIX — `audit_log.action` CHECK
+        enum is `'INSERT','UPDATE','DELETE'` only; literal `'ERROR'`
+        could never match. Error signal sourced exclusively from
+        `ai_request_log.outcome IN ('error','timeout','rate_limited','cancelled')`.
+
+        `fn_health_check` stays SECURITY INVOKER per ARCH-NEW-3 option
+        (c) — the new permissive SELECT policy is what enables the
+        latestMigration read.
+        DB function: `fn_health_check`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: (none beyond JWT — fn body role check)
+      x-authMode: jwt
+      x-storyId: S12
+      responses:
+        "200":
+          description: Admin health snapshot.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/HealthCheckSnapshot" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not platform_admin / Super Admin (42501 → AC-S12-07).
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
