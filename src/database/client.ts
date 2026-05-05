@@ -129,7 +129,40 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
             importBatchId: 'Referenced import batch not found',
           });
         }
+        // M5: many fn_'s raise 23503 with a structured 'field:message'
+        // body — both for missing FK targets (AC-S11-04 / AC-S11-05 →
+        // 400 VALIDATION_ERROR) and for cleaner-UX active-dependent
+        // guards (AC-S5-02 fn_regulation_delete 'regulationId:Cannot
+        // delete: N active impact rows ...' → 409 CONFLICT). Disambiguate
+        // by the message prefix: 'Cannot delete' family is a state
+        // conflict (409), other structured 23503s are validation (400).
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? 'fk';
+            const msg = m[3]?.trim() ?? 'Foreign key violation';
+            if (/^cannot delete\b/i.test(msg)) {
+              return new ConflictError(msg, { [field]: msg });
+            }
+            return new ValidationError(msg, { [field]: msg });
+          }
+        }
         return new UnprocessableEntityError(`${fnName}: foreign key violation`);
+      case '23501': // restrict_violation — used by M5 fn_regulation_update
+        // (AC-S4-05 referenceCode immutable). Structured raise of the
+        // form 'fn_X: <field>:<message>' — surface as 400 VALIDATION_ERROR
+        // with the field intact so FE can display the inline error.
+        {
+          const firstLine = message.split('\n')[0]?.trim() ?? message;
+          const m = STRUCTURED_RAISE_RE.exec(firstLine);
+          if (m) {
+            const field = m[2] ?? 'restrict';
+            const msg = m[3]?.trim() ?? 'Operation restricted';
+            return new ValidationError(msg, { [field]: msg });
+          }
+        }
+        return new ValidationError('Operation restricted by data integrity rule');
       case '23502': // not_null_violation
         return new ValidationError(`${fnName}: required field missing`);
       case '23514': // check_violation

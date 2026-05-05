@@ -14,6 +14,12 @@ import adminRouter from './admin';
 import signRouter from './sign.routes';
 import signaturePartiesRouter from './signature-parties.routes';
 import signatureInvitationsRouter from './signature-invitations.routes';
+import {
+  regulationsRouter,
+  regulatoryUpdatesRouter,
+  regulatoryImpactsRouter,
+  impactCategoriesRouter,
+} from './regulatory.routes';
 
 const v1Router = Router();
 
@@ -39,5 +45,13 @@ v1Router.use('/admin', adminRouter);
 v1Router.use('/sign', signRouter);
 v1Router.use('/signature-parties', signaturePartiesRouter);
 v1Router.use('/signature-invitations', signatureInvitationsRouter);
+
+// M5 — Regulatory Radar (15 endpoints across four resources). All
+// JWT-authenticated; zero new PUBLIC fn_'s (Q1 confirmed). See
+// src/routes/v1/regulatory.routes.ts header for permission code mapping.
+v1Router.use('/regulations', regulationsRouter);
+v1Router.use('/regulatory-updates', regulatoryUpdatesRouter);
+v1Router.use('/regulatory-impacts', regulatoryImpactsRouter);
+v1Router.use('/impact-categories', impactCategoriesRouter);
 
 export default v1Router;

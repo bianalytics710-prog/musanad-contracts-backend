@@ -61,7 +61,41 @@ info:
     AIProvider abstraction unchanged. Six prompt files in `[backend]/prompts/`
     are loaded VERBATIM at boot (G7 — Mustache-style placeholder substitution
     only at runtime; never edit the prompt body).
-  version: 0.7.0
+
+    M5 introduces 15 new endpoints under four namespaces —
+    `/api/v1/regulations/*`, `/api/v1/regulatory-updates/*`,
+    `/api/v1/regulatory-impacts/*`, and `/api/v1/impact-categories` — covering
+    the Regulatory Radar surface (UAE regulations master library, regulatory-
+    update radar feed, per-contract impact analysis, and impact-category
+    taxonomy admin). All 15 are JWT-authed (zero new PUBLIC fn_'s; the
+    `signed-token` and `verify_jwt=false` modes remain M3/M4-only). 5 new
+    tables: `regulator` (shared lookup), `regulation` (master library;
+    self-referential supersession), `impact_category` (configurable taxonomy),
+    `regulatory_update` (radar feed), and `regulatory_impact`
+    (G1-reconstituted; nullable `regulatory_update_id` for structural impacts;
+    COALESCE-sentinel UNIQUE for idempotent bulk-detect). 15 new fn_'s + 1
+    extended (`fn_contract_activity_create` whitelist 23→25 atomically with
+    the `contract_activity.activity_type` CHECK enum extension in migration
+    047). One DEFINER carve-out: `fn_regulatory_impact_create_bulk` —
+    legal_counsel writes impacts on contracts they don't directly own;
+    defence-in-depth permission gate at fn body line 1 plus an S2-17 atomic
+    gate+commit (SELECT FOR UPDATE on regulatory_update before the per-contract
+    INSERT loop) preserve security invariants. **PUBLIC EXECUTE on fn_'s
+    remains at exactly the M3 set of 5 names** (S2-21 mandatory; M5 confirms —
+    4th consecutive validation). M5 introduces NO new cron driver (event-
+    driven only). 3 new permission codes (`regulations.read`,
+    `regulations.manage`, `config.manage`) seeded in migration 046 with 12
+    role_permission grants. Migrations applied: 046..052 + 053
+    (M5-PROD-DEFECT-1 patch — structured FK pre-check on
+    `fn_regulation_update.supersededById` so the BE `translatePgError` 23503
+    STRUCTURED_RAISE_RE branch returns 400 with
+    `{ supersededById: 'Referenced regulation not found' }` instead of
+    raw-FK-fallthrough 422; codifies S2-23 mandatory check).
+    `schema_migrations.version=53` on both `test` and `m0-foundation`
+    branches. M5 also closes M4-FE-OI-3 — `RegulatoryImpactPanel.sampleContracts`
+    prop wired (surgical 2-line additive change to the M4 panel; no M0..M4
+    type files modified).
+  version: 0.8.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -259,6 +293,71 @@ tags:
       at request time (no transcript persisted — AN-2 transcriptStorage,
       DN-11). `userMessage` is sensitive (pino-redacted as `ai_prompt_payload`,
       AC-S12-09).
+  - name: M5 — Regulations
+    description: |
+      Regulations master library (M5 — S1..S5). 5 endpoints under
+      `/api/v1/regulations/*`. CRUD + list with filters (jurisdiction,
+      regulationType, issuerId, status, search) + recursive supersession chain
+      on detail (max 5 hops). `regulations.read` covers list/get; `regulations.manage`
+      gates create/update/patch; DELETE additionally requires platform_admin role
+      at the function body (legal_counsel cannot delete — AC-S5-04). `referenceCode`
+      is immutable post-create (fn raises 23501; AC-S4-05). Setting `supersededById`
+      auto-flips status to `superseded` (AC-S4-02). Self-supersede rejected
+      (AC-S4-03). DELETE 409s when active impact rows reference the regulation
+      (AC-S5-02 — cleaner UX than raw 23503 FK violation). M5-PROD-DEFECT-1
+      (migration 053): structured FK pre-check on `supersededById` returns 400
+      with `{ supersededById: 'Referenced regulation not found' }` instead of
+      raw-FK-fallthrough 422.
+  - name: M5 — Regulatory Updates
+    description: |
+      Regulatory update radar feed (M5 — S6..S10). 5 endpoints under
+      `/api/v1/regulatory-updates/*`. CRUD + list with severity / regulator /
+      category / effective-window / compliance-deadline-cliff filters (sort
+      `published_date DESC`). Get-by-id embeds an RLS-aware impactSummary
+      aggregate (`totalImpacts`, `resolvedCount`, `pendingCount`,
+      `avgImpactScore`; null when totalImpacts=0). DELETE cascade-soft-deletes
+      regulatory_impact rows where `regulatory_update_id = :id`; structural
+      impacts (column IS NULL) are not affected (AC-S10-02). Date-ordering
+      guards: `effectiveDate >= publishedDate` (AC-S8-03);
+      `complianceDeadline >= publishedDate` (AC-S8-04). UPDATE has an
+      `publishedDate` floor guard — cannot move below MIN(detected_at) of
+      associated impacts (AC-S9-02).
+  - name: M5 — Regulatory Impacts
+    description: |
+      Per-contract regulatory impact analysis (M5 — S11..S13). 3 endpoints
+      under `/api/v1/regulatory-impacts/*`. **Bulk-detect** (POST
+      `/bulk-detect`) is the only DEFINER carve-out in M5 — `fn_regulatory_impact_create_bulk`
+      runs `SECURITY DEFINER` so legal_counsel can write impacts on contracts
+      they don't directly own; defence-in-depth permission gate at fn body
+      line 1 + S2-17 atomic gate+commit (SELECT FOR UPDATE on regulatory_update
+      before the per-contract INSERT loop) preserve invariants. Idempotent
+      re-runs via ON CONFLICT DO NOTHING on the COALESCE-sentinel UNIQUE
+      `(contract_id, regulation_id, COALESCE(regulatory_update_id, 0::BIGINT))`
+      partial index (Postgres NULLS-DISTINCT default; M4 ai_insight precedent).
+      `impactPayload` is SENSITIVE — pino-redacted at controller (covered by
+      `ai_prompt_payload` class per M4 precedent). **List** (GET) requires at
+      least one of contractId/regulationId/regulatoryUpdateId (AC-S12-02);
+      RLS narrows for non-admin (drafter sees only their drafted contracts;
+      executive sees system-wide). S2-18 NULL-safe equality on
+      regulatoryUpdateId via `IS NOT DISTINCT FROM`. **Resolve** (PATCH
+      `/:id/resolve`) is polymorphic-permission: regulations.manage OR
+      contract.drafted_by = current_user (AC-S13-05). resolutionAction='pending'
+      un-resolves (resolved=FALSE). Q9 EMIT — emits `regulatory_impact_detected`
+      activity per successfully-inserted impact (bulk-detect) and
+      `regulatory_impact_resolved` (resolve, only when v_resolved=TRUE).
+  - name: M5 — Impact Categories
+    description: |
+      Impact category taxonomy admin (M5 — S14..S15). 2 endpoints under
+      `/api/v1/impact-categories`. **List** (GET) sorted by `display_order ASC`;
+      no pagination (small reference table, ~8-12 rows seeded in migration
+      052); accessible to ALL authenticated roles including `contract_recipient`
+      (AC-S14-05 — only M5 endpoint without a permission gate beyond JWT;
+      taxonomy used by FE form pickers). **Upsert** (POST) is single-call
+      keyed on `key` (ON CONFLICT (key) DO UPDATE — AC-S15-01/02); returns
+      200 for both create and update with `createdOrUpdated` discriminator
+      (idiomatic upsert; differs from regulation/regulatory-update create
+      which return 201). `config.manage` permission required (AC-S15-05 —
+      legal_counsel cannot manage impact categories — platform_admin only).
 
 components:
   securitySchemes:
@@ -3349,6 +3448,644 @@ components:
           description: 1-line headline + max 5 bullets prefixed with `•` (controller post-processes).
         persisted: { $ref: "#/components/schemas/ContractVersionDiffSummaryPersistData" }
         cacheHit: { type: boolean }
+
+    # ------------------------------------------------------------
+    # M5 — Regulatory Radar
+    # ------------------------------------------------------------
+    RegulationType:
+      type: string
+      description: regulation.regulation_type CHECK enum — closed canonical set.
+      enum:
+        - federal_decree_law
+        - cabinet_resolution
+        - ministerial_decision
+        - free_zone_regulation
+        - circular
+        - guideline
+
+    RegulationJurisdiction:
+      type: string
+      description: regulation.jurisdiction + regulator.jurisdiction CHECK enum.
+      enum:
+        - uae_federal
+        - dubai
+        - abu_dhabi
+        - sharjah
+        - difc
+        - adgm
+        - dmcc
+        - other
+      nullable: true
+
+    RegulationStatus:
+      type: string
+      description: regulation.status CHECK enum.
+      enum: [active, superseded, repealed, draft]
+
+    RegulatorySeverity:
+      type: string
+      description: regulatory_update.severity CHECK enum.
+      enum: [low, medium, high, critical]
+
+    RegulatoryImpactResolutionAction:
+      type: string
+      description: regulatory_impact.resolution_action CHECK enum.
+      enum: [amended, waived, out_of_scope, pending]
+
+    RegulatoryImpactStatus:
+      type: string
+      description: |
+        Computed status alias for FE consumers — derived from
+        `regulatory_impact.resolved` boolean + `resolution_action`. Not a DB
+        column; provided as UI convenience.
+      enum: [pending, resolved]
+
+    M5ActivityType:
+      type: string
+      description: |
+        M5 widened activity-type union (25 values). Extends M4's 23-value
+        union with two new literals that fn_contract_activity_create's IF NOT IN
+        whitelist accepts post-migration 047 (atomic with the
+        contract_activity.activity_type CHECK enum extension). M5 emits
+        `regulatory_impact_detected` per successfully-inserted impact in
+        fn_regulatory_impact_create_bulk (Q9 EMIT) and `regulatory_impact_resolved`
+        on terminal resolve in fn_regulatory_impact_resolve (only when
+        v_resolved=TRUE; resolution_action='pending' un-resolves and emits
+        nothing). M5 introduces 2 net-new values; cumulative chain
+        M1a 7 → M1b 9 → M2 14 → M3 20 → M4 23 → M5 25.
+      enum:
+        - created
+        - updated
+        - status_changed
+        - version_created
+        - tagged
+        - soft_deleted
+        - restored
+        - payment_schedule_replaced
+        - exported
+        - import_batch_created
+        - import_batch_committed
+        - import_batch_cancelled
+        - approval_submitted
+        - approval_decided
+        - approval_delegated
+        - approval_reassigned
+        - approval_escalated
+        - signature_sent
+        - signature_signed
+        - signature_declined
+        - ai_summary_generated
+        - ai_risk_score_updated
+        - ai_diff_summary_generated
+        - regulatory_impact_detected
+        - regulatory_impact_resolved
+
+    RegulatorRef:
+      type: object
+      description: |
+        Lighter shape embedded inside regulation.issuer and
+        regulatory_update.regulator JSONB. Returned by list/detail fn_'s; no
+        own list endpoint in M5.
+      required: [id, code, nameEn]
+      properties:
+        id: { type: integer }
+        code: { type: string, example: MoHRE }
+        nameEn: { type: string }
+        nameAr: { type: string, nullable: true }
+
+    Regulator:
+      type: object
+      description: |
+        M5 shared lookup table for UAE regulators. 9 rows seeded in migration
+        048 (MoHRE, FTA, Central Bank, DIFC, ADGM, TDRA, MoJ, MoE, Other).
+        No CRUD endpoints in M5; admin extends via DDL/migration.
+      required: [id, code, nameEn, displayOrder, isActive]
+      properties:
+        id: { type: integer }
+        code: { type: string }
+        nameEn: { type: string }
+        nameAr: { type: string, nullable: true }
+        jurisdiction: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        descriptionEn: { type: string, nullable: true }
+        descriptionAr: { type: string, nullable: true }
+        sourceUrl: { type: string, nullable: true }
+        displayOrder: { type: integer }
+        isActive: { type: boolean }
+
+    ImpactCategoryRef:
+      type: object
+      description: Lighter shape embedded inside regulatory_update.category.
+      required: [id, key, nameEn, nameAr, icon, colour]
+      properties:
+        id: { type: integer }
+        key: { type: string, example: data_protection }
+        nameEn: { type: string }
+        nameAr: { type: string }
+        icon: { type: string, example: shield }
+        colour: { type: string, example: amber }
+
+    ImpactCategory:
+      type: object
+      description: |
+        M5 configurable categorisation taxonomy for regulatory impact. PK is
+        `id BIGSERIAL` (Q5 — id retained explicitly to keep audit trigger
+        compatible; avoids the DB-IMPL-I-1 code-PK pattern that bit M3
+        signature_party_side / signature_method and M4 ai_prompt). `key` is
+        the stable snake_case join key for AI prompt context. `active` is
+        FE-picker visibility (separate from `isActive` soft-delete).
+      required: [id, key, nameEn, nameAr, icon, colour, active, displayOrder, sources, severityScale, defaultClauseCategories]
+      properties:
+        id: { type: integer }
+        key: { type: string }
+        nameEn: { type: string }
+        nameAr: { type: string }
+        descriptionEn: { type: string, nullable: true }
+        descriptionAr: { type: string, nullable: true }
+        icon: { type: string }
+        colour: { type: string }
+        active: { type: boolean }
+        displayOrder: { type: integer }
+        sources:
+          type: array
+          items: { type: string }
+          description: JSONB array of source-name strings.
+        severityScale:
+          type: array
+          items: { type: string }
+          description: JSONB array of severity strings; default `["low","medium","high","critical"]`.
+        aiPromptContext:
+          type: string
+          nullable: true
+          description: Admin-authored AI guidance content. Not user PII.
+        defaultClauseCategories:
+          type: array
+          items: { type: string }
+          description: TEXT[] (Q4 — junction normalization deferred to M7+).
+
+    ImpactCategoryListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/ImpactCategory" }
+
+    UpsertImpactCategoryDto:
+      type: object
+      required: [key, nameEn, nameAr]
+      properties:
+        key: { type: string, minLength: 1, maxLength: 60 }
+        nameEn: { type: string, minLength: 1, maxLength: 200 }
+        nameAr: { type: string, minLength: 1, maxLength: 200, description: AC-S15-03 — required (bilingual taxonomy). }
+        descriptionEn: { type: string, nullable: true }
+        descriptionAr: { type: string, nullable: true }
+        icon: { type: string }
+        colour: { type: string }
+        active: { type: boolean }
+        displayOrder: { type: integer }
+        sources:
+          type: array
+          items: { type: string }
+        severityScale:
+          type: array
+          items: { type: string }
+          description: AC-S15-04 — JSON array of strings.
+        aiPromptContext: { type: string, nullable: true }
+        defaultClauseCategories:
+          type: array
+          items: { type: string }
+
+    ImpactCategoryUpsertResult:
+      type: object
+      required: [id, key, createdOrUpdated]
+      properties:
+        id: { type: integer }
+        key: { type: string }
+        createdOrUpdated:
+          type: string
+          enum: [created, updated]
+
+    RegulationSupersededByItem:
+      type: object
+      description: Recursive chain entry returned by fn_regulation_get_by_id (max 5 hops; AC-S2-02).
+      required: [id, referenceCode, titleEn, status, depth]
+      properties:
+        id: { type: integer }
+        referenceCode: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/RegulationStatus" }
+        depth: { type: integer }
+
+    RegulationListItem:
+      type: object
+      description: |
+        Lighter list-row shape than Regulation (omits summaryEn/Ar, sourceUrl,
+        tags, supersededBy chain). Mirrors the M1a Contract / ContractListItem
+        split. supersededByCode is the snake_case ↔ camelCase mapping of
+        `superseded_by_id` resolved through a subquery on regulation s WHERE
+        s.id = r.superseded_by_id.
+      required: [id, referenceCode, titleEn, issuer, regulationType, status, isActive]
+      properties:
+        id: { type: integer }
+        referenceCode: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        issuer: { $ref: "#/components/schemas/RegulatorRef" }
+        regulationType: { $ref: "#/components/schemas/RegulationType" }
+        jurisdiction: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        effectiveDate: { type: string, format: date, nullable: true }
+        supersededByCode: { type: string, nullable: true }
+        status: { $ref: "#/components/schemas/RegulationStatus" }
+        isActive: { type: boolean }
+
+    Regulation:
+      type: object
+      description: |
+        Full detail returned by fn_regulation_get_by_id including the recursive
+        supersession chain (max 5 hops; empty array when terminal).
+      required: [id, referenceCode, titleEn, issuer, regulationType, tags, status, isActive, supersededBy]
+      properties:
+        id: { type: integer }
+        referenceCode: { type: string }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        issuer: { $ref: "#/components/schemas/RegulatorRef" }
+        regulationType: { $ref: "#/components/schemas/RegulationType" }
+        jurisdiction: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        effectiveDate: { type: string, format: date, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        sourceUrl: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+          description: TEXT[] (Q4 — junction normalization deferred to M7+).
+        status: { $ref: "#/components/schemas/RegulationStatus" }
+        isActive: { type: boolean }
+        supersededBy:
+          type: array
+          items: { $ref: "#/components/schemas/RegulationSupersededByItem" }
+
+    RegulationListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/RegulationListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    CreateRegulationDto:
+      type: object
+      required: [referenceCode, titleEn, issuerId, regulationType]
+      properties:
+        referenceCode: { type: string, minLength: 1, maxLength: 80 }
+        titleEn: { type: string, minLength: 1, maxLength: 500 }
+        titleAr: { type: string, nullable: true, maxLength: 500 }
+        issuerId:
+          type: integer
+          description: FK → regulator.id (Q3 = (b) shared lookup).
+        regulationType: { $ref: "#/components/schemas/RegulationType" }
+        jurisdiction: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        effectiveDate: { type: string, format: date, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        sourceUrl: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+          description: Defaults to `[]` when omitted.
+        status:
+          $ref: "#/components/schemas/RegulationStatus"
+          description: Defaults to `active` per AC-S3-06.
+
+    UpdateRegulationDto:
+      type: object
+      description: |
+        Partial patch (camelCase keys). `referenceCode` is immutable post-create
+        (fn raises 23501; AC-S4-05). Setting `supersededById` auto-flips status
+        to `superseded` (AC-S4-02). Self-supersede rejected (AC-S4-03).
+      properties:
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        sourceUrl: { type: string, nullable: true }
+        tags:
+          type: array
+          items: { type: string }
+        status: { $ref: "#/components/schemas/RegulationStatus" }
+        supersededById: { type: integer, nullable: true }
+        regulationType: { $ref: "#/components/schemas/RegulationType" }
+        jurisdiction: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        effectiveDate: { type: string, format: date, nullable: true }
+        issuerId: { type: integer }
+
+    RegulationCreateResult:
+      type: object
+      required: [id, referenceCode, createdAt]
+      properties:
+        id: { type: integer }
+        referenceCode: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    RegulationUpdateResult:
+      type: object
+      required: [id, updatedAt]
+      properties:
+        id: { type: integer }
+        updatedAt: { type: string, format: date-time }
+
+    RegulationDeleteResult:
+      type: object
+      required: [id, isActive]
+      properties:
+        id: { type: integer }
+        isActive:
+          type: boolean
+          enum: [false]
+
+    RegulatoryImpactSummary:
+      type: object
+      description: |
+        Aggregate returned by fn_regulatory_update_get_by_id impactSummary
+        subquery (AC-S7-02). RLS-aware — non-admin sees narrowed counts;
+        executive sees system-wide (AC-S7-05).
+      required: [totalImpacts, resolvedCount, pendingCount]
+      properties:
+        totalImpacts: { type: integer }
+        resolvedCount: { type: integer }
+        pendingCount: { type: integer }
+        avgImpactScore:
+          type: number
+          nullable: true
+          description: AC-S7-04 — null when totalImpacts == 0 (avoids div-by-zero).
+
+    RegulatoryUpdateListItem:
+      type: object
+      required: [id, regulator, titleEn, publishedDate, severity, affectedClauseCategories]
+      properties:
+        id: { type: integer }
+        regulator: { $ref: "#/components/schemas/RegulatorRef" }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        referenceNumber: { type: string, nullable: true }
+        publishedDate: { type: string, format: date }
+        effectiveDate: { type: string, format: date, nullable: true }
+        complianceDeadline: { type: string, format: date, nullable: true }
+        severity: { $ref: "#/components/schemas/RegulatorySeverity" }
+        sourceUrl: { type: string, nullable: true }
+        affectedClauseCategories:
+          type: array
+          items: { type: string }
+          description: TEXT[] (Q4).
+        category:
+          $ref: "#/components/schemas/ImpactCategoryRef"
+          nullable: true
+        subSource: { type: string, nullable: true }
+
+    RegulatoryUpdate:
+      allOf:
+        - $ref: "#/components/schemas/RegulatoryUpdateListItem"
+        - type: object
+          required: [impactSummary]
+          properties:
+            impactSummary: { $ref: "#/components/schemas/RegulatoryImpactSummary" }
+
+    RegulatoryUpdateListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/RegulatoryUpdateListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    CreateRegulatoryUpdateDto:
+      type: object
+      required: [regulatorId, titleEn, publishedDate]
+      properties:
+        regulatorId: { type: integer }
+        titleEn: { type: string, minLength: 1, maxLength: 500 }
+        titleAr: { type: string, nullable: true, maxLength: 500 }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        referenceNumber: { type: string, nullable: true }
+        publishedDate: { type: string, format: date }
+        effectiveDate:
+          type: string
+          format: date
+          nullable: true
+          description: AC-S8-03 — when present must be >= publishedDate.
+        complianceDeadline:
+          type: string
+          format: date
+          nullable: true
+          description: AC-S8-04 — when present must be >= publishedDate.
+        severity:
+          $ref: "#/components/schemas/RegulatorySeverity"
+          description: Defaults to `medium` per AC-S8-07.
+        sourceUrl: { type: string, nullable: true }
+        affectedClauseCategories:
+          type: array
+          items: { type: string }
+        categoryId: { type: integer, nullable: true }
+        subSource: { type: string, nullable: true }
+
+    UpdateRegulatoryUpdateDto:
+      type: object
+      description: |
+        Partial patch (camelCase keys). AC-S9-02 floor guard — `publishedDate`
+        cannot be moved below MIN(detected_at) of associated impacts.
+      properties:
+        regulatorId: { type: integer }
+        titleEn: { type: string }
+        titleAr: { type: string, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+        referenceNumber: { type: string, nullable: true }
+        publishedDate: { type: string, format: date }
+        effectiveDate: { type: string, format: date, nullable: true }
+        complianceDeadline: { type: string, format: date, nullable: true }
+        severity: { $ref: "#/components/schemas/RegulatorySeverity" }
+        sourceUrl: { type: string, nullable: true }
+        affectedClauseCategories:
+          type: array
+          items: { type: string }
+        categoryId: { type: integer, nullable: true }
+        subSource: { type: string, nullable: true }
+
+    RegulatoryUpdateCreateResult:
+      type: object
+      required: [id, createdAt]
+      properties:
+        id: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    RegulatoryUpdateUpdateResult:
+      type: object
+      required: [id, updatedAt]
+      properties:
+        id: { type: integer }
+        updatedAt: { type: string, format: date-time }
+
+    RegulatoryUpdateDeleteResult:
+      type: object
+      description: AC-S10-01 cascade-soft-delete count returned alongside id.
+      required: [id, isActive, cascadedImpacts]
+      properties:
+        id: { type: integer }
+        isActive:
+          type: boolean
+          enum: [false]
+        cascadedImpacts:
+          type: integer
+          description: AC-S10-02 — count of regulatory_impact rows soft-deleted by the cascade.
+
+    RegulatoryImpactContractRef:
+      type: object
+      required: [id, contractNumber, titleEn]
+      properties:
+        id: { type: integer }
+        contractNumber: { type: string }
+        titleEn: { type: string }
+
+    RegulatoryImpactRegulationRef:
+      type: object
+      required: [id, referenceCode, titleEn]
+      properties:
+        id: { type: integer }
+        referenceCode: { type: string }
+        titleEn: { type: string }
+
+    RegulatoryImpactRegulatoryUpdateRef:
+      type: object
+      required: [id, titleEn, severity]
+      properties:
+        id: { type: integer }
+        titleEn: { type: string }
+        severity: { $ref: "#/components/schemas/RegulatorySeverity" }
+
+    RegulatoryImpact:
+      type: object
+      description: |
+        Per-contract impact analysis row. `regulatoryUpdate` is null when this
+        is a structural impact (regulation only; FE renders as "Structural"
+        badge). UNIQUE INDEX uses
+        `COALESCE(regulatory_update_id, 0::BIGINT)` to enforce idempotency
+        across both NULL and NOT NULL paths via the BIGSERIAL=0 sentinel
+        (M4 ai_insight precedent; PG NULLS-DISTINCT default workaround).
+      required: [id, contract, regulation, detectedAt, resolved]
+      properties:
+        id: { type: integer }
+        contract: { $ref: "#/components/schemas/RegulatoryImpactContractRef" }
+        regulation: { $ref: "#/components/schemas/RegulatoryImpactRegulationRef" }
+        regulatoryUpdate:
+          $ref: "#/components/schemas/RegulatoryImpactRegulatoryUpdateRef"
+          nullable: true
+        impactScore:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        impactNoteEn:
+          type: string
+          nullable: true
+          description: Q6 — short-form tag (radar tooltip).
+        impactNoteAr: { type: string, nullable: true }
+        impactSummaryEn:
+          type: string
+          nullable: true
+          description: Q6 — long-form AI executive summary.
+        impactSummaryAr: { type: string, nullable: true }
+        detectedAt: { type: string, format: date-time }
+        resolved: { type: boolean }
+        resolutionAction:
+          $ref: "#/components/schemas/RegulatoryImpactResolutionAction"
+          nullable: true
+        resolutionNote:
+          type: string
+          nullable: true
+          description: Q8 — admin-bounded free text; stored verbatim (NOT redacted).
+
+    RegulatoryImpactListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/RegulatoryImpact" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    ImpactPayloadEntry:
+      type: object
+      description: |
+        Per-contract payload entry. Wire shape is keyed by `contractId.toString()`.
+        SENSITIVE — pino-redacted at controller (covered by `ai_prompt_payload`
+        class per M4 precedent).
+      properties:
+        impactScore:
+          type: integer
+          nullable: true
+          minimum: 0
+          maximum: 100
+        noteEn: { type: string, nullable: true }
+        noteAr: { type: string, nullable: true }
+        summaryEn: { type: string, nullable: true }
+        summaryAr: { type: string, nullable: true }
+
+    BulkDetectRegulatoryImpactDto:
+      type: object
+      required: [regulatoryUpdateId, regulationId, contractIds, impactPayload]
+      properties:
+        regulatoryUpdateId: { type: integer }
+        regulationId: { type: integer }
+        contractIds:
+          type: array
+          minItems: 1
+          items: { type: integer }
+          description: AC-S11-03 — must be non-empty.
+        impactPayload:
+          type: object
+          description: SENSITIVE — pino-redacted. Keyed by contractId stringified.
+          additionalProperties:
+            $ref: "#/components/schemas/ImpactPayloadEntry"
+
+    BulkDetectRegulatoryImpactResult:
+      type: object
+      required: [createdCount, skippedDuplicateCount, impactIds]
+      properties:
+        createdCount: { type: integer }
+        skippedDuplicateCount:
+          type: integer
+          description: AC-S11-02 — idempotent re-run skip count.
+        impactIds:
+          type: array
+          items: { type: integer }
+
+    ResolveRegulatoryImpactDto:
+      type: object
+      required: [resolutionAction]
+      properties:
+        resolutionAction: { $ref: "#/components/schemas/RegulatoryImpactResolutionAction" }
+        resolutionNote:
+          type: string
+          nullable: true
+          description: Q8 — stored verbatim (admin-bounded; not redacted).
+
+    RegulatoryImpactResolveResult:
+      type: object
+      required: [id, resolved, resolutionAction, updatedAt]
+      properties:
+        id: { type: integer }
+        resolved:
+          type: boolean
+          description: AC-S13-02 — derived as `resolution_action <> 'pending'`.
+        resolutionAction: { $ref: "#/components/schemas/RegulatoryImpactResolutionAction" }
+        updatedAt: { type: string, format: date-time }
 
   responses:
     Unauthenticated:
@@ -6919,3 +7656,720 @@ x-paths-root:
                   requestId: { type: string, format: uuid }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ----------------------------------------------------------------------
+  # M5 — Regulatory Radar
+  # ----------------------------------------------------------------------
+
+  /regulations:
+    get:
+      tags: [M5 — Regulations]
+      operationId: regulationList
+      summary: List regulations with pagination + filters (S1)
+      description: |
+        List paginated regulations. Filters compose AND. Search ILIKE on
+        titleEn / titleAr / referenceCode (FE debounces 300ms — T10). Sort:
+        effective_date DESC NULLS LAST, created_at DESC.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive]
+      x-requiredPermissions: regulations.read
+      x-authMode: jwt
+      x-storyId: S1
+      parameters:
+        - { $ref: "#/components/parameters/PageQuery" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: jurisdiction
+          in: query
+          schema: { $ref: "#/components/schemas/RegulationJurisdiction" }
+        - name: regulationType
+          in: query
+          schema: { $ref: "#/components/schemas/RegulationType" }
+        - name: issuerId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/RegulationStatus" }
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated list of regulations.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulationListResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [M5 — Regulations]
+      operationId: regulationCreate
+      summary: Create a regulation (S3)
+      description: |
+        legal_counsel + platform_admin only via `regulations.manage`.
+        `referenceCode` is UNIQUE; duplicates return 409.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S3
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRegulationDto" }
+      responses:
+        "201":
+          description: Created.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulationCreateResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — `titleEn` missing (23502 → AC-S3-03), invalid
+            regulationType/jurisdiction/status (23514 → AC-S3-04), `issuerId`
+            not found (23503).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: Duplicate `referenceCode` (23505 → AC-S3-02).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /regulations/{id}:
+    get:
+      tags: [M5 — Regulations]
+      operationId: regulationGetById
+      summary: Get a regulation with supersession chain (S2)
+      description: |
+        Returns full detail including the recursive supersession chain (max 5
+        hops; AC-S2-02). Empty array when terminal.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive]
+      x-requiredPermissions: regulations.read
+      x-authMode: jwt
+      x-storyId: S2
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Regulation detail.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/Regulation" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Regulation not found or is_active=FALSE (AC-S2-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      tags: [M5 — Regulations]
+      operationId: regulationUpdate
+      summary: Patch update on a regulation (S4)
+      description: |
+        `referenceCode` is immutable post-create — fn raises 23501 if patched
+        (AC-S4-05). Setting `supersededById` auto-flips status to `superseded`
+        (AC-S4-02). Self-supersede rejected (AC-S4-03). M5-PROD-DEFECT-1
+        (migration 053) added a structured FK pre-check on `supersededById` —
+        if the target regulation does not exist or is_active=FALSE, the API
+        returns 400 with `{ supersededById: 'Referenced regulation not found' }`
+        (instead of 422 raw FK fallthrough).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S4
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateRegulationDto" }
+      responses:
+        "200":
+          description: Updated.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulationUpdateResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — `referenceCode` patch attempt (23501 → AC-S4-05),
+            self-supersede (23514 → AC-S4-03), `supersededById` not found
+            (23503 → AC-S4-04 — structured raise post-053 patch), invalid enum.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Regulation not found (P0002 → AC-S4-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [M5 — Regulations]
+      operationId: regulationDelete
+      summary: Soft-delete a regulation (S5)
+      description: |
+        platform_admin only at the function body (AC-S5-04 — legal_counsel
+        cannot delete; route gate accepts `regulations.manage` and the fn body
+        re-gates). Active-impact guard: 409 if any regulatory_impact rows
+        reference this regulation (AC-S5-02 — cleaner UX than raw 23503 FK
+        violation). Sets is_active=FALSE and status='repealed'.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S5
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Soft-deleted.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulationDeleteResult" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not platform_admin (AC-S5-04 — legal_counsel cannot delete).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Regulation not found (AC-S5-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Active impact rows reference this regulation (AC-S5-02).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /regulatory-updates:
+    get:
+      tags: [M5 — Regulatory Updates]
+      operationId: regulatoryUpdateList
+      summary: List regulatory updates (S6)
+      description: |
+        Radar feed list. Filters compose AND. Sort: published_date DESC.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive]
+      x-requiredPermissions: regulations.read
+      x-authMode: jwt
+      x-storyId: S6
+      parameters:
+        - { $ref: "#/components/parameters/PageQuery" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: regulatorId
+          in: query
+          schema: { type: integer }
+        - name: severity
+          in: query
+          schema: { $ref: "#/components/schemas/RegulatorySeverity" }
+        - name: categoryId
+          in: query
+          schema: { type: integer }
+        - name: effectiveFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: effectiveTo
+          in: query
+          schema: { type: string, format: date }
+        - name: complianceDeadlineMax
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Paginated list of regulatory updates.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryUpdateListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: effectiveFrom > effectiveTo.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [M5 — Regulatory Updates]
+      operationId: regulatoryUpdateCreate
+      summary: Add a regulatory update to the radar feed (S8)
+      description: |
+        legal_counsel + platform_admin only. Date-ordering CHECKs at the table
+        level (effectiveDate >= publishedDate; complianceDeadline >= publishedDate)
+        — fn body raises 23514 with field-keyed messages for clean BE → 400.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S8
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRegulatoryUpdateDto" }
+      responses:
+        "201":
+          description: Created.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryUpdateCreateResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — invalid severity (AC-S8-02), effectiveDate <
+            publishedDate (AC-S8-03), complianceDeadline < publishedDate
+            (AC-S8-04), categoryId not found (AC-S8-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /regulatory-updates/{id}:
+    get:
+      tags: [M5 — Regulatory Updates]
+      operationId: regulatoryUpdateGetById
+      summary: Get a regulatory update with impact summary (S7)
+      description: |
+        Returns the regulatory update with embedded regulator + category + an
+        RLS-aware `impactSummary` aggregate (totalImpacts, resolvedCount,
+        pendingCount, avgImpactScore). Non-admin sees narrowed counts via the
+        regulatory_impact RLS policy; executive sees system-wide (AC-S7-05).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive]
+      x-requiredPermissions: regulations.read
+      x-authMode: jwt
+      x-storyId: S7
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Regulatory update detail with impactSummary aggregate.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryUpdate" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Regulatory update not found (AC-S7-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      tags: [M5 — Regulatory Updates]
+      operationId: regulatoryUpdateUpdate
+      summary: Patch update on a regulatory update (S9)
+      description: |
+        AC-S9-02 published-date floor guard — `publishedDate` cannot be moved
+        below MIN(detected_at) of associated impacts.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S9
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateRegulatoryUpdateDto" }
+      responses:
+        "200":
+          description: Updated.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryUpdateUpdateResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: publishedDate below earliest impact detection (AC-S9-02), invalid enum, or FK miss.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Regulatory update not found (AC-S9-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      tags: [M5 — Regulatory Updates]
+      operationId: regulatoryUpdateDelete
+      summary: Soft-delete a regulatory update with cascade (S10)
+      description: |
+        platform_admin only (AC-S10-04). Cascade-soft-deletes regulatory_impact
+        rows where `regulatory_update_id = :id`; structural impacts (column IS
+        NULL) are not affected (AC-S10-02). Returns `cascadedImpacts` count
+        (AC-S10-01).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S10
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Soft-deleted with cascade count.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryUpdateDeleteResult" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not platform_admin (AC-S10-04).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Regulatory update not found (AC-S10-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /regulatory-impacts:
+    get:
+      tags: [M5 — Regulatory Impacts]
+      operationId: regulatoryImpactList
+      summary: List regulatory impacts (S12)
+      description: |
+        AC-S12-02 — at least one of `contractId` / `regulationId` /
+        `regulatoryUpdateId` is required. RLS narrows for non-admin
+        (contract_drafter sees only their drafted contracts; executive sees
+        system-wide). S2-18 NULL-safe equality on regulatoryUpdateId via
+        `IS NOT DISTINCT FROM`.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive]
+      x-requiredPermissions: regulations.read
+      x-authMode: jwt
+      x-storyId: S12
+      parameters:
+        - { $ref: "#/components/parameters/PageQuery" }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: contractId
+          in: query
+          schema: { type: integer }
+        - name: regulationId
+          in: query
+          schema: { type: integer }
+        - name: regulatoryUpdateId
+          in: query
+          schema: { type: integer }
+        - name: resolved
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Paginated list of regulatory impacts.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryImpactListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: No scoping filter (23514 → AC-S12-02).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /regulatory-impacts/bulk-detect:
+    post:
+      tags: [M5 — Regulatory Impacts]
+      operationId: regulatoryImpactBulkDetect
+      summary: Bulk-create regulatory impacts across contracts (S11)
+      description: |
+        Bulk-create regulatory_impact rows across a candidate set of contracts.
+        Idempotent re-runs via ON CONFLICT DO NOTHING on the COALESCE-sentinel
+        UNIQUE partial index (AC-S11-02 — `skippedDuplicateCount` returned).
+        S2-17 atomic gate+commit: SELECT FOR UPDATE on regulatory_update row
+        before per-contract INSERT loop (Codex M1c TOCTOU lesson). DEFINER
+        carve-out — legal_counsel writes impacts on contracts they don't
+        directly own; defence-in-depth permission gate at fn body line 1.
+        `impactPayload` is SENSITIVE — pino-redacted at controller (covered
+        by `ai_prompt_payload` class per M4 precedent). Q9 EMIT — emits one
+        `regulatory_impact_detected` activity per successfully-inserted impact.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: regulations.manage
+      x-authMode: jwt
+      x-storyId: S11
+      x-securityDefiner: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDetectRegulatoryImpactDto" }
+      responses:
+        "201":
+          description: Bulk-detect result.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/BulkDetectRegulatoryImpactResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — empty contractIds (AC-S11-03), regulatoryUpdateId
+            not found (AC-S11-04), regulationId not found (AC-S11-05),
+            impactPayload missing entry for contractId.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /regulatory-impacts/{id}/resolve:
+    patch:
+      tags: [M5 — Regulatory Impacts]
+      operationId: regulatoryImpactResolve
+      summary: Resolve (or un-resolve) a regulatory impact (S13)
+      description: |
+        Polymorphic permission — `regulations.manage` OR caller is
+        `contract.drafted_by` for the underlying contract (AC-S13-05). The
+        route gate is intentionally permissive (`authoriseAnyOf(['regulations.read',
+        'regulations.manage'])`); the fn body re-gates strictly via the
+        polymorphic OR-branch (a contract_recipient — no `regulations.read`
+        in the M5 grant matrix — is correctly rejected at the route gate).
+        `resolutionAction='pending'` un-resolves (resolved=FALSE). Q9 EMIT —
+        emits a `regulatory_impact_resolved` activity only when v_resolved=TRUE.
+        `resolutionNote` is admin-bounded free text and stored verbatim
+        (Q8 — NOT redacted).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter (own contract only)]
+      x-requiredPermissions: regulations.manage OR (contract drafter for the underlying contract)
+      x-authMode: jwt
+      x-storyId: S13
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ResolveRegulatoryImpactDto" }
+      responses:
+        "200":
+          description: Resolve result.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RegulatoryImpactResolveResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: Invalid resolutionAction (23514 → AC-S13-03).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks regulations.manage AND is not contract.drafted_by (AC-S13-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Regulatory impact not found (P0002 → AC-S13-04).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /impact-categories:
+    get:
+      tags: [M5 — Impact Categories]
+      operationId: impactCategoryList
+      summary: List impact categories (S14)
+      description: |
+        Sort: `display_order ASC, id ASC`. No pagination (small reference
+        table, ~8-12 rows seeded in migration 052). Default returns only
+        `active=TRUE` rows. AC-S14-05 — accessible to ALL authenticated roles
+        including `contract_recipient` (only M5 endpoint without a permission
+        gate beyond JWT; taxonomy used by FE form pickers).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, contract_approver_2, executive, contract_recipient]
+      x-requiredPermissions: (none — JWT only)
+      x-authMode: jwt
+      x-storyId: S14
+      parameters:
+        - name: includeInactive
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: List of impact categories (no pagination metadata; AC-S14-01).
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ImpactCategoryListResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [M5 — Impact Categories]
+      operationId: impactCategoryUpsert
+      summary: Create or update an impact category (S15)
+      description: |
+        Single-call upsert keyed on `key` (ON CONFLICT (key) DO UPDATE — AC-S15-01/02).
+        platform_admin only via `config.manage` (AC-S15-05 — legal_counsel
+        cannot manage impact categories). Returns 200 for both create and
+        update with `createdOrUpdated` discriminator (idiomatic upsert; differs
+        from regulation/regulatory-update create which return 201).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: config.manage
+      x-authMode: jwt
+      x-storyId: S15
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertImpactCategoryDto" }
+      responses:
+        "200":
+          description: Upsert result.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ImpactCategoryUpsertResult" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — `nameAr` empty (AC-S15-03), `severityScale` not
+            array of strings (AC-S15-04), invalid `key` format.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Insufficient permission (`config.manage`; legal_counsel denied — AC-S15-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }

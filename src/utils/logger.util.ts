@@ -590,6 +590,59 @@ const SENSITIVE_PATHS: string[] = [
   'req.body.summaryEn',
   '*.summaryEn',
   '*.*.summaryEn',
+
+  // -- M5 — impactPayload / impact_payload (S11 fn_regulatory_impact_create_bulk
+  //    AI-generated per-contract envelope; ai_prompt_payload alias).
+  //    The whole envelope is SENSITIVE (DN-5 / project.config.json
+  //    sensitiveFields covers the class via 'ai_prompt_payload'). This
+  //    catches the wrapper key; the inner per-contract noteEn/noteAr/
+  //    summaryAr keys are also redacted below as defence-in-depth (the
+  //    M4 'summaryEn' path already covers summaryEn). resolutionNote is
+  //    NOT redacted (Q8 — admin-bounded; stored verbatim by design).
+  'impactPayload',
+  'req.body.impactPayload',
+  'req.body.*.impactPayload',
+  'req.query.impactPayload',
+  'req.params.impactPayload',
+  '*.impactPayload',
+  '*.*.impactPayload',
+  'impact_payload',
+  'req.body.impact_payload',
+  'req.body.*.impact_payload',
+  'req.query.impact_payload',
+  'req.params.impact_payload',
+  '*.impact_payload',
+  '*.*.impact_payload',
+
+  // -- M5 — summaryAr / summary_ar (per-contract bulk-detect payload AR
+  //    text; ai_prompt_payload alias — mirrors M4 summaryEn coverage).
+  'summaryAr',
+  'req.body.summaryAr',
+  '*.summaryAr',
+  '*.*.summaryAr',
+  'summary_ar',
+  'req.body.summary_ar',
+  '*.summary_ar',
+  '*.*.summary_ar',
+
+  // -- M5 — noteEn / noteAr / note_en / note_ar (per-contract impact
+  //    short-form notes inside impactPayload; ai_prompt_payload alias).
+  'noteEn',
+  'req.body.noteEn',
+  '*.noteEn',
+  '*.*.noteEn',
+  'note_en',
+  'req.body.note_en',
+  '*.note_en',
+  '*.*.note_en',
+  'noteAr',
+  'req.body.noteAr',
+  '*.noteAr',
+  '*.*.noteAr',
+  'note_ar',
+  'req.body.note_ar',
+  '*.note_ar',
+  '*.*.note_ar',
 ];
 
 const baseConfig = {
