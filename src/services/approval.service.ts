@@ -125,3 +125,50 @@ export const escalate = async (
     { actorId },
   );
 };
+
+/**
+ * R5 audit 6.2.1 — list my past decisions, filtered by kind.
+ * Backs the "Approved by me" / "Rejected by me" inbox tabs.
+ */
+export const listMyDecisions = async (
+  actorId: number,
+  q: { page?: number; limit?: number; kind?: 'approve' | 'reject' | 'request_resubmission' | 'skipped' },
+): Promise<unknown> => {
+  const page = q.page ?? 1;
+  const limit = q.limit ?? 20;
+  return db.callFunction(
+    'fn_approval_my_decisions',
+    [actorId, q.kind ?? null, page, limit],
+    { actorId },
+  );
+};
+
+/**
+ * R5 audit 6.2.1 — list pending steps on contracts I'm watching.
+ * Backs the "Watching" inbox tab.
+ */
+export const listWatching = async (
+  actorId: number,
+  q: { page?: number; limit?: number },
+): Promise<unknown> => {
+  const page = q.page ?? 1;
+  const limit = q.limit ?? 20;
+  return db.callFunction(
+    'fn_approval_watching',
+    [actorId, page, limit],
+    { actorId },
+  );
+};
+
+/** R5 audit — set/unset a contract on the user's watch list. */
+export const setContractWatch = async (
+  actorId: number,
+  contractId: number,
+  watching: boolean,
+): Promise<unknown> => {
+  return db.callFunction(
+    'fn_contract_watch_set',
+    [actorId, contractId, watching],
+    { actorId },
+  );
+};

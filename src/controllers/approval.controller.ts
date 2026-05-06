@@ -300,4 +300,56 @@ export const approvalController = {
       next(error);
     }
   },
+
+  /** GET /api/v1/approvals/my-decisions — R5 audit 6.2.1 */
+  async listMyDecisions(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const q = req.query as { kind?: string; page?: string; limit?: string };
+      const allowedKinds = ['approve', 'reject', 'request_resubmission', 'skipped'];
+      const kind = q.kind && allowedKinds.includes(q.kind)
+        ? (q.kind as 'approve' | 'reject' | 'request_resubmission' | 'skipped')
+        : undefined;
+      const page = q.page ? Number(q.page) : 1;
+      const limit = q.limit ? Number(q.limit) : 20;
+      const result = await approvalService.listMyDecisions(req.user!.id, { page, limit, kind });
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /** GET /api/v1/approvals/watching — R5 audit 6.2.1 */
+  async listWatching(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const q = req.query as { page?: string; limit?: string };
+      const page = q.page ? Number(q.page) : 1;
+      const limit = q.limit ? Number(q.limit) : 20;
+      const result = await approvalService.listWatching(req.user!.id, { page, limit });
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /** PUT /api/v1/contracts/:id/watch — R5 audit toggle watch */
+  async setWatch(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const contractId = Number(req.params.id);
+      if (!Number.isInteger(contractId) || contractId <= 0) {
+        throw new ApiError(400, 'VALIDATION_ERROR', 'Invalid contract id');
+      }
+      const body = req.body as { watching?: boolean };
+      if (typeof body.watching !== 'boolean') {
+        throw new ApiError(400, 'VALIDATION_ERROR', 'watching:boolean required');
+      }
+      const result = await approvalService.setContractWatch(
+        req.user!.id,
+        contractId,
+        body.watching,
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  },
 };

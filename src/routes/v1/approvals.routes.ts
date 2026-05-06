@@ -36,6 +36,20 @@ router.get(
   approvalController.listMyPending,
 );
 
+// R5 audit 6.2.1 — list my past decisions (Approved/Rejected/Watching tabs)
+router.get(
+  '/my-decisions',
+  authedReadRateLimiter,
+  approvalController.listMyDecisions,
+);
+
+// R5 audit 6.2.1 — pending steps on contracts I'm watching
+router.get(
+  '/watching',
+  authedReadRateLimiter,
+  approvalController.listWatching,
+);
+
 // POST /api/v1/approvals/:stepId/decide — S2
 router.post(
   '/:stepId/decide',

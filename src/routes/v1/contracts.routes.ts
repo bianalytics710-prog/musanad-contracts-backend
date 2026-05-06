@@ -421,4 +421,13 @@ router.delete(
   contractCommentController.remove,
 );
 
+// R5 audit — toggle watch on/off for a contract.
+router.put(
+  '/:id/watch',
+  authedWriteRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  approvalController.setWatch,
+);
+
 export default router;
