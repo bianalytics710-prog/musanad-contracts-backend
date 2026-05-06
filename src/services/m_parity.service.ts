@@ -64,6 +64,45 @@ export const getPartyById = (
     actorId,
   });
 
+export interface CreatePartyInput {
+  partyType: 'individual' | 'company';
+  nameEn: string;
+  nameAr?: string | null;
+  tradeLicenseNumber?: string | null;
+  tradeLicenseIssuer?: string | null;
+  emirate?: string | null;
+  freeZone?: string | null;
+  country?: string | null;
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  registeredAddress?: string | null;
+  notes?: string | null;
+}
+
+export const createParty = (
+  actorId: number,
+  input: CreatePartyInput,
+): Promise<PartyDetail> =>
+  db.callFunction<PartyDetail>(
+    'fn_party_create',
+    [
+      actorId,
+      input.partyType,
+      input.nameEn,
+      input.nameAr ?? null,
+      input.tradeLicenseNumber ?? null,
+      input.tradeLicenseIssuer ?? null,
+      input.emirate ?? null,
+      input.freeZone ?? null,
+      input.country ?? 'United Arab Emirates',
+      input.contactEmail ?? null,
+      input.contactPhone ?? null,
+      input.registeredAddress ?? null,
+      input.notes ?? null,
+    ],
+    { actorId },
+  );
+
 export interface TemplateListItem {
   id: number;
   nameEn: string;
@@ -103,6 +142,39 @@ export const getTemplateById = (
   db.callFunction<TemplateDetail>(
     'fn_template_get_by_id',
     [actorId, templateId],
+    { actorId },
+  );
+
+export interface CreateTemplateInput {
+  nameEn: string;
+  contractType: string;
+  language?: 'en' | 'ar' | 'bilingual';
+  nameAr?: string | null;
+  descriptionEn?: string | null;
+  descriptionAr?: string | null;
+  bodyEn?: string | null;
+  bodyAr?: string | null;
+  regulatoryTags?: string[];
+}
+
+export const createTemplate = (
+  actorId: number,
+  input: CreateTemplateInput,
+): Promise<TemplateDetail> =>
+  db.callFunction<TemplateDetail>(
+    'fn_template_create',
+    [
+      actorId,
+      input.nameEn,
+      input.contractType,
+      input.language ?? 'en',
+      input.nameAr ?? null,
+      input.descriptionEn ?? null,
+      input.descriptionAr ?? null,
+      input.bodyEn ?? null,
+      input.bodyAr ?? null,
+      input.regulatoryTags ?? [],
+    ],
     { actorId },
   );
 
@@ -154,6 +226,39 @@ export const getClauseById = (
     actorId,
   });
 
+export interface CreateClauseInput {
+  category: string;
+  titleEn: string;
+  bodyEn: string;
+  variant?: 'standard' | 'alternative' | 'fallback';
+  titleAr?: string | null;
+  bodyAr?: string | null;
+  legalCommentaryEn?: string | null;
+  legalCommentaryAr?: string | null;
+  regulatoryRefs?: string[];
+}
+
+export const createClause = (
+  actorId: number,
+  input: CreateClauseInput,
+): Promise<ClauseDetail> =>
+  db.callFunction<ClauseDetail>(
+    'fn_clause_create',
+    [
+      actorId,
+      input.category,
+      input.titleEn,
+      input.bodyEn,
+      input.variant ?? 'standard',
+      input.titleAr ?? null,
+      input.bodyAr ?? null,
+      input.legalCommentaryEn ?? null,
+      input.legalCommentaryAr ?? null,
+      input.regulatoryRefs ?? [],
+    ],
+    { actorId },
+  );
+
 export interface ObligationListItem {
   id: number;
   contractId: number;
@@ -186,6 +291,43 @@ export const listObligations = (
       assigneeId ?? null,
       limit ?? 100,
       offset ?? 0,
+    ],
+    { actorId },
+  );
+
+export interface CreateObligationInput {
+  contractId: number;
+  titleEn: string;
+  obligationType: 'payment' | 'delivery' | 'reporting' | 'renewal' | 'compliance' | 'notice' | 'other';
+  dueDate?: string | null;
+  recurrence?: 'once' | 'monthly' | 'quarterly' | 'annually';
+  responsibleParty?: 'our_party' | 'counterparty' | 'both';
+  titleAr?: string | null;
+  descriptionEn?: string | null;
+  descriptionAr?: string | null;
+  assigneeUserId?: number | null;
+  status?: 'open' | 'in_progress' | 'completed' | 'overdue' | 'waived';
+}
+
+export const createObligation = (
+  actorId: number,
+  input: CreateObligationInput,
+): Promise<ObligationListItem> =>
+  db.callFunction<ObligationListItem>(
+    'fn_obligation_create',
+    [
+      actorId,
+      input.contractId,
+      input.titleEn,
+      input.obligationType,
+      input.dueDate ?? null,
+      input.recurrence ?? 'once',
+      input.responsibleParty ?? 'our_party',
+      input.titleAr ?? null,
+      input.descriptionEn ?? null,
+      input.descriptionAr ?? null,
+      input.assigneeUserId ?? null,
+      input.status ?? 'open',
     ],
     { actorId },
   );

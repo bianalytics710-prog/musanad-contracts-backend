@@ -9,7 +9,7 @@
  */
 import { Router } from 'express';
 import { authenticate } from '../../middleware/auth.middleware';
-import { authedReadRateLimiter } from '../../middleware/rate-limit.middleware';
+import { authedReadRateLimiter, authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
 import {
   partiesController,
   templatesController,
@@ -20,21 +20,25 @@ import {
 const partiesRouter = Router();
 partiesRouter.use(authenticate);
 partiesRouter.get('/', authedReadRateLimiter, partiesController.list);
+partiesRouter.post('/', authedWriteRateLimiter, partiesController.create);
 partiesRouter.get('/:id', authedReadRateLimiter, partiesController.getById);
 
 const templatesRouter = Router();
 templatesRouter.use(authenticate);
 templatesRouter.get('/', authedReadRateLimiter, templatesController.list);
+templatesRouter.post('/', authedWriteRateLimiter, templatesController.create);
 templatesRouter.get('/:id', authedReadRateLimiter, templatesController.getById);
 
 const clausesRouter = Router();
 clausesRouter.use(authenticate);
 clausesRouter.get('/', authedReadRateLimiter, clausesController.list);
+clausesRouter.post('/', authedWriteRateLimiter, clausesController.create);
 clausesRouter.get('/:id', authedReadRateLimiter, clausesController.getById);
 
 const obligationsRouter = Router();
 obligationsRouter.use(authenticate);
 obligationsRouter.get('/', authedReadRateLimiter, obligationsController.list);
+obligationsRouter.post('/', authedWriteRateLimiter, obligationsController.create);
 
 export {
   partiesRouter,
