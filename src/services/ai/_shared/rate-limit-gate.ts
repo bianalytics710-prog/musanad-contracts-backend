@@ -25,16 +25,26 @@ export interface RateLimitVerdict {
  * NOTE: actorUserId is REQUIRED (the fn_ raises 23503 when prompt missing or
  * NULL). Public-endpoint paths (S5 signed-PDF-token) MUST NOT call this gate
  * — they enforce their own per-token rate-limit at the controller.
+ *
+ * The fn returns `{data: {allowed, ...}}` (M4 envelope convention) so we
+ * unwrap `.data` here. Reading the top-level keys directly silently denies
+ * every request because `result.allowed` is undefined → Boolean(undefined)
+ * is false (this exact bug bricked the AI panel during M_parity Round 2
+ * verification).
  */
 export const checkRateLimit = async (
   actorUserId: number,
   promptId: M4PromptId | string,
 ): Promise<RateLimitVerdict> => {
-  const result = await db.callFunction<AiRateLimitCheckResult>(
+  const raw = await db.callFunction<{ data?: AiRateLimitCheckResult } | AiRateLimitCheckResult | null>(
     'fn_ai_request_log_check_rate_limit',
     [actorUserId, promptId],
     { actorId: actorUserId },
   );
+  const result =
+    raw && typeof raw === 'object' && 'data' in raw && raw.data
+      ? (raw.data as AiRateLimitCheckResult)
+      : (raw as AiRateLimitCheckResult | null);
   return {
     allowed: Boolean(result?.allowed),
     remainingHour: Number(result?.remainingHour ?? 0),

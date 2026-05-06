@@ -62,6 +62,36 @@ const errorTypeOf = (e: unknown): string =>
 const sseFrame = (chunk: AiInsightsStreamChunk): string =>
   `data: ${JSON.stringify(chunk)}\n\n`;
 
+/**
+ * Tool-mode user message — pins the model to OUR camelCase response shape.
+ *
+ * The verbatim Lovable system prompt (G7) documents an older snake_case
+ * tool schema (`terms`, `clause_excerpt`, `clause_anchor`, `description`).
+ * Following it produces JSON that fails our Zod validators (which expect
+ * `keyTerms`, `clauseExcerpt`, `clauseAnchor`, `rationale`). This helper
+ * appends an explicit "respond with this exact JSON shape" contract so
+ * gpt-4o emits the keys we parse.
+ */
+function buildToolUserMessage(
+  mode: 'key_terms' | 'risks' | 'obligations' | 'regulatory' | 'summary' | 'rewrite',
+  language: AiLanguage,
+): string {
+  const langHint = `Respond in ${language === 'ar' ? 'Arabic' : language === 'bilingual' ? 'Bilingual (English + Arabic)' : 'English'}.`;
+  const base = `Mode: ${mode}. ${langHint}\n\nReturn ONLY a JSON object matching the exact shape below — no preamble, no markdown, no extra keys.`;
+  switch (mode) {
+    case 'key_terms':
+      return `${base}\n\n{\n  "keyTerms": [\n    { "label": "string", "value": "string", "clauseAnchor": "string|null", "clauseExcerpt": "string|null" }\n  ]\n}\n\nMax 20 items. label ≤200 chars, value ≤2000 chars. Each clauseExcerpt ≤80 chars verbatim from the body, or null when value is "Not specified".`;
+    case 'risks':
+      return `${base}\n\n{\n  "risks": [\n    { "title": "string", "severity": "high|medium|low", "clauseAnchor": "string", "clauseExcerpt": "string", "rationale": "string" }\n  ]\n}\n\nMax 7 items, ordered high→low. severity ∈ {high,medium,low}. title ≤10 words. rationale ≤40 words. clauseAnchor ∈ recitals|definitions|term|compensation|working-hours|confidentiality|intellectual-property|termination|governing-law|signatures|data-protection|emiratisation|non-compete|ip-assignment, or "missing" if the clause is absent.`;
+    case 'obligations':
+      return `${base}\n\n{\n  "obligations": [\n    { "party": "our_party|counterparty|both", "obligation": "string", "deadline": "YYYY-MM-DD|recurring:monthly|recurring:quarterly|recurring:annually|end_of_term|null", "clauseAnchor": "string|null" }\n  ]\n}\n\nInclude both explicit dated and implied recurring obligations.`;
+    case 'regulatory':
+      return `${base}\n\n{\n  "regulations": [\n    { "citation": "string", "relevance": "string", "clauseAnchor": "string|null" }\n  ]\n}\n\nMax 6 items. Reference real UAE regulators only (MoHRE, FTA, Central Bank, DIFC, ADGM, TDRA, MoJ, MoE, SCA, ADJD). relevance ≤30 words.`;
+    default:
+      return base;
+  }
+}
+
 export const contractInsightsController = {
   async invoke(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
@@ -274,7 +304,7 @@ export const contractInsightsController = {
       const userMessage =
         body.mode === 'rewrite' && body.selectedText
           ? `Rewrite this clause:\n\n${body.selectedText}`
-          : `Mode: ${body.mode}. Language: ${language}.`;
+          : buildToolUserMessage(body.mode, language);
 
       if (isStreaming) {
         // ---------- SSE path (summary / rewrite) ----------
