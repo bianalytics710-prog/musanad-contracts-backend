@@ -21,6 +21,12 @@ import {
   impactCategoriesRouter,
 } from './regulatory.routes';
 import dashboardsRouter from './dashboards.routes';
+import {
+  partiesRouter,
+  templatesRouter,
+  clausesRouter,
+  obligationsRouter,
+} from './m_parity.routes';
 
 const v1Router = Router();
 
@@ -62,5 +68,13 @@ v1Router.use('/impact-categories', impactCategoriesRouter);
 // src/routes/v1/dashboards.routes.ts header for the per-endpoint
 // permission / role-gate strategy.
 v1Router.use('/dashboards', dashboardsRouter);
+
+// M_parity — Lovable feature-depth parity (read-only entities).
+// migration 058 + 059. All JWT-authenticated; zero new PUBLIC fn_'s;
+// permission gating in fn_ body (contract.read.department OR contract.edit).
+v1Router.use('/parties', partiesRouter);
+v1Router.use('/templates', templatesRouter);
+v1Router.use('/clauses', clausesRouter);
+v1Router.use('/obligations', obligationsRouter);
 
 export default v1Router;
