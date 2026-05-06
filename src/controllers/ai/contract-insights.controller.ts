@@ -77,18 +77,23 @@ function buildToolUserMessage(
   language: AiLanguage,
 ): string {
   const langHint = `Respond in ${language === 'ar' ? 'Arabic' : language === 'bilingual' ? 'Bilingual (English + Arabic)' : 'English'}.`;
-  const base = `Mode: ${mode}. ${langHint}\n\nReturn ONLY a JSON object matching the exact shape below — no preamble, no markdown, no extra keys.`;
+  // Summary streams plain text — no JSON contract, otherwise the model
+  // refuses with "I can't provide JSON in summary mode".
+  if (mode === 'summary') {
+    return `Mode: summary. ${langHint}\n\nWrite a concise plain-language summary of this contract for a non-lawyer. 2-3 short paragraphs. No bullets, no headings, no markdown, no JSON.`;
+  }
+  const jsonBase = `Mode: ${mode}. ${langHint}\n\nReturn ONLY a JSON object matching the exact shape below — no preamble, no markdown, no extra keys.`;
   switch (mode) {
     case 'key_terms':
-      return `${base}\n\n{\n  "keyTerms": [\n    { "label": "string", "value": "string", "clauseAnchor": "string|null", "clauseExcerpt": "string|null" }\n  ]\n}\n\nMax 20 items. label ≤200 chars, value ≤2000 chars. Each clauseExcerpt ≤80 chars verbatim from the body, or null when value is "Not specified".`;
+      return `${jsonBase}\n\n{\n  "keyTerms": [\n    { "label": "string", "value": "string", "clauseAnchor": "string|null", "clauseExcerpt": "string|null" }\n  ]\n}\n\nMax 20 items. label ≤200 chars, value ≤2000 chars. Each clauseExcerpt ≤80 chars verbatim from the body, or null when value is "Not specified".`;
     case 'risks':
-      return `${base}\n\n{\n  "risks": [\n    { "title": "string", "severity": "high|medium|low", "clauseAnchor": "string", "clauseExcerpt": "string", "rationale": "string" }\n  ]\n}\n\nMax 7 items, ordered high→low. severity ∈ {high,medium,low}. title ≤10 words. rationale ≤40 words. clauseAnchor ∈ recitals|definitions|term|compensation|working-hours|confidentiality|intellectual-property|termination|governing-law|signatures|data-protection|emiratisation|non-compete|ip-assignment, or "missing" if the clause is absent.`;
+      return `${jsonBase}\n\n{\n  "risks": [\n    { "title": "string", "severity": "high|medium|low", "clauseAnchor": "string", "clauseExcerpt": "string", "rationale": "string" }\n  ]\n}\n\nMax 7 items, ordered high→low. severity ∈ {high,medium,low}. title ≤10 words. rationale ≤40 words. clauseAnchor ∈ recitals|definitions|term|compensation|working-hours|confidentiality|intellectual-property|termination|governing-law|signatures|data-protection|emiratisation|non-compete|ip-assignment, or "missing" if the clause is absent.`;
     case 'obligations':
-      return `${base}\n\n{\n  "obligations": [\n    { "party": "our_party|counterparty|both", "obligation": "string", "deadline": "YYYY-MM-DD|recurring:monthly|recurring:quarterly|recurring:annually|end_of_term|null", "clauseAnchor": "string|null" }\n  ]\n}\n\nInclude both explicit dated and implied recurring obligations.`;
+      return `${jsonBase}\n\n{\n  "obligations": [\n    { "party": "our_party|counterparty|both", "obligation": "string", "deadline": "YYYY-MM-DD|recurring:monthly|recurring:quarterly|recurring:annually|end_of_term|null", "clauseAnchor": "string|null" }\n  ]\n}\n\nInclude both explicit dated and implied recurring obligations.`;
     case 'regulatory':
-      return `${base}\n\n{\n  "regulations": [\n    { "citation": "string", "relevance": "string", "clauseAnchor": "string|null" }\n  ]\n}\n\nMax 6 items. Reference real UAE regulators only (MoHRE, FTA, Central Bank, DIFC, ADGM, TDRA, MoJ, MoE, SCA, ADJD). relevance ≤30 words.`;
+      return `${jsonBase}\n\n{\n  "regulations": [\n    { "citation": "string", "relevance": "string", "clauseAnchor": "string|null" }\n  ]\n}\n\nMax 6 items. Reference real UAE regulators only (MoHRE, FTA, Central Bank, DIFC, ADGM, TDRA, MoJ, MoE, SCA, ADJD). relevance ≤30 words.`;
     default:
-      return base;
+      return jsonBase;
   }
 }
 
