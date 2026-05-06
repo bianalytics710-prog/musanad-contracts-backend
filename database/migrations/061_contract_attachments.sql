@@ -152,12 +152,8 @@ BEGIN
   )
   RETURNING id INTO v_id;
 
-  -- Bump contract.attachment_count
-  UPDATE contract
-     SET attachment_count = attachment_count + 1,
-         updated_at       = NOW(),
-         updated_by       = p_actor_user_id
-   WHERE id = p_contract_id;
+  -- attachmentCount on contract is computed dynamically inside
+  -- fn_contract_get_by_id (M1a) — no denormalised counter to bump.
 
   RETURN jsonb_build_object(
     'data', jsonb_build_object(
@@ -324,11 +320,7 @@ BEGIN
       USING ERRCODE = '02000';
   END IF;
 
-  UPDATE contract
-     SET attachment_count = GREATEST(0, attachment_count - 1),
-         updated_at       = NOW(),
-         updated_by       = p_actor_user_id
-   WHERE id = v_contract_id;
+  -- attachmentCount on contract is computed dynamically — no decrement needed.
 
   RETURN jsonb_build_object(
     'data', jsonb_build_object(

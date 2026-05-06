@@ -29,9 +29,11 @@
  *   - PDF/XLSX exports: exportRateLimiter (30/min/user) — Puppeteer/exceljs are heavy
  */
 import { Router } from 'express';
+import multer from 'multer';
 import { contractsController } from '../../controllers/contracts.controller';
 import { approvalController } from '../../controllers/approval.controller';
 import { signatureController } from '../../controllers/signature.controller';
+import { contractAttachmentController } from '../../controllers/contract-attachment.controller';
 import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import {
@@ -331,6 +333,55 @@ router.get(
   validate(ContractIdParamSchema, 'params'),
   validate(ContractActivityListQuerySchema, 'query'),
   contractsController.listActivity,
+);
+
+// ============================================================
+// Contract attachments — Supabase-backed file storage
+// ============================================================
+//
+// Bytes flow through the BE → Supabase Storage using the service-role key
+// (BE-mediated upload). The FE never sees Supabase credentials. Permission
+// codes:
+//   contract.attachment.read   — list + download URL
+//   contract.attachment.write  — upload
+//   contract.attachment.delete — soft delete + storage cleanup
+
+const uploadMulter = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB hard cap; matches CHECK on contract_attachment.size_bytes
+});
+
+router.get(
+  '/:id/attachments',
+  authedReadRateLimiter,
+  authoriseAnyOf(['contract.attachment.read', ...READ_ANY]),
+  validate(ContractIdParamSchema, 'params'),
+  contractAttachmentController.list,
+);
+
+router.post(
+  '/:id/attachments',
+  authedWriteRateLimiter,
+  authorise(['contract.attachment.write']),
+  validate(ContractIdParamSchema, 'params'),
+  uploadMulter.single('file'),
+  contractAttachmentController.upload,
+);
+
+router.get(
+  '/:id/attachments/:fileId/url',
+  authedReadRateLimiter,
+  authoriseAnyOf(['contract.attachment.read', ...READ_ANY]),
+  // Validation done inline in the controller (validate() strips unknown
+  // params per the Zod schema, which would drop :fileId).
+  contractAttachmentController.getDownloadUrl,
+);
+
+router.delete(
+  '/:id/attachments/:fileId',
+  authedWriteRateLimiter,
+  authorise(['contract.attachment.delete']),
+  contractAttachmentController.remove,
 );
 
 export default router;
