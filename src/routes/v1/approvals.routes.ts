@@ -73,4 +73,15 @@ router.post(
   approvalController.delegate,
 );
 
+// POST /api/v1/approvals/:stepId/request-info — R-LC4 LC-F7
+//   Posts a message to the contract comments thread and logs the action,
+//   without changing the step status (soft action — drafter replies).
+router.post(
+  '/:stepId/request-info',
+  authedWriteRateLimiter,
+  authorise(['approval.act']),
+  validate(ApprovalStepIdParamSchema, 'params'),
+  approvalController.requestInfo,
+);
+
 export default router;

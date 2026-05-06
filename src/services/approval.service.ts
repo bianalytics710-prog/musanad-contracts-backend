@@ -59,6 +59,31 @@ export const decide = async (
   );
 };
 
+/**
+ * POST /api/v1/approvals/:stepId/request-info → fn_approval_request_info
+ * (R-LC4 LC-F7). Soft-action — posts a comment, keeps step pending.
+ */
+export interface RequestInfoDto {
+  message: string;
+}
+export interface RequestInfoResponse {
+  decisionId: number;
+  commentId: number | null;
+  stepId: number;
+  contractId: number;
+}
+export const requestInfo = async (
+  actorId: number,
+  stepId: number,
+  body: RequestInfoDto,
+): Promise<RequestInfoResponse> => {
+  return db.callFunction<RequestInfoResponse>(
+    'fn_approval_request_info',
+    [actorId, stepId, body.message],
+    { actorId },
+  );
+};
+
 /** POST /api/v1/approvals/:stepId/delegate → fn_approval_delegate (S3) */
 export const delegate = async (
   actorId: number,

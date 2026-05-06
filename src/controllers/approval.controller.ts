@@ -116,6 +116,41 @@ export const approvalController = {
     }
   },
 
+  /**
+   * POST /api/v1/approvals/:stepId/request-info → fn_approval_request_info
+   * (R-LC4 LC-F7). Body: { message: string (>= 1 char) }.
+   */
+  async requestInfo(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'approval.requestInfo', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const stepId = Number((req.params as { stepId: string }).stepId);
+      if (!Number.isInteger(stepId) || stepId <= 0) {
+        throw new ApiError(400, 'BAD_REQUEST', 'Invalid stepId');
+      }
+      const body = req.body as { message?: unknown };
+      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      if (message.length === 0) {
+        throw new ApiError(400, 'BAD_REQUEST', 'message is required');
+      }
+      const result = await approvalService.requestInfo(req.user!.id, stepId, { message });
+      req.logger.info(
+        { action: 'approval.requestInfo', userId: req.user?.id, targetStepId: stepId, duration: Date.now() - startTime, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'approval.requestInfo', userId: req.user?.id, duration: Date.now() - startTime, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
   /** POST /api/v1/approvals/:stepId/delegate → fn_approval_delegate (S3) */
   async delegate(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
