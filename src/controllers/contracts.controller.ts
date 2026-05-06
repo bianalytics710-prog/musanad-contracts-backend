@@ -125,6 +125,10 @@ export const contractsController = {
           q.importBatchId ?? null,
           q.importConfidenceMin ?? null,
           q.importConfidenceMax ?? null,
+          // ---- R5+ Lovable parity filters ----
+          q.language ?? null,
+          q.governingLaw ?? null,
+          q.sort ?? null,
         ],
         { actorId: req.user!.id },
       );

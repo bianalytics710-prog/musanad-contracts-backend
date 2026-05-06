@@ -469,6 +469,10 @@ export const ContractListQuerySchema = z.object({
     .min(0, 'importConfidenceMax must be in range 0..100')
     .max(100, 'importConfidenceMax must be in range 0..100')
     .optional(),
+  // ---- R5+ Lovable parity filters ----
+  language: z.enum(['en', 'ar', 'bilingual']).optional(),
+  governingLaw: z.string().trim().max(40).optional(),
+  sort: z.enum(['updated_at', 'created_at', 'end_date', 'value', 'alpha']).optional(),
 });
 export type ContractListQueryInferred = z.infer<typeof ContractListQuerySchema>;
 
