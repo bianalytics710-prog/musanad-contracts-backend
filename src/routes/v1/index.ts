@@ -27,6 +27,7 @@ import {
   clausesRouter,
   obligationsRouter,
 } from './m_parity.routes';
+import impactSignalsRouter from './impact-signals.routes';
 
 const v1Router = Router();
 
@@ -76,5 +77,8 @@ v1Router.use('/parties', partiesRouter);
 v1Router.use('/templates', templatesRouter);
 v1Router.use('/clauses', clausesRouter);
 v1Router.use('/obligations', obligationsRouter);
+
+// R-LC7 — Impact Watch (multi-source intelligence).
+v1Router.use('/impact-signals', impactSignalsRouter);
 
 export default v1Router;
