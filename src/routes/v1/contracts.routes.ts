@@ -34,6 +34,7 @@ import { contractsController } from '../../controllers/contracts.controller';
 import { approvalController } from '../../controllers/approval.controller';
 import { signatureController } from '../../controllers/signature.controller';
 import { contractAttachmentController } from '../../controllers/contract-attachment.controller';
+import { contractCommentController } from '../../controllers/contract-comment.controller';
 import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import {
@@ -382,6 +383,42 @@ router.delete(
   authedWriteRateLimiter,
   authorise(['contract.attachment.delete']),
   contractAttachmentController.remove,
+);
+
+// ============================================================================
+// R4 audit gap 8.2.1 — Contract comments tab.
+// Anyone who can read the contract can read + write comments. Resolve and
+// delete are also broadly available (the fn_'s gate creator-only on delete).
+// ============================================================================
+router.get(
+  '/:id/comments',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  contractCommentController.list,
+);
+
+router.post(
+  '/:id/comments',
+  authedWriteRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  contractCommentController.create,
+);
+
+router.post(
+  '/:id/comments/:commentId/resolve',
+  authedWriteRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  // Inline-validate :commentId in the controller; validate() would strip it.
+  contractCommentController.resolve,
+);
+
+router.delete(
+  '/:id/comments/:commentId',
+  authedWriteRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  contractCommentController.remove,
 );
 
 export default router;
