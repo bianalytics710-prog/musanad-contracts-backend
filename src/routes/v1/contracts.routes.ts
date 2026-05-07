@@ -224,6 +224,19 @@ router.post(
   signatureController.sendForSignature,
 );
 
+// R-RC2 — POST /api/v1/contracts/:id/signing-link/self
+//   In-app self-service signing for an authenticated signer. The
+//   underlying fn is caller-bound (signer_user_id OR signer_email
+//   match); no specific permission is required since the fn validates
+//   the actor IS the signer party. authedWriteRateLimiter still
+//   throttles abuse.
+router.post(
+  '/:id/signing-link/self',
+  authedWriteRateLimiter,
+  validate(ContractIdParamSchema, 'params'),
+  signatureController.resolveSigningLinkForSelf,
+);
+
 // GET /api/v1/contracts/:id/signatures — S6
 //   Permission: contract.read.* (any) — caller is a contract participant or
 //   privileged role. Email masking is role-aware inside the fn_.

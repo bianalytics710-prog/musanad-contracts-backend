@@ -83,6 +83,35 @@ export const resendInvitation = async (
   return unwrap(env);
 };
 
+/**
+ * R-RC2 — POST /api/v1/contracts/:id/signing-link/self
+ * → fn_signature_invitation_resolve_for_self.
+ * In-app self-service entry for an authenticated signer (typically a
+ * recipient). Rolls the existing pending|viewed|expired invitation to
+ * a fresh token so the FE can navigate to /sign/{token} without going
+ * through email. Caller-bound inside the fn (signer_user_id OR
+ * signer_email match); audit trail emitted as signature_event 'resent'
+ * with metadata.source='in_app_self_resolve'.
+ */
+export interface SignatureInvitationResolveForSelfData {
+  newInvitationId: number;
+  invitationTokenPlaintext: string;
+  expiresAt: string;
+  contractId: number;
+  signaturePartyId: number;
+}
+export const resolveSigningLinkForSelf = async (
+  actorId: number,
+  contractId: number,
+): Promise<SignatureInvitationResolveForSelfData | null> => {
+  const env = await db.callFunction<FnEnvelope<SignatureInvitationResolveForSelfData> | null>(
+    'fn_signature_invitation_resolve_for_self',
+    [actorId, contractId],
+    { actorId },
+  );
+  return unwrap(env);
+};
+
 /** S8 — POST /api/v1/signature-invitations/:id/cancel → fn_signature_invitation_cancel */
 export const cancelInvitation = async (
   actorId: number,

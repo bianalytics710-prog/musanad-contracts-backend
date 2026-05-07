@@ -283,4 +283,65 @@ export const signatureController = {
       next(error);
     }
   },
+
+  /**
+   * R-RC2 — POST /api/v1/contracts/:id/signing-link/self
+   * In-app self-service signing entry. Authenticated signer (typically a
+   * recipient role) gets a fresh /sign/{token} URL by rolling their
+   * existing pending|viewed|expired invitation. Caller-bound inside the
+   * fn (signer_user_id OR signer_email match); 42501 if the actor is
+   * not a signer on the contract; P0002 if no active invitation exists;
+   * P0001 if the existing invitation is in a terminal state
+   * (signed / declined / cancelled).
+   */
+  async resolveSigningLinkForSelf(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'signature.resolveSigningLinkForSelf',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const result = await signatureService.resolveSigningLinkForSelf(
+        req.user!.id,
+        Number(id),
+      );
+      if (!result) {
+        throw new NotFoundError('No active signing invitation for this contract');
+      }
+      req.logger.info(
+        {
+          action: 'signature.resolveSigningLinkForSelf',
+          userId: req.user?.id,
+          contractId: Number(id),
+          newInvitationId: result.newInvitationId,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+        },
+        'Controller exit',
+      );
+      // Token plaintext is in result; pino redact masks it from request logs.
+      res.status(200).json({ success: true, data: result, requestId: req.requestId });
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'signature.resolveSigningLinkForSelf',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
 };
