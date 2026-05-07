@@ -123,6 +123,15 @@ export const FIXTURE_USERS: ReadonlyArray<FixtureUserSpec> = [
     // legal_counsel already has import.review (018). No extras needed.
     extraPermissions: [],
   },
+  {
+    handle: 'platform_admin1',
+    email: 'fixture-platformadmin1@m1c.test',
+    firstName: 'Fixture',
+    lastName: 'PlatformAdmin1',
+    roleName: 'platform_admin',
+    // platform_admin gains user.read.all + user.manage + audit.read via 094.
+    extraPermissions: [],
+  },
 ];
 
 export interface SeededFixtureUser {
