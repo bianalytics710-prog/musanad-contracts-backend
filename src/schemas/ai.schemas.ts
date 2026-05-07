@@ -425,6 +425,63 @@ export const aiDraftingAssistantSuggestToolSchema = z.object({
 });
 
 // ============================================================
+// 7b. R-LC7-D1 — Impact Watch AI request + tool schemas
+// ============================================================
+
+export const aiImpactSignalIdParamSchema = z.object({
+  id: z.coerce.number().int().positive('Must be a positive integer'),
+});
+export type AiImpactSignalIdParamInferred = z.infer<typeof aiImpactSignalIdParamSchema>;
+
+export const aiImpactSignalExplainRequestSchema = z.object({
+  language: aiLanguageSchema.optional().default('en'),
+});
+export type AiImpactSignalExplainRequestInput = z.infer<
+  typeof aiImpactSignalExplainRequestSchema
+>;
+
+export const aiImpactSignalSuggestAmendmentRequestSchema = z.object({
+  language: aiLanguageSchema.optional().default('en'),
+  contractId: z.coerce.number().int().positive().optional(),
+});
+export type AiImpactSignalSuggestAmendmentRequestInput = z.infer<
+  typeof aiImpactSignalSuggestAmendmentRequestSchema
+>;
+
+/** Output shape for fn_impact_signal explain endpoint. */
+export const aiImpactSignalExplainToolSchema = z.object({
+  summary: z.string().min(1).max(2000),
+  whyItMatters: z.string().min(1).max(2000),
+  perContractImpacts: z
+    .array(
+      z.object({
+        contractId: z.number().int().positive(),
+        contractNumber: z.string().min(1).max(100),
+        explanation: z.string().min(1).max(1000),
+      }),
+    )
+    .max(20),
+});
+export type AiImpactSignalExplainPayload = z.infer<typeof aiImpactSignalExplainToolSchema>;
+
+/** Output shape for fn_impact_signal suggest-amendment endpoint. */
+export const aiImpactSignalSuggestAmendmentToolSchema = z.object({
+  amendmentSnippets: z
+    .array(
+      z.object({
+        clauseAnchor: z.string().min(1).max(80),
+        rationale: z.string().min(1).max(1000),
+        suggestedText: z.string().min(1).max(4000),
+      }),
+    )
+    .min(1)
+    .max(6),
+});
+export type AiImpactSignalSuggestAmendmentPayload = z.infer<
+  typeof aiImpactSignalSuggestAmendmentToolSchema
+>;
+
+// ============================================================
 // 8. Inferred types (re-exports for convenience)
 // ============================================================
 

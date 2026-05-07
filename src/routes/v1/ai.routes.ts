@@ -33,6 +33,7 @@ import { executiveAnomaliesController } from '../../controllers/ai/executive-ano
 import { regulatoryImpactController } from '../../controllers/ai/regulatory-impact.controller';
 import { regulatoryImpactSummaryController } from '../../controllers/ai/regulatory-impact-summary.controller';
 import { versionDiffSummaryController } from '../../controllers/ai/version-diff-summary.controller';
+import { impactSignalAiController } from '../../controllers/ai/impact-signal-ai.controller';
 import {
   aiContractInsightsRequestSchema,
   aiDraftingAssistantRequestSchema,
@@ -40,6 +41,9 @@ import {
   aiRegulatoryImpactRequestSchema,
   aiRegulatoryImpactSummaryRequestSchema,
   aiVersionDiffSummaryRequestSchema,
+  aiImpactSignalIdParamSchema,
+  aiImpactSignalExplainRequestSchema,
+  aiImpactSignalSuggestAmendmentRequestSchema,
 } from '../../schemas/ai.schemas';
 import { verifySignedPdfTokenMiddleware } from '../../middleware/signed-pdf-token.middleware';
 
@@ -132,6 +136,30 @@ router.post(
   authorise(['ai.invoke.contract']),
   validate(aiVersionDiffSummaryRequestSchema, 'body'),
   versionDiffSummaryController.invoke,
+);
+
+// ---------------------------------------------------------------
+// R-LC7-D1 — Impact Watch AI endpoints
+//   POST /api/v1/ai/impact-signals/:id/explain
+//   POST /api/v1/ai/impact-signals/:id/suggest-amendment
+// Permission: ai.invoke.regulatory (Impact Watch is regulatory-adjacent).
+// ---------------------------------------------------------------
+router.post(
+  '/impact-signals/:id/explain',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.regulatory']),
+  validate(aiImpactSignalIdParamSchema, 'params'),
+  validate(aiImpactSignalExplainRequestSchema, 'body'),
+  impactSignalAiController.explain,
+);
+
+router.post(
+  '/impact-signals/:id/suggest-amendment',
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.regulatory']),
+  validate(aiImpactSignalIdParamSchema, 'params'),
+  validate(aiImpactSignalSuggestAmendmentRequestSchema, 'body'),
+  impactSignalAiController.suggestAmendment,
 );
 
 export default router;
