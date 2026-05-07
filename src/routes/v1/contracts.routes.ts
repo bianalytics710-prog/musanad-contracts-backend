@@ -67,6 +67,12 @@ import {
   SendForSignatureDtoSchema,
   SignaturePartyCreateBulkDtoSchema,
 } from '../../schemas/signature.schemas';
+import {
+  ContractCommentIdParamsSchema,
+  CommentListQuerySchema,
+  CreateCommentSchema,
+  SetContractWatchSchema,
+} from '../../schemas/contract-comment.schemas';
 
 const router = Router();
 
@@ -395,6 +401,7 @@ router.get(
   authedReadRateLimiter,
   authoriseAnyOf(READ_ANY),
   validate(ContractIdParamSchema, 'params'),
+  validate(CommentListQuerySchema, 'query'),
   contractCommentController.list,
 );
 
@@ -403,14 +410,18 @@ router.post(
   authedWriteRateLimiter,
   authoriseAnyOf(READ_ANY),
   validate(ContractIdParamSchema, 'params'),
+  validate(CreateCommentSchema, 'body'),
   contractCommentController.create,
 );
 
+// R-DA9-2 — :commentId now validated via the 2-param ContractCommentIdParamsSchema.
+// Earlier comment said validate() would strip the second param; that's only
+// true for one-key schemas. Two-key Zod schemas preserve both.
 router.post(
   '/:id/comments/:commentId/resolve',
   authedWriteRateLimiter,
   authoriseAnyOf(READ_ANY),
-  // Inline-validate :commentId in the controller; validate() would strip it.
+  validate(ContractCommentIdParamsSchema, 'params'),
   contractCommentController.resolve,
 );
 
@@ -418,15 +429,17 @@ router.delete(
   '/:id/comments/:commentId',
   authedWriteRateLimiter,
   authoriseAnyOf(READ_ANY),
+  validate(ContractCommentIdParamsSchema, 'params'),
   contractCommentController.remove,
 );
 
-// R5 audit — toggle watch on/off for a contract.
+// R5 audit — toggle watch on/off for a contract. R-DA9-2 added body schema.
 router.put(
   '/:id/watch',
   authedWriteRateLimiter,
   authoriseAnyOf(READ_ANY),
   validate(ContractIdParamSchema, 'params'),
+  validate(SetContractWatchSchema, 'body'),
   approvalController.setWatch,
 );
 

@@ -20,6 +20,7 @@ import type {
   RequestInfoInferred,
 } from '../schemas/approval.schemas';
 import type { ContractIdParamInferred } from '../schemas/contracts.schemas';
+import type { SetContractWatchInferred } from '../schemas/contract-comment.schemas';
 
 const errorType = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
@@ -364,18 +365,13 @@ export const approvalController = {
   /** PUT /api/v1/contracts/:id/watch — R5 audit toggle watch */
   async setWatch(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const contractId = Number(req.params.id);
-      if (!Number.isInteger(contractId) || contractId <= 0) {
-        throw new ApiError(400, 'VALIDATION_ERROR', 'Invalid contract id');
-      }
-      const body = req.body as { watching?: boolean };
-      if (typeof body.watching !== 'boolean') {
-        throw new ApiError(400, 'VALIDATION_ERROR', 'watching:boolean required');
-      }
+      // R-DA9-2 — params + body shape guaranteed by validate() middleware.
+      const { id: contractId } = req.params as unknown as ContractIdParamInferred;
+      const { watching } = req.body as SetContractWatchInferred;
       const result = await approvalService.setContractWatch(
         req.user!.id,
         contractId,
-        body.watching,
+        watching,
       );
       res.status(200).json(result);
     } catch (error) {
