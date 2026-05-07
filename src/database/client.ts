@@ -205,10 +205,54 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
         //   - 'already_signed' / 'already_decided' → 409 CONFLICT (default)
         {
           const firstLine = message.split('\n')[0]?.trim() ?? message;
+
+          // M1c fn_import_batch_update raises '404:Import batch not found' as
+          // P0001 (no USING ERRCODE). The field token '404' has a leading
+          // digit so STRUCTURED_RAISE_RE doesn't match. Run the literal-404
+          // check inside P0001 so it doesn't fall through to ConflictError.
+          const literal404Inner = HTTP_404_LITERAL_PREFIX_RE.exec(firstLine);
+          if (literal404Inner) {
+            const msg = literal404Inner[1]?.trim() ?? 'Not found';
+            return new NotFoundError(msg);
+          }
+
           const structured = STRUCTURED_RAISE_RE.exec(firstLine);
           if (structured) {
             const field = structured[2] ?? '_root';
             const msg = structured[3]?.trim() ?? 'Conflict';
+            // M1a / M1b fn_contract_delete / fn_contract_update / etc. raise
+            // plain RAISE EXCEPTION (P0001 default) with 'id:Contract not
+            // found' / 'id:Step not found' style messages instead of using
+            // USING ERRCODE = 'P0002'. Route message-content "not found" on
+            // a known NOT_FOUND field prefix to 404. M2 raises with the same
+            // prefix but messages like 'id:Contract already has an in-progress
+            // approval chain' (line 685, USING ERRCODE = 'P0001') stay 409
+            // because the message does not contain "not found".
+            if (NOT_FOUND_FIELD_PREFIXES.has(field) && /not found/i.test(msg)) {
+              return new NotFoundError(msg, { [field]: msg });
+            }
+            // M1c fn_import_batch_update raises 'autoSaved:Counter underflow'
+            // / 'counters:Counter overflow vs totalFiles' as P0001 (no USING
+            // ERRCODE). These are user-input validation failures disguised
+            // as state checks — surface as 400 with the field intact. Match
+            // strictly on the validation-message family to keep M2 P0001
+            // raises with non-state-conflict fields (e.g.
+            // 'newStatus:Invalid transition from X to Y' line 672) routed
+            // to 409 ConflictError.
+            if (/counter\s+(?:under|over)flow|overflow vs/i.test(msg)) {
+              return new ValidationError(msg, { [field]: msg });
+            }
+            // M1a fn_contract_create / fn_contract_update raise
+            // 'parentContractId:Parent contract not found',
+            // 'parentContractId:Contract cannot be its own parent',
+            // 'parentContractId:Cycle detected in contract tree' as
+            // P0001 (no USING ERRCODE). These are user-input validation
+            // failures on the parentContractId field — surface as 400.
+            // Route any 'parentContractId:' P0001 raise to ValidationError
+            // since this field has no state-conflict semantics.
+            if (field === 'parentContractId') {
+              return new ValidationError(msg, { [field]: msg });
+            }
             return new ConflictError(msg, { [field]: msg });
           }
           // M3 unstructured raises: extract message after `fn_X: `

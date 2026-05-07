@@ -430,10 +430,12 @@ describe('S4 — fn_dashboard_legal_counsel / GET /api/v1/dashboards/legal-couns
     expect(typeof res.body.kpis.openRegulatoryImpacts).toBe('number');
     expect(typeof res.body.kpis.criticalSeverityCount).toBe('number');
     expect(typeof res.body.kpis.regulationCatalogSize).toBe('number');
-    expect(res.body.kpis.templateUsageThisWindow).toEqual({
-      value: 0,
-      placeholder: true,
-    });
+    // R-LC1 (migrations 071/072) extended fn_dashboard_legal_counsel beyond
+    // the M6 placeholder shape — added activeContracts / expiringIn30d /
+    // pendingReview KPIs and dropped the templateUsageThisWindow stub.
+    expect(typeof res.body.kpis.activeContracts).toBe('number');
+    expect(typeof res.body.kpis.expiringIn30d).toBe('number');
+    expect(typeof res.body.kpis.pendingReview).toBe('number');
     expect(Array.isArray(res.body.lists.recentRegulatoryUpdates5)).toBe(true);
     expect(Array.isArray(res.body.lists.openImpacts5)).toBe(true);
   });
@@ -478,13 +480,11 @@ describe('S4 — fn_dashboard_legal_counsel / GET /api/v1/dashboards/legal-couns
     }
   });
 
-  it('AC-S4-05: templateUsageThisWindow is { value: 0, placeholder: true }', async () => {
-    const res = await request(app)
-      .get('/api/v1/dashboards/legal-counsel')
-      .set('Authorization', `Bearer ${legalToken}`);
-    expect(res.status).toBe(200);
-    expect(res.body.kpis.templateUsageThisWindow.value).toBe(0);
-    expect(res.body.kpis.templateUsageThisWindow.placeholder).toBe(true);
+  it.skip('AC-S4-05: templateUsageThisWindow is { value: 0, placeholder: true } — superseded by R-LC1', async () => {
+    // R-LC1 (migrations 071/072) replaced the templateUsageThisWindow
+    // placeholder with real contracts-led KPIs (activeContracts /
+    // expiringIn30d / pendingReview). The placeholder stub was removed
+    // entirely. AC-S4-01 above now asserts the new KPI shape.
   });
 
   it('AC-S4-07: contract_drafter receives 403', async () => {

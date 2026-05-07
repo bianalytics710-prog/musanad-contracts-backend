@@ -125,13 +125,21 @@ const claimStepForApprover = async (
   try {
     await client.query('BEGIN');
     await client.query('SET LOCAL row_security = off');
+    // AC-S2-07 has two parallel steps sharing step_order=1; without LIMIT 1
+    // an unscoped UPDATE matches both, leaving the second peer assigned to
+    // the wrong approver. Use a subquery to scope to exactly one row.
     const r = await client.query<{ id: number | string }>(
       `UPDATE approval_step
          SET approver_user_id = $1
-       WHERE approval_chain_id = $2
-         AND step_order = $3
-         AND approver_user_id IS NULL
-         AND is_active = TRUE
+       WHERE id = (
+         SELECT id FROM approval_step
+          WHERE approval_chain_id = $2
+            AND step_order = $3
+            AND approver_user_id IS NULL
+            AND is_active = TRUE
+          ORDER BY id ASC
+          LIMIT 1
+         )
        RETURNING id`,
       [approverUserId, chainId, stepOrder],
     );

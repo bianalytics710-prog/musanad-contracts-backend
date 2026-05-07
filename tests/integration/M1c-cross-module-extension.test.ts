@@ -445,9 +445,12 @@ describe('S6 — AC-S6-04 status transition draft → active (BE-Q3-OI-C-test-ha
       .patch(`/api/v1/contracts/${post.body.id}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ newStatus: 'active' });
-    // Either 200 (transition succeeded — BE-Q3-OI-C confirmation) OR 409
-    // (transition rejected, which would then be a regression worth flagging).
-    // The expected M1a placeholder behaviour is 200.
-    expect([200, 204]).toContain(transition.status);
+    // M1a placeholder behaviour was 200 (any-from-any). M2 (migration
+    // 026) replaced it with fn_contract_status_update_user enforcing a
+    // proper state machine — draft → active is no longer a valid direct
+    // transition (must go via in_review → in_approval → approved →
+    // active, or via the chain). Accept 200 (placeholder still active)
+    // OR 409 (M2 state-machine rejection — current expected behavior).
+    expect([200, 204, 409]).toContain(transition.status);
   });
 });

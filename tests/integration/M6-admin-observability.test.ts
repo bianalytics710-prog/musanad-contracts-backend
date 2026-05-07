@@ -286,14 +286,17 @@ describe('S12 — fn_health_check / GET /api/v1/admin/health', () => {
     expect(['ok', 'degraded']).toContain(res.body.db.status);
   });
 
-  it('AC-S12-03 / ARCH-NEW-3 (c): db.latestMigration is exactly 57 for admin', async () => {
+  it('AC-S12-03 / ARCH-NEW-3 (c): db.latestMigration is visible to admin and >= 57', async () => {
     const res = await request(app)
       .get('/api/v1/admin/health')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     // The schema_migrations_select_admin RLS policy in 054 enables admin SELECT
-    // of MAX(version). DB live is at version 57 (Orchestrator brief).
-    expect(res.body.db.latestMigration).toBe(57);
+    // of MAX(version). At M6 ship-time DB was at 57; the migration count
+    // grows monotonically as later modules ship — assert the floor instead
+    // of a frozen value, otherwise this test breaks every migration.
+    expect(typeof res.body.db.latestMigration).toBe('number');
+    expect(res.body.db.latestMigration).toBeGreaterThanOrEqual(57);
   });
 
   it('AC-S12-05: ai.estimatedHealthy is a boolean', async () => {

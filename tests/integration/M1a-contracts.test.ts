@@ -588,21 +588,32 @@ describe('S6 — PATCH /api/v1/contracts/:id/status (fn_contract_status_update)'
     const res = await request(app)
       .patch('/api/v1/contracts/9999999999/status')
       .set('Authorization', `Bearer ${token}`)
-      .send({ newStatus: 'approved' });
+      // M2 (migration 026) replaced the M1a placeholder DTO. The drafter
+      // PATCH endpoint only accepts targets it owns: draft / in_review /
+      // in_approval / active / cancelled. 'approved' is now blocked at
+      // Zod with 400 (use fn_approval_decide). Use a valid drafter target
+      // so the request reaches fn_contract_status_update_user where the
+      // not-found check raises P0002 → 404.
+      .send({ newStatus: 'in_review' });
     expect(res.status).toBe(404);
   });
 
-  it('AC-S6-07: M1a placeholder accepts any-from-any transition (no state-machine enforcement)', async () => {
-    // Create → directly jump from draft to expired — M2 will block this; M1a accepts.
+  it('AC-S6-07: M2 state machine accepts the draft → in_review transition', async () => {
+    // Originally tested the M1a placeholder's any-from-any behavior with
+    // draft → expired. M2 (migration 026) replaced the placeholder with
+    // fn_contract_status_update_user enforcing a real state machine —
+    // 'expired' is no longer a valid drafter target (signature lifecycle
+    // owns it). Test the M2-era valid path so the AC keeps watching the
+    // happy-path emit.
     const created = trackId(
-      await createContract(app, token, { titleEn: 'S6-07-AnyFromAny' }),
+      await createContract(app, token, { titleEn: 'S6-07-DraftToInReview' }),
     );
     const res = await request(app)
       .patch(`/api/v1/contracts/${created.id}/status`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ newStatus: 'expired' });
+      .send({ newStatus: 'in_review' });
     expect(res.status).toBe(200);
-    expect(res.body.toStatus).toBe('expired');
+    expect(res.body.toStatus).toBe('in_review');
   });
 });
 
@@ -919,10 +930,12 @@ describe('S12 — Triggers + RLS deny direct INSERT', () => {
     const created = trackId(
       await createContract(app, token, { titleEn: 'S12-02-StatusTrigger' }),
     );
+    // M2 narrows drafter targets — 'approved' is approval-engine-only.
+    // Test the trigger emit on the M2-era valid draft → in_review hop.
     await request(app)
       .patch(`/api/v1/contracts/${created.id}/status`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ newStatus: 'approved' });
+      .send({ newStatus: 'in_review' });
 
     const res = await request(app)
       .get(`/api/v1/contracts/${created.id}/activity`)
@@ -937,7 +950,7 @@ describe('S12 — Triggers + RLS deny direct INSERT', () => {
     const row = rows[0];
     expect(row?.metadata).toBeTruthy();
     expect(row?.metadata?.fromStatus).toBe('draft');
-    expect(row?.metadata?.toStatus).toBe('approved');
+    expect(row?.metadata?.toStatus).toBe('in_review');
   });
 
   it('AC-S12-04: AFTER INSERT on contract_version emits "version_created" with metadata.versionNumber', async () => {
