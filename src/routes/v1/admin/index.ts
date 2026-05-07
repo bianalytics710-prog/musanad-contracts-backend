@@ -10,6 +10,7 @@ import approvalStepsRouter from './approval-steps.routes';
 import aiAdminRouter from './ai.routes';
 import healthRouter from './health.routes';
 import settingsRouter from './settings.routes';
+import auditRouter from './audit.routes';
 
 const router = Router();
 
@@ -28,5 +29,8 @@ router.use('/health', healthRouter);
 
 // R-PA4 — workspace system settings (General / UAE Pass / Branding tabs).
 router.use('/settings', settingsRouter);
+
+// R-PA5 — paginated audit_log viewer + CSV export.
+router.use('/audit', auditRouter);
 
 export default router;
