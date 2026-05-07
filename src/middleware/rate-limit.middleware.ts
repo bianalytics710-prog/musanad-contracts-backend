@@ -43,6 +43,10 @@ const authedWriteLimiter = buildLimiter({ points: 60, durationSeconds: 60 });
 // because callers are unauthenticated. The fn-level rate limits (per-session
 // 20/h, per-invitation 50/h on signer Q&A) are enforced by the DB.
 const publicSignerLimiter = buildLimiter({ points: 60, durationSeconds: 60 });
+// R-PA7 — heavy export endpoints (e.g. /admin/audit/export streaming up to
+// 50k rows). 5 exports per minute per user is generous enough for power
+// users yet prevents accidental DoS via a hot-reload loop or scripted abuse.
+const heavyExportLimiter = buildLimiter({ points: 5, durationSeconds: 60 });
 
 // req.ip honours `app.set('trust proxy', 1)`. We MUST NOT read X-Forwarded-For
 // directly: that bypasses the trust-proxy hop count and lets attackers spoof
@@ -92,3 +96,12 @@ export const authedWriteRateLimiter = consume(authedWriteLimiter, userKey);
  * per-invitation 50/h aggregate) inside the DB.
  */
 export const publicSignerRateLimiter = consume(publicSignerLimiter, ipKey);
+
+/**
+ * R-PA7 — heavy export endpoints (CSV streaming etc.).
+ *
+ * Stricter than authedReadRateLimiter (120/min) because each request streams
+ * up to 50k rows and pages through the DB ~250 times. 5/min/user is enough
+ * for legitimate admin workflows but blocks accidental DoS.
+ */
+export const heavyExportRateLimiter = consume(heavyExportLimiter, userKey);

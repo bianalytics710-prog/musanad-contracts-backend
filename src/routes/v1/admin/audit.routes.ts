@@ -9,7 +9,10 @@ import { z } from 'zod';
 import { adminAuditController } from '../../../controllers/admin-audit.controller';
 import { authenticate, authorise } from '../../../middleware/auth.middleware';
 import { validate } from '../../../middleware/validation.middleware';
-import { authedReadRateLimiter } from '../../../middleware/rate-limit.middleware';
+import {
+  authedReadRateLimiter,
+  heavyExportRateLimiter,
+} from '../../../middleware/rate-limit.middleware';
 
 const router = Router();
 
@@ -35,7 +38,7 @@ router.get(
 
 router.get(
   '/export',
-  authedReadRateLimiter,
+  heavyExportRateLimiter,
   authorise(['audit.read']),
   validate(listQuerySchema, 'query'),
   adminAuditController.exportCsv,

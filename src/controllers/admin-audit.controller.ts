@@ -118,6 +118,16 @@ export const adminAuditController = {
     }
   },
 
+  // R-PA7: BE-02 documented waiver — this method calls db.callFunction() in a
+  // loop (up to ~250 calls per export, paged at 200 rows/call). Streaming
+  // a single fn_audit_log_export wrapping a cursor would be the canonical
+  // single-call shape but PG cursors don't compose cleanly with our
+  // db.callFunction adapter. Acceptable here because:
+  //   * /admin/audit/export is gated by audit.read (admin-only).
+  //   * heavyExportRateLimiter caps to 5 exports/min/user.
+  //   * 50k row hard cap bounds total work.
+  //   * Errors after headers flushed are caught locally (no next(err) bubble
+  //     into the global handler with res.headersSent === true).
   async exportCsv(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
     req.logger.info(
@@ -195,9 +205,23 @@ export const adminAuditController = {
           duration: Date.now() - startTime,
           errorType:
             error instanceof ApiError ? error.code : error instanceof Error ? error.name : 'UNKNOWN',
+          headersSent: res.headersSent,
         },
         'Controller error',
       );
+      // R-PA7: once we've started flushing CSV bytes the global error
+      // handler can't emit a JSON envelope on top of a partial stream.
+      // Append a sentinel row and close cleanly instead of bubbling to
+      // next(error) — the FE download will end visibly truncated.
+      if (res.headersSent) {
+        try {
+          res.write('# ERROR: export truncated due to server error\n');
+        } catch {
+          /* ignore — connection may already be torn down */
+        }
+        res.end();
+        return;
+      }
       next(error);
     }
   },
