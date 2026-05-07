@@ -25,6 +25,7 @@ import {
 import {
   createUserSchema,
   listUsersQuerySchema,
+  resetPasswordSchema,
   updateUserSchema,
   userIdParamSchema,
 } from '../../schemas/user.schemas';
@@ -65,6 +66,15 @@ router.put(
   // Self vs user.manage refinement is in the controller (depends on body shape)
   validate(updateUserSchema, 'body'),
   userController.update,
+);
+
+router.post(
+  '/:id/reset-password',
+  authedWriteRateLimiter,
+  authorise(['user.manage']),
+  validate(userIdParamSchema, 'params'),
+  validate(resetPasswordSchema, 'body'),
+  userController.resetPassword,
 );
 
 router.delete(

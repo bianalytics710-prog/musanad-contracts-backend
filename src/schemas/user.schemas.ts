@@ -49,12 +49,25 @@ export const updateUserSchema = z
     firstName: z.string().trim().min(1).max(100).optional(),
     lastName: z.string().trim().min(1).max(100).optional(),
     roleId: z.number().int().positive().optional(),
+    /** R-PA2: admin suspend/reactivate via PUT /api/v1/users/:id { isActive }. */
+    isActive: z.boolean().optional(),
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, {
     message: 'At least one field must be provided',
   });
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
+
+/**
+ * R-PA2: admin password reset payload. Plaintext is hashed in the
+ * controller with bcrypt(12) before invoking fn_user_password_reset.
+ */
+export const resetPasswordSchema = z
+  .object({
+    password: passwordSchema,
+  })
+  .strict();
+export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 
 export const userIdParamSchema = z.object({ id: idSchema });
 export type UserIdParam = z.infer<typeof userIdParamSchema>;
@@ -91,4 +104,5 @@ export const userSchemas = {
   listUsersQuerySchema,
   listRolesQuerySchema,
   listPermissionsQuerySchema,
+  resetPasswordSchema,
 } as const;

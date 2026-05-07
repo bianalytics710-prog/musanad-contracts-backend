@@ -20,6 +20,7 @@ import {
 import type {
   CreateUserInput,
   ListUsersQueryInput,
+  ResetPasswordInput,
   UpdateUserInput,
   UserIdParam,
 } from '../schemas/user.schemas';
@@ -216,6 +217,68 @@ export const userController = {
       req.logger.error(
         {
           action: 'user.update',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType:
+            error instanceof ApiError ? error.code : error instanceof Error ? error.name : 'UNKNOWN',
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /**
+   * POST /api/v1/users/:id/reset-password (R-PA2 admin row action).
+   * Plaintext is hashed with bcrypt(12) here so the DB never sees it.
+   */
+  async resetPassword(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'user.resetPassword', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+
+    try {
+      const { id } = req.params as unknown as UserIdParam;
+      const { password } = req.body as ResetPasswordInput;
+
+      // Self-protection (mirrors fn_user_password_reset; surfaced earlier
+      // here so the bcrypt hash never gets generated for a self-reset).
+      if (id === req.user!.id) {
+        throw new ValidationError(
+          'Cannot reset your own password — use /auth/change-password',
+        );
+      }
+
+      const passwordHash = await hashPassword(password);
+      const result = await db.callFunction<{
+        success: boolean;
+        message: string;
+        userId: number;
+      }>('fn_user_password_reset', [id, passwordHash, req.user!.id], {
+        actorId: req.user!.id,
+      });
+
+      req.logger.info(
+        {
+          action: 'user.resetPassword',
+          userId: req.user?.id,
+          targetId: id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'user.resetPassword',
           userId: req.user?.id,
           duration: Date.now() - startTime,
           errorType:
