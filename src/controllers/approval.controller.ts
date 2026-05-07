@@ -17,6 +17,7 @@ import type {
   DelegateApprovalInferred,
   MyPendingApprovalListQueryInferred,
   RouteInitPreviewInferred,
+  RequestInfoInferred,
 } from '../schemas/approval.schemas';
 import type { ContractIdParamInferred } from '../schemas/contracts.schemas';
 
@@ -127,15 +128,9 @@ export const approvalController = {
       'Controller entry',
     );
     try {
-      const stepId = Number((req.params as { stepId: string }).stepId);
-      if (!Number.isInteger(stepId) || stepId <= 0) {
-        throw new ApiError(400, 'BAD_REQUEST', 'Invalid stepId');
-      }
-      const body = req.body as { message?: unknown };
-      const message = typeof body?.message === 'string' ? body.message.trim() : '';
-      if (message.length === 0) {
-        throw new ApiError(400, 'BAD_REQUEST', 'message is required');
-      }
+      // R-LC9-2 — params + body shape guaranteed by validate(...).
+      const { stepId } = req.params as unknown as ApprovalStepIdParamInferred;
+      const { message } = req.body as RequestInfoInferred;
       const result = await approvalService.requestInfo(req.user!.id, stepId, { message });
       req.logger.info(
         { action: 'approval.requestInfo', userId: req.user?.id, targetStepId: stepId, duration: Date.now() - startTime, statusCode: 200 },

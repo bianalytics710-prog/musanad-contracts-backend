@@ -10,15 +10,36 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/auth.middleware';
 import { authedReadRateLimiter, authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
+import { validate } from '../../middleware/validation.middleware';
 import { impactSignalController } from '../../controllers/impact-signal.controller';
+import {
+  ImpactSignalListQuerySchema,
+  ImpactSignalIdParamSchema,
+  ImpactSignalLinkIdParamSchema,
+} from '../../schemas/impact-signal.schemas';
 
 const router = Router();
 router.use(authenticate);
 
-router.get('/', authedReadRateLimiter, impactSignalController.list);
-router.get('/:id', authedReadRateLimiter, impactSignalController.getById);
-router.post('/links/:linkId/review', authedWriteRateLimiter, impactSignalController.markReviewed);
-router.post('/:id/notify-drafters', authedWriteRateLimiter, impactSignalController.notifyDrafters);
-router.post('/:id/bulk-amend', authedWriteRateLimiter, impactSignalController.bulkAmend);
+router.get('/', authedReadRateLimiter, validate(ImpactSignalListQuerySchema, 'query'), impactSignalController.list);
+router.get('/:id', authedReadRateLimiter, validate(ImpactSignalIdParamSchema, 'params'), impactSignalController.getById);
+router.post(
+  '/links/:linkId/review',
+  authedWriteRateLimiter,
+  validate(ImpactSignalLinkIdParamSchema, 'params'),
+  impactSignalController.markReviewed,
+);
+router.post(
+  '/:id/notify-drafters',
+  authedWriteRateLimiter,
+  validate(ImpactSignalIdParamSchema, 'params'),
+  impactSignalController.notifyDrafters,
+);
+router.post(
+  '/:id/bulk-amend',
+  authedWriteRateLimiter,
+  validate(ImpactSignalIdParamSchema, 'params'),
+  impactSignalController.bulkAmend,
+);
 
 export default router;

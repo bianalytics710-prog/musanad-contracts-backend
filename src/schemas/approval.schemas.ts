@@ -129,6 +129,19 @@ export const DelegateApprovalSchema = z.object({
 export type DelegateApprovalInferred = z.infer<typeof DelegateApprovalSchema>;
 
 // ------------------------------------------------------------
+// 6. R-LC4 LC-F7 — fn_approval_request_info DTO
+// ------------------------------------------------------------
+
+export const RequestInfoSchema = z.object({
+  message: z
+    .string({ required_error: 'message is required' })
+    .trim()
+    .min(1, 'message must be at least 1 character')
+    .max(4000, 'message must be at most 4000 characters'),
+});
+export type RequestInfoInferred = z.infer<typeof RequestInfoSchema>;
+
+// ------------------------------------------------------------
 // 6. fn_approval_reassign DTO (S8)
 // ------------------------------------------------------------
 

@@ -10,35 +10,43 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/auth.middleware';
 import { authedReadRateLimiter, authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
+import { validate } from '../../middleware/validation.middleware';
 import {
   partiesController,
   templatesController,
   clausesController,
   obligationsController,
 } from '../../controllers/m_parity.controller';
+import {
+  CreatePartySchema,
+  CreateTemplateSchema,
+  CreateClauseSchema,
+  CreateObligationSchema,
+  IdParamSchema,
+} from '../../schemas/m_parity.schemas';
 
 const partiesRouter = Router();
 partiesRouter.use(authenticate);
 partiesRouter.get('/', authedReadRateLimiter, partiesController.list);
-partiesRouter.post('/', authedWriteRateLimiter, partiesController.create);
-partiesRouter.get('/:id', authedReadRateLimiter, partiesController.getById);
+partiesRouter.post('/', authedWriteRateLimiter, validate(CreatePartySchema, 'body'), partiesController.create);
+partiesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), partiesController.getById);
 
 const templatesRouter = Router();
 templatesRouter.use(authenticate);
 templatesRouter.get('/', authedReadRateLimiter, templatesController.list);
-templatesRouter.post('/', authedWriteRateLimiter, templatesController.create);
-templatesRouter.get('/:id', authedReadRateLimiter, templatesController.getById);
+templatesRouter.post('/', authedWriteRateLimiter, validate(CreateTemplateSchema, 'body'), templatesController.create);
+templatesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), templatesController.getById);
 
 const clausesRouter = Router();
 clausesRouter.use(authenticate);
 clausesRouter.get('/', authedReadRateLimiter, clausesController.list);
-clausesRouter.post('/', authedWriteRateLimiter, clausesController.create);
-clausesRouter.get('/:id', authedReadRateLimiter, clausesController.getById);
+clausesRouter.post('/', authedWriteRateLimiter, validate(CreateClauseSchema, 'body'), clausesController.create);
+clausesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), clausesController.getById);
 
 const obligationsRouter = Router();
 obligationsRouter.use(authenticate);
 obligationsRouter.get('/', authedReadRateLimiter, obligationsController.list);
-obligationsRouter.post('/', authedWriteRateLimiter, obligationsController.create);
+obligationsRouter.post('/', authedWriteRateLimiter, validate(CreateObligationSchema, 'body'), obligationsController.create);
 
 export {
   partiesRouter,

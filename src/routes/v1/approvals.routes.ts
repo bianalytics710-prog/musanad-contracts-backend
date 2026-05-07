@@ -19,6 +19,7 @@ import {
   DecideApprovalSchema,
   DelegateApprovalSchema,
   MyPendingApprovalListQuerySchema,
+  RequestInfoSchema,
 } from '../../schemas/approval.schemas';
 
 const router = Router();
@@ -81,6 +82,7 @@ router.post(
   authedWriteRateLimiter,
   authorise(['approval.act']),
   validate(ApprovalStepIdParamSchema, 'params'),
+  validate(RequestInfoSchema, 'body'),
   approvalController.requestInfo,
 );
 

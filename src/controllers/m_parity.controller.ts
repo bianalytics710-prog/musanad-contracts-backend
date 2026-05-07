@@ -6,6 +6,12 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ApiError } from '../utils/errors.util';
 import * as svc from '../services/m_parity.service';
+import type {
+  CreatePartyInferred,
+  CreateTemplateInferred,
+  CreateClauseInferred,
+  CreateObligationInferred,
+} from '../schemas/m_parity.schemas';
 
 const errorType = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
@@ -90,20 +96,21 @@ export const partiesController = {
       'Controller entry',
     );
     try {
-      const b = req.body ?? {};
+      // R-LC9-2 — body shape guaranteed by validate(CreatePartySchema, 'body').
+      const body = req.body as CreatePartyInferred;
       const result = await svc.createParty(req.user!.id, {
-        partyType: String(b.partyType ?? 'company') as 'individual' | 'company',
-        nameEn: String(b.nameEn ?? ''),
-        nameAr: optStr(b.nameAr) ?? null,
-        tradeLicenseNumber: optStr(b.tradeLicenseNumber) ?? null,
-        tradeLicenseIssuer: optStr(b.tradeLicenseIssuer) ?? null,
-        emirate: optStr(b.emirate) ?? null,
-        freeZone: optStr(b.freeZone) ?? null,
-        country: optStr(b.country) ?? null,
-        contactEmail: optStr(b.contactEmail) ?? null,
-        contactPhone: optStr(b.contactPhone) ?? null,
-        registeredAddress: optStr(b.registeredAddress) ?? null,
-        notes: optStr(b.notes) ?? null,
+        partyType: body.partyType,
+        nameEn: body.nameEn,
+        nameAr: body.nameAr ?? null,
+        tradeLicenseNumber: body.tradeLicenseNumber ?? null,
+        tradeLicenseIssuer: body.tradeLicenseIssuer ?? null,
+        emirate: body.emirate ?? null,
+        freeZone: body.freeZone ?? null,
+        country: body.country ?? null,
+        contactEmail: body.contactEmail ?? null,
+        contactPhone: body.contactPhone ?? null,
+        registeredAddress: body.registeredAddress ?? null,
+        notes: body.notes ?? null,
       });
       req.logger.info(
         { action: 'parties.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
@@ -179,20 +186,17 @@ export const templatesController = {
       'Controller entry',
     );
     try {
-      const b = req.body ?? {};
-      const tags: string[] = Array.isArray(b.regulatoryTags)
-        ? b.regulatoryTags.filter((t: unknown): t is string => typeof t === 'string')
-        : [];
+      const body = req.body as CreateTemplateInferred;
       const result = await svc.createTemplate(req.user!.id, {
-        nameEn: String(b.nameEn ?? ''),
-        contractType: String(b.contractType ?? ''),
-        language: (b.language as 'en' | 'ar' | 'bilingual') ?? 'en',
-        nameAr: optStr(b.nameAr) ?? null,
-        descriptionEn: optStr(b.descriptionEn) ?? null,
-        descriptionAr: optStr(b.descriptionAr) ?? null,
-        bodyEn: optStr(b.bodyEn) ?? null,
-        bodyAr: optStr(b.bodyAr) ?? null,
-        regulatoryTags: tags,
+        nameEn: body.nameEn,
+        contractType: body.contractType,
+        language: body.language ?? 'en',
+        nameAr: body.nameAr ?? null,
+        descriptionEn: body.descriptionEn ?? null,
+        descriptionAr: body.descriptionAr ?? null,
+        bodyEn: body.bodyEn ?? null,
+        bodyAr: body.bodyAr ?? null,
+        regulatoryTags: body.regulatoryTags ?? [],
       });
       req.logger.info(
         { action: 'templates.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
@@ -269,20 +273,17 @@ export const clausesController = {
       'Controller entry',
     );
     try {
-      const b = req.body ?? {};
-      const refs: string[] = Array.isArray(b.regulatoryRefs)
-        ? b.regulatoryRefs.filter((t: unknown): t is string => typeof t === 'string')
-        : [];
+      const body = req.body as CreateClauseInferred;
       const result = await svc.createClause(req.user!.id, {
-        category: String(b.category ?? ''),
-        titleEn: String(b.titleEn ?? ''),
-        bodyEn: String(b.bodyEn ?? ''),
-        variant: (b.variant as 'standard' | 'alternative' | 'fallback') ?? 'standard',
-        titleAr: optStr(b.titleAr) ?? null,
-        bodyAr: optStr(b.bodyAr) ?? null,
-        legalCommentaryEn: optStr(b.legalCommentaryEn) ?? null,
-        legalCommentaryAr: optStr(b.legalCommentaryAr) ?? null,
-        regulatoryRefs: refs,
+        category: body.category,
+        titleEn: body.titleEn,
+        bodyEn: body.bodyEn,
+        variant: body.variant ?? 'standard',
+        titleAr: body.titleAr ?? null,
+        bodyAr: body.bodyAr ?? null,
+        legalCommentaryEn: body.legalCommentaryEn ?? null,
+        legalCommentaryAr: body.legalCommentaryAr ?? null,
+        regulatoryRefs: body.regulatoryRefs ?? [],
       });
       req.logger.info(
         { action: 'clauses.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
@@ -339,23 +340,19 @@ export const obligationsController = {
       'Controller entry',
     );
     try {
-      const b = req.body ?? {};
-      const contractId = Number(b.contractId);
-      if (!Number.isInteger(contractId) || contractId <= 0) {
-        throw new ApiError(400, 'BAD_REQUEST', 'Invalid contractId');
-      }
+      const body = req.body as CreateObligationInferred;
       const result = await svc.createObligation(req.user!.id, {
-        contractId,
-        titleEn: String(b.titleEn ?? ''),
-        obligationType: (b.obligationType as 'payment' | 'delivery' | 'reporting' | 'renewal' | 'compliance' | 'notice' | 'other') ?? 'other',
-        dueDate: optStr(b.dueDate) ?? null,
-        recurrence: (b.recurrence as 'once' | 'monthly' | 'quarterly' | 'annually') ?? 'once',
-        responsibleParty: (b.responsibleParty as 'our_party' | 'counterparty' | 'both') ?? 'our_party',
-        titleAr: optStr(b.titleAr) ?? null,
-        descriptionEn: optStr(b.descriptionEn) ?? null,
-        descriptionAr: optStr(b.descriptionAr) ?? null,
-        assigneeUserId: optInt(b.assigneeUserId) ?? null,
-        status: (b.status as 'open' | 'in_progress' | 'completed' | 'overdue' | 'waived') ?? 'open',
+        contractId: body.contractId,
+        titleEn: body.titleEn,
+        obligationType: body.obligationType,
+        dueDate: body.dueDate ?? null,
+        recurrence: body.recurrence ?? 'once',
+        responsibleParty: body.responsibleParty ?? 'our_party',
+        titleAr: body.titleAr ?? null,
+        descriptionEn: body.descriptionEn ?? null,
+        descriptionAr: body.descriptionAr ?? null,
+        assigneeUserId: body.assigneeUserId ?? null,
+        status: body.status ?? 'open',
       });
       req.logger.info(
         { action: 'obligations.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
