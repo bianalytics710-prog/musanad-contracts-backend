@@ -9,6 +9,7 @@ import approvalChainsRouter from './approval-chains.routes';
 import approvalStepsRouter from './approval-steps.routes';
 import aiAdminRouter from './ai.routes';
 import healthRouter from './health.routes';
+import settingsRouter from './settings.routes';
 
 const router = Router();
 
@@ -24,5 +25,8 @@ router.use('/ai', aiAdminRouter);
 // probe requires JWT + platform_admin / Super Admin role and surfaces
 // db.latestMigration + ai.estimatedHealthy + composite overall status.
 router.use('/health', healthRouter);
+
+// R-PA4 — workspace system settings (General / UAE Pass / Branding tabs).
+router.use('/settings', settingsRouter);
 
 export default router;
