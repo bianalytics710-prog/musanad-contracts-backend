@@ -27,6 +27,7 @@ import {
   type SeverityMappingRule,
   type SourceAdapter,
 } from './source-adapter';
+import { probeReachable } from './fetch-helpers';
 
 interface RssAdapterOptions {
   source_id: string;
@@ -48,7 +49,13 @@ export class RssAdapter implements SourceAdapter {
   };
   private readonly url: string;
   private readonly severity_rules: SeverityMappingRule[];
-  private readonly parser = new RssParser();
+  private readonly parser = new RssParser({
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (compatible; Musanad-OSINT/1.0; +https://musanad.app)',
+      Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
+    },
+  });
 
   constructor(opts: RssAdapterOptions) {
     this.source_id = opts.source_id;
@@ -104,14 +111,10 @@ export class RssAdapter implements SourceAdapter {
   }
 
   async health_check(): Promise<AdapterHealthCheckResult> {
-    try {
-      const res = await fetch(this.url, { method: 'HEAD' });
-      if (res.ok) return { state: 'healthy' };
-      if (res.status === 401 || res.status === 403) return { state: 'unauthorised' };
-      return { state: 'failing', error: `HTTP ${res.status}` };
-    } catch (err) {
-      return { state: 'failing', error: err instanceof Error ? err.message : String(err) };
-    }
+    const probe = await probeReachable(this.url);
+    if (probe.state === 'healthy') return { state: 'healthy' };
+    if (probe.state === 'unauthorised') return { state: 'unauthorised' };
+    return { state: 'failing', error: probe.error };
   }
 }
 

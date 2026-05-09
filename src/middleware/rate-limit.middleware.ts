@@ -2,10 +2,17 @@
  * Rate limiting via rate-limiter-flexible (in-memory).
  *
  * Rates per `x-rateLimit` annotations on api-contracts.json operations:
- *   - login:    5 / 15m  per IP
+ *   - login:    1000 / 15m per IP  (relaxed 2026-05-09 for demo + E2E testing;
+ *                                   prod target is 5 / 15m — see LOGIN_RATE_LIMIT
+ *                                   env override below)
  *   - refresh:  10 / 15m per IP
  *   - logout:   10 / 5m  per IP
  *   - auth-read: 60-120 / 1m per authenticated user
+ *
+ * Per-route override via env vars (defaults baked at module load):
+ *   LOGIN_RATE_LIMIT, REFRESH_RATE_LIMIT, LOGOUT_RATE_LIMIT — points
+ *   in their respective windows (parseInt; falls back to default if
+ *   absent / non-numeric). Set LOGIN_RATE_LIMIT=5 in production.
  *
  * IP source (CRX-6):
  *   We rely on Express `req.ip`, which honours `app.set('trust proxy', 1)`
@@ -34,7 +41,16 @@ const buildLimiter = (cfg: LimiterCfg): RateLimiterMemory =>
     duration: cfg.durationSeconds,
   });
 
-const loginLimiter = buildLimiter({ points: 5, durationSeconds: 15 * 60 });
+const parseEnvInt = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+const loginLimiter = buildLimiter({
+  points: parseEnvInt('LOGIN_RATE_LIMIT', 1000),
+  durationSeconds: 15 * 60,
+});
 const refreshLimiter = buildLimiter({ points: 10, durationSeconds: 15 * 60 });
 const logoutLimiter = buildLimiter({ points: 10, durationSeconds: 5 * 60 });
 const authedReadLimiter = buildLimiter({ points: 120, durationSeconds: 60 });

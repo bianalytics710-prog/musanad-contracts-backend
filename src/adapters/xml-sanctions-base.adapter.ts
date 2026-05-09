@@ -18,6 +18,7 @@ import {
   type Severity,
   type SourceAdapter,
 } from './source-adapter';
+import { fetchWithUa, probeReachable } from './fetch-helpers';
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -67,7 +68,7 @@ export class XmlSanctionsBaseAdapter implements SourceAdapter {
 
   async *fetch(_since: Date): AsyncIterator<RawSignal> {
     const fetchedAt = new Date();
-    const res = await fetch(this.url);
+    const res = await fetchWithUa(this.url);
     if (!res.ok) {
       throw new Error(`${this.source_id} fetch failed: HTTP ${res.status}`);
     }
@@ -106,14 +107,10 @@ export class XmlSanctionsBaseAdapter implements SourceAdapter {
   }
 
   async health_check(): Promise<AdapterHealthCheckResult> {
-    try {
-      const res = await fetch(this.url, { method: 'HEAD' });
-      if (res.ok) return { state: 'healthy' };
-      if (res.status === 401 || res.status === 403) return { state: 'unauthorised' };
-      return { state: 'failing', error: `HTTP ${res.status}` };
-    } catch (err) {
-      return { state: 'failing', error: err instanceof Error ? err.message : String(err) };
-    }
+    const probe = await probeReachable(this.url);
+    if (probe.state === 'healthy') return { state: 'healthy' };
+    if (probe.state === 'unauthorised') return { state: 'unauthorised' };
+    return { state: 'failing', error: probe.error };
   }
 
   /** Subclass-overridable; default uses source_id capitalised. */

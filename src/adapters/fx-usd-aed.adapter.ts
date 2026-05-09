@@ -1,8 +1,12 @@
 /**
  * M7 — USD/AED FX adapter (CR-A).
  *
- * Primary: https://api.exchangerate.host/latest (Q-NEW2 lock).
- * Fallback: https://open.er-api.com/v6/latest/USD.
+ * Primary: https://open.er-api.com/v6/latest/USD (no key, free tier).
+ * Fallback: https://api.exchangerate.host/latest (now requires API key as
+ *   of 2026; left as fallback in case caller has EXCHANGERATE_API_KEY).
+ * Original Q-NEW2 lock recommended exchangerate.host primary; reordered
+ * 2026-05-09 after exchangerate.host migrated to a paid model and started
+ * returning {success:false, error: missing_access_key} for unauth GETs.
  * Refresh: 300 s. Reliability: 0.85.
  * Pairs: USD/AED, USD/EUR, USD/GBP, USD/INR.
  *
@@ -22,9 +26,13 @@ import {
   type SeverityMappingRule,
   type SourceAdapter,
 } from './source-adapter';
+import { fetchWithUa, probeReachable } from './fetch-helpers';
 
-const FX_PRIMARY_URL = 'https://api.exchangerate.host/latest';
-const FX_FALLBACK_URL = 'https://open.er-api.com/v6/latest/USD';
+// Reordered 2026-05-09: open.er-api.com is the working free-tier primary;
+// exchangerate.host now requires a paid API key. Both are still tried
+// (primary then fallback) so the adapter is provider-agnostic.
+const FX_PRIMARY_URL = 'https://open.er-api.com/v6/latest/USD';
+const FX_FALLBACK_URL = 'https://api.exchangerate.host/latest';
 
 const PAIRS = ['AED', 'EUR', 'GBP', 'INR'] as const;
 type Pair = (typeof PAIRS)[number];
@@ -72,24 +80,28 @@ export class FxAdapter implements SourceAdapter {
     }
   }
 
-  /** Public for unit tests. Tries primary then fallback. */
+  /** Public for unit tests. Tries primary (open.er-api) then fallback (exchangerate.host). */
   async fetchRates(): Promise<FxRecord[]> {
     try {
-      const res = await fetch(FX_PRIMARY_URL);
+      const res = await fetchWithUa(FX_PRIMARY_URL);
       if (res.ok) {
         const data = (await res.json()) as Record<string, unknown>;
-        const parsed = parseExchangerateHost(data);
+        const parsed = parseOpenErApi(data);
         if (parsed.length > 0) return parsed;
       }
     } catch {
       // fall through to fallback
     }
-    const res = await fetch(FX_FALLBACK_URL);
+    const res = await fetchWithUa(FX_FALLBACK_URL);
     if (!res.ok) {
       throw new Error(`fx_usd_aed both providers failed: HTTP ${res.status}`);
     }
     const data = (await res.json()) as Record<string, unknown>;
-    return parseOpenErApi(data);
+    const parsed = parseExchangerateHost(data);
+    if (parsed.length === 0) {
+      throw new Error('fx_usd_aed: fallback returned no rates (likely missing API key)');
+    }
+    return parsed;
   }
 
   normalise(raw: RawSignal): NormalisedSignal {
@@ -117,21 +129,17 @@ export class FxAdapter implements SourceAdapter {
       affected_entities: [entity],
       severity,
       confidence: 0.85,
-      url: r.provider === 'exchangerate.host' ? FX_PRIMARY_URL : FX_FALLBACK_URL,
+      url: r.provider === 'open.er-api.com' ? FX_PRIMARY_URL : FX_FALLBACK_URL,
       raw_payload: raw.payload,
       dedup_hash: computeDedupHash(this.source_id, eventDate, raw.fetched_at, title),
     };
   }
 
   async health_check(): Promise<AdapterHealthCheckResult> {
-    try {
-      const res = await fetch(FX_PRIMARY_URL, { method: 'HEAD' });
-      if (res.ok) return { state: 'healthy' };
-      if (res.status === 401 || res.status === 403) return { state: 'unauthorised' };
-      return { state: 'failing', error: `HTTP ${res.status}` };
-    } catch (err) {
-      return { state: 'failing', error: err instanceof Error ? err.message : String(err) };
-    }
+    const probe = await probeReachable(FX_PRIMARY_URL);
+    if (probe.state === 'healthy') return { state: 'healthy' };
+    if (probe.state === 'unauthorised') return { state: 'unauthorised' };
+    return { state: 'failing', error: probe.error };
   }
 }
 

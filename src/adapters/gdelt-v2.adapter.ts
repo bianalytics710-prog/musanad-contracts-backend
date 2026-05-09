@@ -24,6 +24,7 @@ import {
   type Severity,
   type SourceAdapter,
 } from './source-adapter';
+import { fetchWithUa, probeReachable } from './fetch-helpers';
 
 const GDELT_LASTUPDATE_URL = 'http://data.gdeltproject.org/gdeltv2/lastupdate.txt';
 
@@ -71,7 +72,7 @@ export class GdeltAdapter implements SourceAdapter {
     const fetchedAt = new Date();
     // Step 1: lastupdate.txt → 3 lines, the first ending in `.export.CSV.zip`
     // (GDELT distributes a tab-separated index of recent windows).
-    const indexRes = await fetch(GDELT_LASTUPDATE_URL);
+    const indexRes = await fetchWithUa(GDELT_LASTUPDATE_URL);
     if (!indexRes.ok) {
       throw new Error(`gdelt_v2 lastupdate fetch failed: HTTP ${indexRes.status}`);
     }
@@ -85,7 +86,7 @@ export class GdeltAdapter implements SourceAdapter {
     // (production deployments typically use the CSV API mirror at
     // export.csv.zip). For test/integration we accept either CSV body or
     // gzip-decompressed text via Node native `Response`.
-    const csvRes = await fetch(exportUrl);
+    const csvRes = await fetchWithUa(exportUrl);
     if (!csvRes.ok) {
       throw new Error(`gdelt_v2 export fetch failed: HTTP ${csvRes.status}`);
     }
@@ -140,14 +141,10 @@ export class GdeltAdapter implements SourceAdapter {
   }
 
   async health_check(): Promise<AdapterHealthCheckResult> {
-    try {
-      const res = await fetch(GDELT_LASTUPDATE_URL, { method: 'HEAD' });
-      if (res.ok) return { state: 'healthy' };
-      if (res.status === 401 || res.status === 403) return { state: 'unauthorised' };
-      return { state: 'failing', error: `HTTP ${res.status}` };
-    } catch (err) {
-      return { state: 'failing', error: err instanceof Error ? err.message : String(err) };
-    }
+    const probe = await probeReachable(GDELT_LASTUPDATE_URL);
+    if (probe.state === 'healthy') return { state: 'healthy' };
+    if (probe.state === 'unauthorised') return { state: 'unauthorised' };
+    return { state: 'failing', error: probe.error };
   }
 }
 

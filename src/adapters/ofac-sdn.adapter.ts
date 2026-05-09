@@ -23,6 +23,7 @@ import {
   type Severity,
   type SourceAdapter,
 } from './source-adapter';
+import { fetchWithUa, probeReachable } from './fetch-helpers';
 
 const OFAC_SDN_URL = 'https://www.treasury.gov/ofac/downloads/sdn.xml';
 
@@ -110,17 +111,28 @@ export class OfacSdnAdapter implements SourceAdapter {
 
   async *fetch(_since: Date): AsyncIterator<RawSignal> {
     const fetchedAt = new Date();
-    const res = await fetch(OFAC_SDN_URL);
+    const res = await fetchWithUa(OFAC_SDN_URL);
     if (!res.ok) {
       throw new Error(`OFAC SDN fetch failed: HTTP ${res.status}`);
     }
     const xml = await res.text();
     const entries = parseOfacXml(xml);
+    // Demo cap: OFAC SDN ships ~178k entries; storing every one in osint_signal
+    // (with full XML payload in raw_payload JSONB) overflows Neon's free-tier
+    // 512 MB project limit + makes per-fetch sweeps multi-minute long. Cap
+    // at OFAC_SDN_MAX_ENTRIES (default 500) for demo; production deployments
+    // should set the env to a number large enough for full coverage and use
+    // a paid Neon tier.
+    const cap = parseInt(process.env['OFAC_SDN_MAX_ENTRIES'] ?? '500', 10);
+    const yieldLimit = Number.isFinite(cap) && cap > 0 ? cap : 500;
+    let yielded = 0;
     for (const entry of entries) {
+      if (yielded >= yieldLimit) break;
       yield {
         payload: { ...entry, programs: [...entry.programs] },
         fetched_at: fetchedAt,
       };
+      yielded += 1;
     }
   }
 
@@ -145,16 +157,9 @@ export class OfacSdnAdapter implements SourceAdapter {
   }
 
   async health_check(): Promise<AdapterHealthCheckResult> {
-    try {
-      const res = await fetch(OFAC_SDN_URL, { method: 'HEAD' });
-      if (res.ok) return { state: 'healthy' };
-      if (res.status === 401 || res.status === 403) return { state: 'unauthorised' };
-      return { state: 'failing', error: `HTTP ${res.status}` };
-    } catch (err) {
-      return {
-        state: 'failing',
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
+    const probe = await probeReachable(OFAC_SDN_URL);
+    if (probe.state === 'healthy') return { state: 'healthy' };
+    if (probe.state === 'unauthorised') return { state: 'unauthorised' };
+    return { state: 'failing', error: probe.error };
   }
 }
