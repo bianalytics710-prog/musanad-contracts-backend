@@ -54,6 +54,8 @@
     "pino-pretty": "^11.3.0",
     "puppeteer": "^24.42.0",
     "rate-limiter-flexible": "^5.0.4",
+    "rss-parser": "^3.13.0",
+    "fast-xml-parser": "^4.5.0",
     "uuid": "^11.0.3",
     "zod": "^3.23.8"
   },

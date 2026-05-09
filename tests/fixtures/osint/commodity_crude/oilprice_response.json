@@ -1,0 +1,8 @@
+{
+  "data": [
+    { "code": "BRENT", "price": 78.42, "changePct24h": 0.4, "observedAt": "2026-05-09T08:00:00Z" },
+    { "code": "DUBAI", "price": 76.15, "changePct24h": -2.5, "observedAt": "2026-05-09T08:00:00Z" },
+    { "code": "MURBAN", "price": 79.30, "changePct24h": -6.8, "observedAt": "2026-05-09T08:00:00Z" },
+    { "code": "WTI", "price": 73.05, "changePct24h": 1.1, "observedAt": "2026-05-09T08:00:00Z" }
+  ]
+}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList xmlns="http://tempuri.org/sdnList.xsd">
+  <sdnEntry>
+    <uid>10001</uid>
+    <firstName>Acme</firstName>
+    <lastName>Holdings Limited</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SDGT</program>
+    </programList>
+    <remarks>Test entity (fixture) — secondary sanctions risk per generic SDGT designation.</remarks>
+  </sdnEntry>
+</sdnList>

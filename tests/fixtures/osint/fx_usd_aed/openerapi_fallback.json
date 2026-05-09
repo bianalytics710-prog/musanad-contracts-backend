@@ -1,0 +1,11 @@
+{
+  "result": "success",
+  "base_code": "USD",
+  "time_last_update_utc": "Sat, 09 May 2026 00:00:00 +0000",
+  "rates": {
+    "AED": 3.6750,
+    "EUR": 0.92,
+    "GBP": 0.79,
+    "INR": 83.10
+  }
+}

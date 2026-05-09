@@ -126,7 +126,104 @@ info:
     `ExecutiveDashboard` (S9), and the `VersionDiffSummaryPanel` (M4) is
     now mounted into `ContractVersionList` (S10) — pure FE wiring, zero
     M4 BE changes.
-  version: 0.9.0
+
+    **M7 (CR-A — CRIP Wave 1 chassis)** — OSINT Source Framework + Adapter
+    Protocol. The chassis CR for the CRIP enhancement layer; downstream CRs
+    (B/C/D/E/F/G/H/I) all consume `osint_signal` as their input substrate.
+    9 new endpoints across 3 namespaces — 7 under `/api/v1/admin/sources/*`
+    (full CRUD + credential set + test-pull), 1 under `/api/v1/signals`
+    (paginated normalised signal list — consumed by future CR-G dashboards
+    + CR-H legal advisory), and 1 under `/api/v1/admin/source-health` (per-
+    source health monitor; bare-array response per S2-12 documented design
+    exception — bounded set per tenant, ~14 rows max in CR-A). All 9 are
+    JWT-authed. **Zero new PUBLIC EXECUTE grants** — PUBLIC EXECUTE on
+    fn_'s remains at exactly the M3 set of 5 names (S2-21 sustained at the
+    **seventh consecutive clean module**). 5 new tables: `tenant` (UUID PK;
+    minimal multi-tenancy bootstrap; ADNOC seed UUID
+    `00000000-0000-0000-0000-000000000001`; CR-C extends with branding /
+    hierarchy / hash-chained audit), `osint_source` (admin source
+    registry; UNIQUE(tenant_id, source_id); CHECK enums on kind / format /
+    data_classification), `source_credential` (credential indirection —
+    `env:VARNAME` or `vault:path` only; never plain-text), `osint_signal`
+    (renamed from R-LC `impact_signal` + extended with 19 Annex B.2.1
+    columns; STRATEGY-A preserve-superset — all 13 R-LC columns retained
+    physically as nullable additions; UNIQUE(tenant_id, dedup_hash) drives
+    idempotent upsert; RESTRICTIVE deny-direct-write — writes only via
+    DEFINER `fn_osint_signal_upsert`), and `source_health` (per-source
+    health snapshot updated by 5-min cron via DEFINER
+    `fn_source_health_record`). 1 new VIEW (`impact_signal` — backward-
+    compat shim over the renamed `osint_signal` table; R-LC fn_'s read it
+    without rewrite). 12 new fn_'s — 5 reads (all SECURITY INVOKER STABLE),
+    4 INVOKER writes (source CRUD + test-pull), 1 DEFINER carve-out
+    (`fn_source_credential_set` — defence-in-depth permission gate at fn
+    body line 1), 2 DEFINER system-only (`fn_osint_signal_upsert` and
+    `fn_source_health_record` — REVOKE FROM PUBLIC + **NO role grant**;
+    only the neondb_owner pool connection invokes — workers via direct
+    Neon endpoint per F-3 LISTEN/NOTIFY infrastructure note).
+    2 new pg_notify channels — `osint_signal_inserted` (emitted by
+    `fn_osint_signal_upsert` ONLY on the insert path; CR-E rule engine
+    LISTENs) and `osint_test_pull` (emitted by `fn_osint_source_test_pull`;
+    in-process BE fetch worker LISTENs and dispatches manual fetch within
+    ~10s — AC-S7-06). 3 new audit triggers
+    (`audit_osint_source_changes`, `audit_source_credential_changes`,
+    `audit_osint_signal_changes` renamed from `audit_impact_signal_changes`).
+    `tenant` audit deliberately OFF (CC1 / OQ-8 carve-out — UUID PK
+    incompatible with `audit_log.record_id` BIGINT; defer to CR-C hash-
+    chained audit_log replacement). `source_health` audit deliberately OFF
+    (Q-NEW6 — 5-min × 8 sources × N tenants would flood audit_log; the
+    table's own `checked_at + state` columns are its ledger).
+    `fn_audit_trigger.v_redact_fields` extended from 27 → 30 names
+    (`credential_ref`, `raw_payload`, `last_error_message`); migration 102
+    explicitly re-applies the REVOKE/GRANT trio after CREATE OR REPLACE
+    per `feedback_fn_rewrites_lose_safety_guards.md`. 4 net-new permission
+    codes (`source.read`, `source.manage`, `signal.read.all`,
+    `osint.signal.upsert`) seeded in migration 100 with 9 role grants.
+    13 ADNOC source rows seeded in migration 106 (1 OFAC SDN + 1 EU + 1
+    UN + 1 UK HMT + 6 RSS sub-feeds + 1 commodity_crude + 1 gdelt_v2 + 1
+    fx_usd_aed); 17 R-LC manual rows back-filled in migration 104 with
+    `signal_kind_subtype='manual_curated'`. **First multi-tenancy footprint
+    in the system** — `app.current_tenant_id` GUC set by `rls.middleware`
+    from JWT claim with hard-coded ADNOC UUID fallback (Q-DA4 lock —
+    single-tenant demo; multi-tenant JWT claim wiring deferred to CR-C).
+    `schema_migrations.version=107` on both `m0-foundation` + `test`
+    branches. Migrations applied: 100..107 (8 files; 0 impl-time patches;
+    Stage 2 round 1 caught S2-7 missing FK btree + S2-21/B14 missing
+    REVOKE/GRANT trio on fn_audit_trigger CREATE OR REPLACE — both patched
+    in 3 SQL lines before DB Implementation ran). Smoke caught 2
+    translatePgError gaps (DEF-1 GET /sources/:id unknown id → was 400
+    should be 404; DEF-2 test-pull on disabled source → was 400 should be
+    409) — both fixed by extending the 22023 branch with literal-prefix
+    routing. Testing Agent caught 3 functional issues (F-1 GDELT 2-letter
+    ISO vs 3-letter CAMEO mismatch — would have dropped ALL rows; F-2
+    R-LC9 cross-module test broke after view shim — test patched to
+    INSERT into osint_signal directly; F-3 pg_notify untestable on Neon
+    -pooler — production workers MUST use Neon direct endpoint). 985 tests
+    / 984 pass / 1 skip / 0 fail. **Codex Review SKIPPED** per Dexian
+    decision 2026-05-04 (seventh consecutive validated). **Version bumped
+    0.9.0 → 1.0.0** — CR-A is the chassis CR for the CRIP enhancement
+    layer; semantic-major bump justified.
+
+    **Key Design Decisions locked at HITL Gate 2 (M7 — 22 decisions):**
+
+    - **Q1 / CC2** — `impact_signal` rename: STRATEGY-A preserve-superset.
+    - **Q2** — `tenant` table: ship minimal in CR-A; CR-C extends.
+    - **Q3 / Q6** — credential storage: `env:VARNAME` indirection only.
+    - **Q4** — health cron cadence: 5-min default.
+    - **Q5** — permissions: flat (`source.read` + `source.manage` only).
+    - **Q-NEW1** — commodity provider: `oilpriceapi.com` free tier.
+    - **Q-NEW2** — FX: `exchangerate.host` primary + `open.er-api.com` fallback.
+    - **Q-NEW3** — `tenant.parent_tenant_id` self-FK: defer to CR-C.
+    - **Q-NEW4** — `osint_source.refresh_seconds` precedence: per-row always wins.
+    - **Q-NEW5** — OFAC: SDN canonical only in CR-A.
+    - **Q-NEW6 / OQ-6** — `source_health` audit trigger: OFF.
+    - **CC1 / OQ-8** — `tenant` audit trigger: OFF (defer to CR-C).
+    - **CC3** — `raw_payload` GIN index: skip.
+    - **CC4** — system-actor sentinel: `v_actor=0 → NULL` coercion.
+    - **Q-DA1** — severity / event_date `_v2` suffix retained.
+    - **Q-DA2** — RESTRICTIVE deny-direct-update on `osint_signal` verified safe.
+    - **Q-DA3** — `osint_source_id` NULL on R-LC backfill rows.
+    - **Q-DA4** — `rls.middleware` ADNOC fallback for v1 single-tenant demo.
+  version: 1.0.0
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -440,6 +537,85 @@ tags:
       sourced exclusively from `ai_request_log.outcome`. `fn_health_check`
       stays SECURITY INVOKER (no DEFINER carve-out); the new permissive
       SELECT policy is what unlocks the latestMigration read.
+  - name: M7 — OSINT Sources
+    description: |
+      OSINT source registry (M7 — CR-A). 7 endpoints under
+      `/api/v1/admin/sources/*` covering full source CRUD + credential
+      indirection set + manual test-pull. All JWT-authed. Permission
+      gates: `source.read` (list, get-by-id) and `source.manage` (create,
+      update, delete, credential set, test-pull). Tenant-scoped via
+      `app.current_tenant_id` GUC set by `rls.middleware` from JWT
+      `tenantId` claim with hard-coded ADNOC UUID fallback (Q-DA4 lock).
+      `credentialRef` is **never** projected in any response (AC-S3-04
+      invariant — the request body of `POST /:id/credential` is the only
+      place it appears; redacted in audit_log via `fn_audit_trigger`
+      v_redact_fields and in Pino logs). `sourceId` is immutable
+      post-create — payloads containing it on PATCH are rejected with
+      400 + `field='sourceId'`. Soft-delete (DELETE) sets `is_active=false
+      AND enabled=false`; existing `osint_signal` rows referencing the
+      source remain queryable (Annex B.7.3 source decommissioning rule).
+      Test-pull (POST `/:id/test-pull`) returns **202 Accepted** and
+      emits `pg_notify('osint_test_pull')`; the in-process BE fetch
+      worker LISTENs and dispatches the actual fetch within ~10s
+      (AC-S7-06). `pg_notify` requires the worker to connect via Neon's
+      **direct endpoint** — `-pooler` PgBouncer transaction pooling
+      drops session-level LISTEN (F-3 ops note). Credentials store
+      `env:VARNAME` or `vault:path` indirection only — plain-text
+      secrets rejected by `fn_source_credential_set` with 400 (heuristic
+      check: free-form ≥20-char `[A-Za-z0-9_]+` without `env:`/`vault:`
+      prefix raises 22023 → AC-S3-06). All M7 fn_'s end with the
+      explicit REVOKE EXECUTE FROM PUBLIC + GRANT TO neondb_owner trio
+      per migration 107 (S2-21 sustained at the seventh consecutive
+      clean module).
+  - name: M7 — Signals
+    description: |
+      Normalised OSINT signal list (M7 — CR-A — S11). Single endpoint
+      `GET /api/v1/signals`. JWT-authed; `signal.read.all` permission
+      (granted to Super Admin / platform_admin / executive /
+      legal_counsel; compliance_esg conditional WHERE EXISTS no-op).
+      Tenant-scoped via RLS auto-scoping. Filters: `kind` (Annex B.2.1
+      SignalKind enum: geopolitical / sanctions / weather / commodity /
+      fx / logistics / esg / regulatory / news / internal),
+      `sourceId` (TEXT denorm — matches `osint_signal.source_id`, NOT
+      the BIGINT FK), `severityMin` (inclusive ordered minimum:
+      informational(1) < low(2) < medium(3) < high(4) < critical(5)
+      — `severityMin='high'` returns rows with severity ∈ {high,
+      critical}), `since` (ISO 8601 UTC; matches `fetched_at >= since`),
+      `geographyIntersects` (ISO 3166-1 alpha-2 country code; matches
+      via `@>` on `geographies` JSONB array; GIN(jsonb_path_ops) index),
+      `affectedEntityId` (matches via `@>` on `affected_entities` JSONB
+      array — `EntityReference.identifier` field; GIN index). Order:
+      `event_date_v2 DESC NULLS LAST, fetched_at DESC`. `rawPayload` IS
+      in the response body per design (legal_counsel needs SDN entry
+      text for advisory drafting in CR-H); redacted only at log layer
+      (Pino) + audit_log (`fn_audit_trigger.v_redact_fields` extended
+      with `raw_payload` in migration 102). The 17 R-LC manual_curated
+      back-fill rows are visible via this endpoint when caller has
+      `signal.read.all` OR the legacy `contract.read.department` /
+      `contract.edit` permission keys (the `osint_signal_tenant_isolation_select`
+      RLS policy includes both for back-compat).
+  - name: M7 — Source Health
+    description: |
+      OSINT source health monitor (M7 — CR-A — S8). Single endpoint
+      `GET /api/v1/admin/source-health`. JWT-authed; `source.read`
+      permission. Returns a **bare array** (no pagination envelope)
+      per S2-12 documented design exception — bounded set per tenant
+      (one row per `(tenant_id, osint_source_id)`; ~14 rows max in
+      CR-A). Each row joins `source_health` with `osint_source` to
+      surface the source identity (`sourceId` / `displayName` / `kind`).
+      Sort: `failing > unauthorised > degraded > healthy`, then
+      `displayName`. Updated by the 5-min health-check cron via
+      `fn_source_health_record` (DEFINER; cron-callable; NO role grant
+      — only neondb_owner pool connection invokes). `lastErrorMessage`
+      is truncated to 500 chars by the fn and listed in
+      `project.config.json` sensitiveFields + `fn_audit_trigger`
+      v_redact_fields; surfaced verbatim in the admin UI for the
+      platform_admin operator. `signals_24h` is a rolling 24h count
+      maintained by the cron — useful for spotting healthy adapters
+      that nonetheless produce zero rows. **Audit trigger deliberately
+      OFF on `source_health`** (Q-NEW6 / OQ-6 lock — 5-min × 8 sources
+      × N tenants would flood audit_log; the table's own
+      `checked_at + state` columns are its ledger).
 
 components:
   securitySchemes:
@@ -4783,6 +4959,511 @@ components:
         db: { $ref: "#/components/schemas/HealthCheckDb" }
         ai: { $ref: "#/components/schemas/HealthCheckAi" }
         overall: { $ref: "#/components/schemas/HealthStatusOverall" }
+
+    # ============================================================
+    # M7 — OSINT Source Framework + Adapter Protocol (CR-A)
+    # ============================================================
+
+    # --- Enums (7) ---
+
+    SourceKind:
+      type: string
+      description: |
+        `osint_source.kind` CHECK enum. UI dropdown source for the
+        /app/admin/sources Add/Edit form.
+      enum: [sanctions, news, weather, commodity, fx, social, regulatory, internal]
+
+    SourceFormat:
+      type: string
+      description: "`osint_source.format` CHECK enum."
+      enum: [xml, csv, json, rss, api]
+
+    SignalKind:
+      type: string
+      description: |
+        `osint_signal.kind` CHECK enum (Annex B.2.1 SignalKind). Superset
+        of SourceKind — includes `logistics` and `esg` (signals can be
+        derived from any kind of source/event).
+      enum: [geopolitical, sanctions, weather, commodity, fx, logistics, esg, regulatory, news, internal]
+
+    Severity:
+      type: string
+      description: |
+        `osint_signal.severity_v2` CHECK enum (Annex B.2.1 Severity).
+        Ordered enum: informational(1) < low(2) < medium(3) < high(4)
+        < critical(5). The `severityMin` filter on
+        `GET /signals` matches inclusive minimum.
+      enum: [informational, low, medium, high, critical]
+
+    HealthState:
+      type: string
+      description: |
+        `source_health.state` CHECK enum (Annex B.7.1). Drives FE green/
+        yellow/red tile colour: healthy=green, degraded=yellow,
+        failing/unauthorised=red.
+      enum: [healthy, degraded, failing, unauthorised]
+
+    CredentialKind:
+      type: string
+      description: "`source_credential.credential_kind` CHECK enum."
+      enum: [api_key, oauth_token, basic_auth, none]
+
+    DataClassification:
+      type: string
+      description: |
+        Annex B.2.1 + §15 invariant 5 alignment. Used on both
+        `osint_source.data_classification` and `osint_signal.data_classification`.
+      enum: [demo, pilot, production]
+
+    # --- Embedded JSONB shapes (5) ---
+
+    RateLimitConfig:
+      type: object
+      description: "`osint_source.rate_limit` JSONB shape (Annex B.5.1)."
+      required: [callsPerMinute, burst, minIntervalMs, respectRetryAfter]
+      properties:
+        callsPerMinute: { type: integer }
+        burst: { type: integer }
+        minIntervalMs: { type: integer }
+        respectRetryAfter: { type: boolean }
+
+    GeoReference:
+      type: object
+      description: |
+        Element of `osint_signal.geographies` JSONB array (Annex B.2.1).
+        Used by both adapter `normalise()` output and
+        `fn_osint_signal_list` filtering via `@>` GIN index.
+      properties:
+        isoCountry:
+          type: string
+          description: "ISO 3166-1 alpha-2 country code (e.g. 'AE')."
+        regionCode:
+          type: string
+          description: "Optional region descriptor (e.g. 'GCC', 'MENA', 'APAC')."
+        free:
+          type: string
+          description: "Optional free-form locality (city / port / facility)."
+
+    EntityReference:
+      type: object
+      description: |
+        Element of `osint_signal.affected_entities` JSONB array (Annex B.2.1).
+        Used for filtering signals by counterparty / vessel / facility.
+      required: [entityType, name]
+      properties:
+        entityType:
+          type: string
+          description: "Entity classification: 'company' / 'vessel' / 'facility' / 'person' / 'instrument' / etc."
+        name:
+          type: string
+        identifier:
+          type: string
+          description: "Stable identifier — OFAC UID, IMO number, internal counterparty id, etc."
+        partyId:
+          type: integer
+          description: "Optional FK to Musanad party.id when matched."
+
+    SeverityMappingRule:
+      type: object
+      description: |
+        Single rule in `osint_source.severity_mapping.rules`. Per-source
+        heuristic that the adapter `normalise()` consults to derive the
+        signal severity. Rule shape varies by source kind.
+      properties:
+        programContains: { type: string }
+        titleContains: { type: string }
+        absChangePctGte: { type: number }
+        pegDeviationPctGte: { type: number }
+        default: { $ref: "#/components/schemas/Severity" }
+        severity: { $ref: "#/components/schemas/Severity" }
+
+    SeverityMapping:
+      type: object
+      description: |
+        `osint_source.severity_mapping` JSONB shape. Rules are evaluated
+        in order; first match wins.
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          items: { $ref: "#/components/schemas/SeverityMappingRule" }
+
+    GeographyFilter:
+      type: object
+      description: |
+        `osint_source.geography_filter` JSONB shape (GDELT only in CR-A;
+        structure left open for future adapters).
+      properties:
+        countryIn:
+          type: array
+          items: { type: string }
+        themeIn:
+          type: array
+          items: { type: string }
+        actorIn:
+          type: array
+          items: { type: string }
+
+    # --- Tenant ---
+
+    Tenant:
+      type: object
+      description: |
+        Derived from `fn_tenant_get_current` JSONB output (db-design.md §3.1).
+        CR-A ships a flat single-row table (ADNOC); CR-C extends with
+        branding, hierarchy, and hash-chained audit per Q-NEW3 lock.
+      required: [id, slug, displayName, configPack]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: "ADNOC seed = `00000000-0000-0000-0000-000000000001`."
+        slug: { type: string, description: "Stable string handle. ADNOC = 'adnoc'." }
+        displayName: { type: string, description: "ADNOC = 'ADNOC'." }
+        configPack: { type: string, description: "Drives seed selection (e.g. 'adnoc' / 'default')." }
+
+    # --- OsintSource (entity + detail + listItem) ---
+
+    OsintSource:
+      type: object
+      description: |
+        Base OSINT source registry row. Derived from
+        `fn_osint_source_get_by_id` JSONB output (db-design.md §3.3).
+      required: [id, tenantId, sourceId, displayName, kind, format, refreshSeconds, sourceReliability, enabled, metadata, dataClassification, createdAt, updatedAt]
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        sourceId:
+          type: string
+          description: "Stable per-tenant string handle, e.g. 'ofac_sdn'. Immutable post-create."
+        displayName: { type: string }
+        displayNameAr: { type: string, nullable: true }
+        kind: { $ref: "#/components/schemas/SourceKind" }
+        url:
+          type: string
+          nullable: true
+          description: "**[SENSITIVE]** Endpoint URL. Pino-redacted at log layer; may embed query-string secrets."
+        format: { $ref: "#/components/schemas/SourceFormat" }
+        refreshSeconds:
+          type: integer
+          minimum: 60
+          description: "Per-row override of adapter-class default (Q-NEW4: per-row always wins)."
+        sourceReliability:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: "Snapshot at insert time. Copied to `osint_signal.source_reliability` on each insert."
+        enabled: { type: boolean }
+        rateLimit:
+          oneOf:
+            - { $ref: "#/components/schemas/RateLimitConfig" }
+            - { type: "null" }
+        severityMapping:
+          oneOf:
+            - { $ref: "#/components/schemas/SeverityMapping" }
+            - { type: "null" }
+        geographyFilter:
+          oneOf:
+            - { $ref: "#/components/schemas/GeographyFilter" }
+            - { type: "null" }
+        licensingNote: { type: string, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: "Adapter-specific extra config (sub-feed list / marker list / currency-pair list)."
+        dataClassification: { $ref: "#/components/schemas/DataClassification" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SourceHealthBadge:
+      type: object
+      description: |
+        Embedded health summary on list/detail osint_source responses.
+        Subset of `SourceHealthListItem` (no sourceId/displayName/kind
+        since the parent OsintSource carries those).
+      required: [state, signals24h, checkedAt]
+      properties:
+        state: { $ref: "#/components/schemas/HealthState" }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastFailureAt: { type: string, format: date-time, nullable: true }
+        signals24h: { type: integer }
+        lastErrorMessage:
+          type: string
+          nullable: true
+          description: "**[SENSITIVE]** Truncated to 500 chars by `fn_source_health_record`. Pino-redacted at log layer."
+        checkedAt: { type: string, format: date-time }
+
+    SourceCredentialMetadata:
+      type: object
+      description: |
+        Embedded credential summary on `OsintSourceDetail`. NEVER includes
+        `credentialRef` (AC-S3-04 invariant — credential_ref MUST NOT
+        appear in any API response).
+      required: [kind]
+      properties:
+        kind: { $ref: "#/components/schemas/CredentialKind" }
+        lastRotatedAt: { type: string, format: date-time, nullable: true }
+
+    OsintSourceDetail:
+      allOf:
+        - { $ref: "#/components/schemas/OsintSource" }
+        - type: object
+          description: |
+            Full GET-by-id response — base OsintSource + embedded health
+            badge + credential metadata. credentialRef intentionally NOT
+            projected per AC-S3-04. Maps to `GET /admin/sources/:id`
+            200 body.
+          properties:
+            health:
+              oneOf:
+                - { $ref: "#/components/schemas/SourceHealthBadge" }
+                - { type: "null" }
+            credential:
+              oneOf:
+                - { $ref: "#/components/schemas/SourceCredentialMetadata" }
+                - { type: "null" }
+
+    OsintSourceListItem:
+      allOf:
+        - { $ref: "#/components/schemas/OsintSource" }
+        - type: object
+          description: |
+            Identical to OsintSourceDetail except `credential` is absent
+            (list joins source_health only; credential metadata is fetched
+            per-source via get-by-id).
+          properties:
+            health:
+              oneOf:
+                - { $ref: "#/components/schemas/SourceHealthBadge" }
+                - { type: "null" }
+
+    OsintSourceListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/OsintSourceListItem" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    CreateOsintSourceDto:
+      type: object
+      required: [sourceId, displayName, kind, format, refreshSeconds, sourceReliability]
+      description: |
+        POST /admin/sources request body. tenant_id is derived from
+        `app.current_tenant_id` GUC — never accepted from request body.
+      properties:
+        sourceId: { type: string, minLength: 1, maxLength: 200 }
+        displayName: { type: string, minLength: 1, maxLength: 200 }
+        displayNameAr: { type: string, maxLength: 200 }
+        kind: { $ref: "#/components/schemas/SourceKind" }
+        url: { type: string, description: "**[SENSITIVE]** Pino-redacted." }
+        format: { $ref: "#/components/schemas/SourceFormat" }
+        refreshSeconds: { type: integer, minimum: 60 }
+        sourceReliability: { type: number, minimum: 0, maximum: 1 }
+        enabled: { type: boolean, default: true }
+        rateLimit: { $ref: "#/components/schemas/RateLimitConfig" }
+        severityMapping: { $ref: "#/components/schemas/SeverityMapping" }
+        geographyFilter: { $ref: "#/components/schemas/GeographyFilter" }
+        licensingNote: { type: string }
+        metadata: { type: object, additionalProperties: true, default: {} }
+        dataClassification: { $ref: "#/components/schemas/DataClassification" }
+
+    UpdateOsintSourceDto:
+      type: object
+      description: |
+        PATCH /admin/sources/:id request body. ALL fields optional
+        (partial update). `sourceId` is REJECTED with 400 if present
+        (immutable per AC-S3-08). tenantId is never accepted.
+      properties:
+        displayName: { type: string }
+        displayNameAr: { type: string }
+        kind: { $ref: "#/components/schemas/SourceKind" }
+        url: { type: string }
+        format: { $ref: "#/components/schemas/SourceFormat" }
+        refreshSeconds: { type: integer, minimum: 60 }
+        sourceReliability: { type: number, minimum: 0, maximum: 1 }
+        enabled: { type: boolean }
+        rateLimit: { $ref: "#/components/schemas/RateLimitConfig" }
+        severityMapping: { $ref: "#/components/schemas/SeverityMapping" }
+        geographyFilter: { $ref: "#/components/schemas/GeographyFilter" }
+        licensingNote: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        dataClassification: { $ref: "#/components/schemas/DataClassification" }
+
+    DeleteOsintSourceResponse:
+      type: object
+      required: [id, deactivated, message]
+      properties:
+        id: { type: integer }
+        deactivated: { type: boolean, enum: [true] }
+        message:
+          type: string
+          example: "Source deactivated. Existing signals remain queryable."
+
+    TestPullResponse:
+      type: object
+      required: [queued, sourceId, requestedAt]
+      description: |
+        202 Accepted from POST /admin/sources/:id/test-pull. Actual fetch
+        is asynchronous via pg_notify('osint_test_pull') → BE worker
+        LISTEN dispatch within ~10s. FE polls source_health every 2s for
+        up to 30s after this response (AC-S10-04) to surface delta
+        signals_24h count.
+      properties:
+        queued: { type: boolean, enum: [true] }
+        sourceId: { type: string }
+        requestedAt: { type: string, format: date-time }
+
+    # --- SourceCredential (DTO + response) ---
+
+    SetCredentialDto:
+      type: object
+      required: [credentialKind, credentialRef]
+      description: |
+        POST /admin/sources/:id/credential request body. credentialRef
+        MUST match `^(env:|vault:)`; plain-text secrets rejected with
+        400 (heuristic — free-form ≥20-char `[A-Za-z0-9_]+` without
+        prefix raises 22023 → AC-S3-06). credentialRef is **REDACTED**
+        in audit_log payload (AE1) + Pino logs (AE3) and **NEVER**
+        returned in the response (AC-S3-04).
+      properties:
+        credentialKind: { $ref: "#/components/schemas/CredentialKind" }
+        credentialRef:
+          type: string
+          minLength: 3
+          pattern: "^(env:|vault:)"
+          description: "**[SENSITIVE]** Pattern: `env:VARNAME` OR `vault:path`. NEVER plain-text secret. NEVER returned in response."
+
+    SetCredentialResponse:
+      type: object
+      required: [id, credentialKind, lastRotatedAt]
+      description: |
+        POST /admin/sources/:id/credential 200 body. INVARIANT:
+        `credentialRef` is NEVER returned (AC-S3-04 — verified by
+        integration test absence-grep).
+      properties:
+        id: { type: integer }
+        credentialKind: { $ref: "#/components/schemas/CredentialKind" }
+        lastRotatedAt: { type: string, format: date-time }
+
+    # --- OsintSignal ---
+
+    OsintSignal:
+      type: object
+      description: |
+        Annex B.2.1 normalised signal shape. Derived from
+        `fn_osint_signal_list` JSONB output (db-design.md §3.4). `id`
+        is BIGSERIAL on the DB side; returned as integer in JSON.
+        `osintSourceId` is NULL only for the 17 R-LC manual_curated
+        back-fill rows (Q-DA3 — they predate osint_source seeding).
+        `rawPayload` IS in the response body per design (legal_counsel
+        needs SDN entry text for advisory drafting in CR-H); redacted
+        at log + audit layer only.
+      required: [id, tenantId, sourceId, sourceReliability, fetchedAt, kind, title, geographies, affectedEntities, severity, confidence, rawPayload, dedupHash, dataClassification, createdAt]
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        osintSourceId: { type: integer, nullable: true }
+        sourceId:
+          type: string
+          description: "Denormalized for query perf; mirrors osint_source.source_id."
+        sourceReliability: { type: number, minimum: 0, maximum: 1 }
+        fetchedAt: { type: string, format: date-time }
+        eventDate: { type: string, format: date-time, nullable: true }
+        kind: { $ref: "#/components/schemas/SignalKind" }
+        signalKindSubtype:
+          type: string
+          nullable: true
+          description: "Discriminator: 'manual_curated' (R-LC back-fill) / 'milestone_slippage' / 'sla_breach' / null."
+        title: { type: string }
+        summary: { type: string, nullable: true }
+        geographies:
+          type: array
+          items: { $ref: "#/components/schemas/GeoReference" }
+        affectedEntities:
+          type: array
+          items: { $ref: "#/components/schemas/EntityReference" }
+        severity: { $ref: "#/components/schemas/Severity" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        url: { type: string, nullable: true }
+        rawPayload:
+          type: object
+          additionalProperties: true
+          description: "**[SENSITIVE]** Original source payload. Redacted in logs + audit_log; exposed in API response per design."
+        dedupHash:
+          type: string
+          description: "SHA-256 hex of `source_id || '|' || isoformat(event_date OR fetched_at) || '|' || lower(trim(title))`. Drives idempotent upsert via UNIQUE(tenant_id, dedup_hash)."
+        dataClassification: { $ref: "#/components/schemas/DataClassification" }
+        createdAt: { type: string, format: date-time }
+
+    OsintSignalListResponse:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/OsintSignal" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # --- SourceHealth (list item) ---
+
+    SourceHealthListItem:
+      type: object
+      description: |
+        `fn_source_health_list` row shape (db-design.md §3.5). Wraps
+        `SourceHealthBadge` with denormalised source identity. List
+        returns a BARE ARRAY (no pagination envelope per S2-12 design
+        exception — bounded set per tenant; ~14 rows max in CR-A).
+        Sort: failing > unauthorised > degraded > healthy, then displayName.
+      required: [sourceId, displayName, kind, state, signals24h, checkedAt]
+      properties:
+        sourceId: { type: string }
+        displayName: { type: string }
+        kind: { $ref: "#/components/schemas/SourceKind" }
+        state: { $ref: "#/components/schemas/HealthState" }
+        lastSuccessAt: { type: string, format: date-time, nullable: true }
+        lastFailureAt: { type: string, format: date-time, nullable: true }
+        signals24h: { type: integer }
+        lastErrorMessage:
+          type: string
+          nullable: true
+          description: "**[SENSITIVE]** Truncated to 500 chars by `fn_source_health_record`."
+        checkedAt: { type: string, format: date-time }
+
+    # --- pg_notify channel payloads (NOT exposed via HTTP — documented for CR-E + worker LISTEN consumers) ---
+
+    OsintSignalInsertedNotification:
+      type: object
+      description: |
+        `pg_notify('osint_signal_inserted')` payload. Emitted by
+        `fn_osint_signal_upsert` (DEFINER, system-only) ONLY on the
+        insert path (not on conflict). CR-E rule engine LISTENs to
+        this channel.
+      required: [id, tenantId, sourceId, severity, kind]
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        sourceId: { type: string }
+        severity: { $ref: "#/components/schemas/Severity" }
+        kind: { $ref: "#/components/schemas/SignalKind" }
+
+    OsintTestPullNotification:
+      type: object
+      description: |
+        `pg_notify('osint_test_pull')` payload. Emitted by
+        `fn_osint_source_test_pull` (INVOKER, source.manage). The fetch
+        worker LISTENs and dispatches a manual fetch within ~10s
+        (AC-S7-06). Production worker connection MUST use Neon direct
+        endpoint, NOT -pooler (F-3 — PgBouncer transaction pooling
+        drops session-level LISTEN).
+      required: [osintSourceId, tenantId, sourceId, actorId, requestedAt]
+      properties:
+        osintSourceId: { type: integer }
+        tenantId: { type: string, format: uuid }
+        sourceId: { type: string }
+        actorId: { type: integer }
+        requestedAt: { type: string, format: date-time }
 
   responses:
     Unauthenticated:
@@ -9583,6 +10264,438 @@ x-paths-root:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403":
           description: Caller is not platform_admin / Super Admin (42501 → AC-S12-07).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ============================================================
+  # M7 — OSINT Source Framework + Adapter Protocol (CR-A)
+  # 9 endpoints across 3 namespaces:
+  #   /admin/sources/* (7) — full source CRUD + credential + test-pull
+  #   /signals (1)         — paginated normalised signal list
+  #   /admin/source-health (1) — per-source health monitor (bare array)
+  # ============================================================
+
+  /admin/sources:
+    get:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceList
+      summary: Paginated list of OSINT sources for the current tenant
+      description: |
+        Paginated source list with embedded health badge per row.
+        Filterable by `kind`, health `state`, `search` (matches sourceId
+        or displayName ILIKE). credentialRef NEVER projected.
+        Sort: displayName ASC. RLS auto-scopes by tenant via
+        `app.current_tenant_id` GUC.
+        DB function: `fn_osint_source_list`.
+      x-authorisedRoles: [Super Admin, platform_admin, executive]
+      x-requiredPermissions: [source.read]
+      x-authMode: jwt
+      x-storyId: S9
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: kind, in: query, schema: { $ref: "#/components/schemas/SourceKind" } }
+        - { name: state, in: query, schema: { $ref: "#/components/schemas/HealthState" } }
+        - { name: search, in: query, description: "Debounced 300ms on FE (AC-S9-02). ILIKE on sourceId OR displayName.", schema: { type: string } }
+      responses:
+        "200":
+          description: Paginated list with embedded health badge per row.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OsintSourceListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+    post:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceCreate
+      summary: Create a new OSINT source for the current tenant
+      description: |
+        Creates a new source row. Validates kind / format /
+        refreshSeconds (≥60) / sourceReliability ([0,1]) before INSERT.
+        tenant_id is derived from `app.current_tenant_id` GUC — never
+        accepted from request body.
+        Returns the full detail via chained `fn_osint_source_get_by_id`.
+        DB function: `fn_osint_source_create`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [source.manage]
+      x-authMode: jwt
+      x-storyId: S3
+      x-rateLimit: authedWriteRateLimiter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateOsintSourceDto" }
+      responses:
+        "201":
+          description: Source created. Full detail returned.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OsintSourceDetail" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "Duplicate (tenant_id, sourceId) — 'Source ID already exists for this tenant' (23505 → AC-S3-02)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/sources/{id}:
+    get:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceGetById
+      summary: Single OSINT source detail
+      description: |
+        Single OSINT source detail with embedded health badge +
+        credential metadata (kind + lastRotatedAt only — credentialRef
+        NEVER projected per AC-S3-04). Used to populate
+        SourceDetailEditForm.
+        DB function: `fn_osint_source_get_by_id`.
+      x-authorisedRoles: [Super Admin, platform_admin, executive]
+      x-requiredPermissions: [source.read]
+      x-authMode: jwt
+      x-storyId: S10
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Source detail.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OsintSourceDetail" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Source not found for current tenant (22023 → 404 per Smoke DEF-1 translatePgError extension — literal-prefix routing).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    patch:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceUpdate
+      summary: Partial update of an OSINT source
+      description: |
+        Partial update. ALL fields optional. `sourceId` is REJECTED with
+        400 if present (immutable per AC-S3-08). FK pre-validation:
+        22023 → 404 if source not found for current tenant.
+        DB function: `fn_osint_source_update`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [source.manage]
+      x-authMode: jwt
+      x-storyId: S3
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateOsintSourceDto" }
+      responses:
+        "200":
+          description: Source updated. Full detail returned.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OsintSourceDetail" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Source not found for current tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    delete:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceDelete
+      summary: Soft-delete an OSINT source
+      description: |
+        Soft-delete sets `is_active=false AND enabled=false` in a single
+        UPDATE; existing osint_signal rows referencing the source remain
+        queryable (Annex B.7.3 source decommissioning rule + AC-S3-07).
+        DB function: `fn_osint_source_delete`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [source.manage]
+      x-authMode: jwt
+      x-storyId: S3
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Source deactivated.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/DeleteOsintSourceResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Source not found for current tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/sources/{id}/credential:
+    post:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceCredentialSet
+      summary: Upsert credential indirection for a source
+      description: |
+        Upsert credential indirection. credentialRef MUST match
+        `^(env:|vault:)`; plain-text secrets rejected with 400
+        (heuristic — free-form ≥20-char `[A-Za-z0-9_]+` without
+        `env:`/`vault:` prefix raises 22023 → AC-S3-06). credentialRef
+        body is REDACTED in audit_log (`fn_audit_trigger.v_redact_fields`
+        — migration 102 extends to 30 names) + Pino logs
+        (project.config.json sensitiveFields).
+        **credentialRef is NEVER returned in the response** (only
+        credentialKind + lastRotatedAt — AC-S3-04 / AC-S3-05).
+        DB function: `fn_source_credential_set` (DEFINER carve-out;
+        defence-in-depth permission gate at fn body line 1).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [source.manage]
+      x-authMode: jwt
+      x-storyId: S3
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - { name: id, in: path, required: true, description: "The osint_source.id this credential is for; FK pre-validated (23503 → 409 if missing).", schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetCredentialDto" }
+      responses:
+        "200":
+          description: Credential upserted.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/SetCredentialResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: "FK violation: osint_source_id not found for current tenant (23503 → 409 per translatePgError)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/sources/{id}/test-pull:
+    post:
+      tags: [M7 — OSINT Sources]
+      operationId: osintSourceTestPull
+      summary: Queue a manual test-pull for a source
+      description: |
+        Queue a manual test-pull for a source. The fn emits
+        `pg_notify('osint_test_pull')` and returns 202 Accepted; the BE
+        worker (LISTENing on the channel) dispatches the actual fetch
+        within ~10s (AC-S7-06). 409 if `enabled=false` (Smoke DEF-2 fix
+        — translatePgError 22023 → 409 routing for "is disabled" prefix).
+        FE polls source_health every 2s for up to 30s after this
+        response (AC-S10-04) to surface delta `signals_24h` count.
+        **Production caveat (F-3):** Neon `-pooler` PgBouncer transaction
+        pooling drops session-level LISTEN; production worker connection
+        MUST use Neon **direct** endpoint. See ops-runbook M7 section.
+        DB function: `fn_osint_source_test_pull`.
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [source.manage]
+      x-authMode: jwt
+      x-storyId: S7
+      x-rateLimit: authedWriteRateLimiter
+      x-pgNotifyChannel:
+        channel: osint_test_pull
+        payload: OsintTestPullNotification
+        consumer: BE fetch worker (S7) — registered LISTEN at startup
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "202":
+          description: Test pull queued. Worker dispatches manual fetch within ~10s.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/TestPullResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: Source not found for current tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: "Source is disabled — enable before test-pull (22023 → 409 per Smoke DEF-2 translatePgError extension — literal-prefix routing)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /signals:
+    get:
+      tags: [M7 — Signals]
+      operationId: osintSignalList
+      summary: Paginated list of normalised OSINT signals
+      description: |
+        Paginated list of normalised signals scoped to current tenant by
+        RLS. Filters: `kind` (Annex B.2.1 SignalKind enum), `sourceId`
+        (TEXT denorm — matches `osint_signal.source_id`, NOT the BIGINT
+        FK — filter by 'ofac_sdn' / 'rss_reuters_energy' / etc.),
+        `severityMin` (inclusive ordered minimum:
+        informational(1) < low(2) < medium(3) < high(4) < critical(5);
+        `severityMin='high'` returns rows with severity ∈ {high,
+        critical}), `since` (ISO 8601 UTC; matches `fetched_at >= since`),
+        `geographyIntersects` (ISO 3166-1 alpha-2 country code; matches
+        via `@>` on `geographies` JSONB array; GIN(jsonb_path_ops)
+        index), `affectedEntityId` (matches via `@>` on
+        `affected_entities` JSONB array — `EntityReference.identifier`
+        field; GIN index). Order: `event_date_v2 DESC NULLS LAST,
+        fetched_at DESC`.
+        `rawPayload` IS in the response body per design (legal_counsel
+        needs SDN entry text for advisory drafting in CR-H); redacted
+        only at log layer (Pino) + audit_log.
+        DB function: `fn_osint_signal_list`.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, executive, compliance_esg]
+      x-requiredPermissions: [signal.read.all]
+      x-authMode: jwt
+      x-storyId: S11
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: kind, in: query, schema: { $ref: "#/components/schemas/SignalKind" } }
+        - { name: sourceId, in: query, description: "Matches osint_signal.source_id TEXT denorm column, NOT the BIGINT FK.", schema: { type: string } }
+        - { name: severityMin, in: query, description: "Inclusive minimum: informational(1) < low(2) < medium(3) < high(4) < critical(5).", schema: { $ref: "#/components/schemas/Severity" } }
+        - { name: since, in: query, description: "ISO 8601 UTC. Filters fetched_at >= since.", schema: { type: string, format: date-time } }
+        - { name: geographyIntersects, in: query, description: "ISO 3166-1 alpha-2 country code (e.g. 'AE'). Matches via @> on geographies JSONB array (GIN index).", schema: { type: string } }
+        - { name: affectedEntityId, in: query, description: "Matches via @> on affected_entities JSONB array (EntityReference.identifier field).", schema: { type: string } }
+      responses:
+        "200":
+          description: Paginated normalised signal list.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OsintSignalListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks signal.read.all (42501 → AC-S11-05). PERMISSION_DENIED with permission='signal.read.all'."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/source-health:
+    get:
+      tags: [M7 — Source Health]
+      operationId: sourceHealthList
+      summary: Source health monitor — list of all sources with health badge
+      description: |
+        Source health monitor — list of all source_health rows for the
+        current tenant joined with osint_source.display_name + kind.
+        Sort: failing > unauthorised > degraded > healthy, then
+        displayName.
+        Returns a **bare array** (no pagination envelope) per S2-12
+        documented design exception — bounded set per tenant; one row
+        per (tenant_id, osint_source_id), ~14 rows max in CR-A. If the
+        row count grows beyond ~50 in a future module, this can be
+        paged with a follow-up endpoint.
+        Audit trigger deliberately OFF on `source_health` table itself
+        (Q-NEW6 / OQ-6); the table's own `checked_at + state` columns
+        are its ledger.
+        DB function: `fn_source_health_list`.
+      x-authorisedRoles: [Super Admin, platform_admin, executive]
+      x-requiredPermissions: [source.read]
+      x-authMode: jwt
+      x-storyId: S8
+      x-rateLimit: authedReadRateLimiter
+      responses:
+        "200":
+          description: Bare array of source health rows.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/SourceHealthListItem" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks source.read (42501 → AC-S8-06)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }

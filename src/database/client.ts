@@ -190,6 +190,17 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
             const msg = m[3]?.trim() ?? 'Invalid value';
             return new ValidationError(msg, { [field]: msg });
           }
+          // M7 (CR-A) fn_osint_* raise 22023 with unstructured literal messages
+          // (no field prefix) for not-found / disabled / immutable cases. Route
+          // by message content to the right HTTP status — same literal-prefix
+          // pattern as the M1c "Counter underflow" P0001 routing block. See
+          // feedback_translatePgError_p0001_routing.md.
+          if (/not found/i.test(firstLine)) {
+            return new NotFoundError(firstLine);
+          }
+          if (/(is disabled|is immutable|already exists|cannot be (?:disabled|deleted|modified))/i.test(firstLine)) {
+            return new ConflictError(firstLine);
+          }
         }
         return new ValidationError(`${fnName}: invalid parameter value`);
       case 'P0001': // raise_exception — M2 state-transition / lockout / idempotency
@@ -397,6 +408,13 @@ export interface CallFunctionOptions {
    * Anonymous endpoints (login, refresh, health) pass undefined.
    */
   actorId?: number;
+  /**
+   * M7 — tenant UUID used to set `app.current_tenant_id` GUC for the M7
+   * fn_'s (osint_source / source_credential / osint_signal / source_health
+   * / tenant). Resolved by rls.middleware from the JWT `tenantId` claim or
+   * the ADNOC seed UUID fallback (Q-DA4). Pre-M7 fn_'s ignore this GUC.
+   */
+  tenantId?: string;
 }
 
 /**
@@ -457,6 +475,15 @@ export const callFunction = async <T = unknown>(
       // concatenation). third arg `is_local` = true matches `SET LOCAL`.
       await client.query("SELECT set_config('app.current_user_id', $1, true)", [
         String(opts.actorId),
+      ]);
+    }
+
+    // M7 — tenant context GUC. Required by every M7 fn_ (osint_source / signal
+    // / health / tenant); pre-M7 fn_'s don't read this GUC so passing it on
+    // legacy calls is harmless.
+    if (typeof opts.tenantId === 'string' && opts.tenantId.length > 0) {
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [
+        opts.tenantId,
       ]);
     }
 

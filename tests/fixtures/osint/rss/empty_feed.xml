@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Empty Test Feed</title>
+    <link>https://example.com/empty</link>
+    <description>RSS feed with no items.</description>
+  </channel>
+</rss>

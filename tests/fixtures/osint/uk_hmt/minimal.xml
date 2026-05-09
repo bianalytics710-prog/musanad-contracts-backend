@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList>
+  <sdnEntry>
+    <uid>UK-5001</uid>
+    <firstName>HMT Test</firstName>
+    <lastName>Designated Individual</lastName>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>RUS</program>
+    </programList>
+    <remarks>UK HMT consolidated sanctions fixture.</remarks>
+  </sdnEntry>
+</sdnList>

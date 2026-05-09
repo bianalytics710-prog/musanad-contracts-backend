@@ -1,0 +1,3 @@
+123456 abcd1234 http://data.gdeltproject.org/gdeltv2/20260509120000.export.CSV.zip
+234567 bcde2345 http://data.gdeltproject.org/gdeltv2/20260509120000.mentions.CSV.zip
+345678 cdef3456 http://data.gdeltproject.org/gdeltv2/20260509120000.gkg.csv.zip

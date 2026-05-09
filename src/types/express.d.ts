@@ -24,6 +24,13 @@ declare global {
        * is set even if downstream code does not populate `req.user`.
        */
       authUserId?: number;
+      /**
+       * M7 — tenant context derived from JWT `tenantId` claim (when present)
+       * or ADNOC seed UUID fallback (Q-DA4 single-tenant demo). Set by
+       * rls.middleware after JWT verification. Used by every M7 controller
+       * to inject `app.current_tenant_id` GUC via db.callFunction({ tenantId }).
+       */
+      tenantId?: string;
     }
   }
 }

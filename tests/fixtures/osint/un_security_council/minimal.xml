@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList>
+  <sdnEntry>
+    <uid>UN-1234</uid>
+    <firstName>UN-Listed</firstName>
+    <lastName>Entity</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>1267/1989</program>
+    </programList>
+    <remarks>UNSC consolidated list fixture — terrorism-related designation.</remarks>
+  </sdnEntry>
+</sdnList>

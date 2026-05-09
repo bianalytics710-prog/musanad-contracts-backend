@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Reuters Energy News</title>
+    <link>https://www.reuters.com/business/energy</link>
+    <description>Reuters energy news fixture.</description>
+    <item>
+      <title>Brent crude prices steady amid Middle East tensions</title>
+      <link>https://www.reuters.com/business/energy/brent-crude-2026-05-09</link>
+      <pubDate>Sat, 09 May 2026 09:00:00 GMT</pubDate>
+      <description>Oil prices held steady on Friday as traders weighed Middle East geopolitical risks.</description>
+      <guid>reuters-energy-2026-05-09-001</guid>
+    </item>
+    <item>
+      <title>OPEC+ said to be considering additional output cuts amid sanctions concerns</title>
+      <link>https://www.reuters.com/business/energy/opec-2026-05-09</link>
+      <pubDate>Sat, 09 May 2026 11:30:00 GMT</pubDate>
+      <description>Sources say OPEC+ ministers are considering further production curbs as sanctions enforcement tightens.</description>
+      <guid>reuters-energy-2026-05-09-002</guid>
+    </item>
+  </channel>
+</rss>

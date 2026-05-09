@@ -58,6 +58,15 @@ import {
   startAiInsightEvictionCron,
   stopAiInsightEvictionCron,
 } from './services/ai-insight-eviction.cron.service';
+// M7 — OSINT source-fetch + health workers (CR-A — S7 / S8)
+import {
+  startSourceFetchWorker,
+  stopSourceFetchWorker,
+} from './workers/source-fetch.worker';
+import {
+  startSourceHealthWorker,
+  stopSourceHealthWorker,
+} from './workers/source-health.worker';
 
 const app = express();
 
@@ -152,6 +161,12 @@ const server = app.listen(port, () => {
   // codebase). No-op in NODE_ENV=test. SYSTEM_ACTOR sentinel sets
   // app.current_user_id='0' before each fn_ai_insight_evict_expired call.
   startAiInsightEvictionCron();
+
+  // M7 / S7 + S8 — OSINT source-fetch + health workers. Both no-op in
+  // NODE_ENV=test AND require SOURCE_FETCH_WORKER_ENABLED / SOURCE_HEALTH_
+  // WORKER_ENABLED=true (default false in CR-A so dev boots stay quiet).
+  startSourceFetchWorker();
+  startSourceHealthWorker();
 });
 
 // --- Graceful shutdown ---
@@ -165,6 +180,9 @@ const shutdown = async (signal: string): Promise<void> => {
     stopSignatureExpirationCron();
     // M4 — stop AI insight eviction cron driver.
     stopAiInsightEvictionCron();
+    // M7 — stop OSINT source-fetch + source-health workers.
+    stopSourceFetchWorker();
+    stopSourceHealthWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

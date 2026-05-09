@@ -516,9 +516,24 @@ describe('fn_impact_signal_bulk_amend', () => {
     );
     expect(contractRows.length).toBe(2);
 
+    // M7 (CR-A) renamed impact_signal → osint_signal with tenant_id NOT NULL and
+    // signal_kind_subtype tagging for backward-compat. Insert directly into the
+    // new canonical table; impact_signal remains a SELECT-view for read paths.
     const signalRows = await adminQuery<{ id: number }>(
-      `INSERT INTO impact_signal (ext_id, category, source, severity, title_en, created_by, updated_by)
-       VALUES ($1, 'regulatory', 'Test', 'medium', 'R-LC9 Bulk Amend Signal', $2, $2)
+      `INSERT INTO osint_signal (
+         tenant_id, signal_kind_subtype, source_id, source_reliability,
+         fetched_at, kind, title, severity, severity_v2, confidence,
+         dedup_hash, raw_payload,
+         ext_id, category, source, title_en,
+         created_by, updated_by
+       )
+       VALUES (
+         '00000000-0000-0000-0000-000000000001', 'manual_curated', 'manual', 1.0,
+         now(), 'regulatory', 'R-LC9 Bulk Amend Signal', 'medium', 'medium', 1.0,
+         encode(sha256(($1)::bytea), 'hex'), '{}'::jsonb,
+         $1, 'regulatory', 'Test', 'R-LC9 Bulk Amend Signal',
+         $2, $2
+       )
        RETURNING id`,
       [`RLC9-BULK-${RUN_ID}`, ADMIN_ID],
     );

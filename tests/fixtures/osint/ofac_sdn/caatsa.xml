@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList>
+  <sdnEntry>
+    <uid>20002</uid>
+    <firstName>Sergei</firstName>
+    <lastName>Volkov</lastName>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+      <program>CAATSA - RUSSIA</program>
+    </programList>
+    <remarks>Sanctioned under CAATSA Section 231; secondary sanctions risk.</remarks>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>20003</uid>
+    <firstName>Crimean</firstName>
+    <lastName>Maritime Holdings</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>NSPM-25</program>
+    </programList>
+    <remarks>Vessel-tied entity; NSPM-25 designation.</remarks>
+  </sdnEntry>
+</sdnList>

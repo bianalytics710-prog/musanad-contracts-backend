@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdnList>
+  <sdnEntry>
+    <uid>EU-30001</uid>
+    <firstName>Demo</firstName>
+    <lastName>EU Sanctions Test Entity</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>RUSSIA</program>
+    </programList>
+    <remarks>EU Council Decision (CFSP) Russia regime fixture.</remarks>
+  </sdnEntry>
+</sdnList>

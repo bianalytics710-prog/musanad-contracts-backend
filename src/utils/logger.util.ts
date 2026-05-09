@@ -643,6 +643,55 @@ const SENSITIVE_PATHS: string[] = [
   'req.body.note_ar',
   '*.note_ar',
   '*.*.note_ar',
+
+  // -- M7 — credentialRef / credential_ref (KMS-style indirection;
+  //    AC-S3-04..06 invariant). The fn_source_credential_set request body
+  //    contains the literal env:VARNAME or vault:path string; never
+  //    returned in any response. Audit-log redacted by fn_audit_trigger
+  //    (migration 102 added 'credential_ref' to v_redact_fields). Pino
+  //    safety net here covers any controller that ever logs req.body.
+  'credentialRef',
+  'req.body.credentialRef',
+  'req.body.*.credentialRef',
+  'req.query.credentialRef',
+  'req.params.credentialRef',
+  '*.credentialRef',
+  '*.*.credentialRef',
+  'credential_ref',
+  'req.body.credential_ref',
+  'req.body.*.credential_ref',
+  'req.query.credential_ref',
+  'req.params.credential_ref',
+  '*.credential_ref',
+  '*.*.credential_ref',
+
+  // -- M7 — rawPayload / raw_payload (osint_signal verbatim source XML/CSV
+  //    payload — sanctions entries may contain personal names + addresses).
+  //    EXPOSED in /api/v1/signals API response per AC-S11; redacted only
+  //    at log + audit_log layer.
+  'rawPayload',
+  'req.body.rawPayload',
+  'req.body.*.rawPayload',
+  '*.rawPayload',
+  '*.*.rawPayload',
+  'raw_payload',
+  'req.body.raw_payload',
+  'req.body.*.raw_payload',
+  '*.raw_payload',
+  '*.*.raw_payload',
+
+  // -- M7 — lastErrorMessage / last_error_message (source_health upstream
+  //    error text — may include 401/403 stack traces with credential
+  //    fragments). Truncated to 500 chars by fn_source_health_record but
+  //    still redacted at log layer for defence-in-depth.
+  'lastErrorMessage',
+  'req.body.lastErrorMessage',
+  '*.lastErrorMessage',
+  '*.*.lastErrorMessage',
+  'last_error_message',
+  'req.body.last_error_message',
+  '*.last_error_message',
+  '*.*.last_error_message',
 ];
 
 const baseConfig = {

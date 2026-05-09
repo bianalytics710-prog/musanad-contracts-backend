@@ -1,0 +1,77 @@
+{
+  "module": "M7",
+  "moduleName": "OSINT Source Framework + Adapter Protocol (CR-A)",
+  "generatedAt": "2026-05-09T00:00:00Z",
+  "backend": {
+    "schemas": [
+      "src/schemas/admin-sources.schemas.ts",
+      "src/schemas/signals.schemas.ts"
+    ],
+    "controllers": [
+      "src/controllers/admin/sources.controller.ts",
+      "src/controllers/admin/source-health.controller.ts",
+      "src/controllers/signals.controller.ts"
+    ],
+    "routes": [
+      "src/routes/v1/admin-sources.routes.ts",
+      "src/routes/v1/signals.routes.ts",
+      "src/routes/v1/admin/source-health.routes.ts"
+    ],
+    "adapters": [
+      "src/adapters/source-adapter.ts",
+      "src/adapters/xml-sanctions-base.adapter.ts",
+      "src/adapters/ofac-sdn.adapter.ts",
+      "src/adapters/eu-consolidated.adapter.ts",
+      "src/adapters/un-security-council.adapter.ts",
+      "src/adapters/uk-hmt.adapter.ts",
+      "src/adapters/rss-aggregator.adapter.ts",
+      "src/adapters/commodity-crude.adapter.ts",
+      "src/adapters/gdelt-v2.adapter.ts",
+      "src/adapters/fx-usd-aed.adapter.ts"
+    ],
+    "workers": [
+      "src/workers/source-fetch.worker.ts",
+      "src/workers/source-health.worker.ts"
+    ],
+    "types": [
+      "src/types/osint.types.ts"
+    ],
+    "modified": [
+      "src/database/client.ts",
+      "src/middleware/rls.middleware.ts",
+      "src/types/express.d.ts",
+      "src/utils/logger.util.ts",
+      "src/routes/v1/index.ts",
+      "src/routes/v1/admin/index.ts",
+      "src/server.ts",
+      "package.json"
+    ]
+  },
+  "frontend": null,
+  "database": {
+    "migrations": [
+      "database/migrations/100_m7_permissions_seed.sql",
+      "database/migrations/101_m7_create_tenant.sql",
+      "database/migrations/102_m7_extend_audit_redact_list.sql",
+      "database/migrations/103_m7_create_osint_source_credential.sql",
+      "database/migrations/104_m7_rename_impact_signal_to_osint_signal.sql",
+      "database/migrations/105_m7_create_source_health.sql",
+      "database/migrations/106_m7_seed_adnoc_sources.sql",
+      "database/migrations/107_m7_osint_functions.sql"
+    ],
+    "functions": [
+      "fn_tenant_get_current",
+      "fn_osint_source_create",
+      "fn_osint_source_update",
+      "fn_osint_source_delete",
+      "fn_osint_source_list",
+      "fn_osint_source_get_by_id",
+      "fn_osint_source_test_pull",
+      "fn_source_credential_set",
+      "fn_osint_signal_upsert",
+      "fn_osint_signal_list",
+      "fn_source_health_record",
+      "fn_source_health_list"
+    ]
+  }
+}

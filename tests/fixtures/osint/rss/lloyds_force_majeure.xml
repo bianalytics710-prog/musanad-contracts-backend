@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Lloyd's List Maritime</title>
+    <link>https://lloydslist.com</link>
+    <description>Lloyd's List maritime news fixture.</description>
+    <item>
+      <title>Force majeure declared at Hormuz strait following accident</title>
+      <link>https://lloydslist.com/news/2026-05-09/hormuz-fm</link>
+      <pubDate>Sat, 09 May 2026 14:00:00 GMT</pubDate>
+      <description>Major shipping companies have declared force majeure on Hormuz routes after an incident overnight.</description>
+      <guid>lloyds-2026-05-09-001</guid>
+    </item>
+  </channel>
+</rss>

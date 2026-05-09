@@ -28,6 +28,8 @@ import {
   obligationsRouter,
 } from './m_parity.routes';
 import impactSignalsRouter from './impact-signals.routes';
+import adminSourcesRouter from './admin-sources.routes';
+import signalsRouter from './signals.routes';
 
 const v1Router = Router();
 
@@ -80,5 +82,17 @@ v1Router.use('/obligations', obligationsRouter);
 
 // R-LC7 — Impact Watch (multi-source intelligence).
 v1Router.use('/impact-signals', impactSignalsRouter);
+
+// M7 — OSINT Source Framework + Adapter Protocol (CR-A). 9 endpoints across
+// 3 namespaces:
+//   /api/v1/admin/sources/*        — 7 endpoints (registry CRUD + credential
+//                                     + test-pull); permission gates in fn_
+//   /api/v1/admin/source-health    — 1 endpoint (cron-driven health monitor)
+//                                     mounted via admin/index.ts
+//   /api/v1/signals                — 1 endpoint (paginated normalised signal
+//                                     feed; signal.read.all gate in fn_)
+// All JWT-authenticated; zero new PUBLIC fn_'s. Tenant GUC via rls.middleware.
+v1Router.use('/admin/sources', adminSourcesRouter);
+v1Router.use('/signals', signalsRouter);
 
 export default v1Router;
