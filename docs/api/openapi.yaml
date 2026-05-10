@@ -447,7 +447,25 @@ info:
       assumption + ship as designed for the demo** (single-tenant ADNOC
       → no leak risk; pilot remediation path documented in db-design.md
       §10).
-  version: 1.0.2
+
+    **M10 / CR-C** introduces 21 net-new endpoints across 7 admin namespaces —
+    `/api/v1/admin/audit/*` (audit chain verify), `/api/v1/admin/demo/*`
+    (demo data purge + classification summary), `/api/v1/admin/tenants/*`
+    (tenant list + detail), `/api/v1/admin/roles` + `/api/v1/admin/roles/:id`
+    (role CRUD + permission grant/revoke), `/api/v1/admin/notification-templates/*`
+    (template list/get/update/render), `/api/v1/admin/settings/*` (7-tab system
+    settings list + set), `/api/v1/admin/email-config` (SMTP read/update +
+    test-send), and `/api/v1/admin/branding/upload` (logo/favicon multipart
+    upload). Security highlights: audit chain integrity is enforced via
+    SHA-256 hash chain in fn_audit_log_record_v2 (Annex D.7.1); demo purge
+    requires a double-confirmation token ('PURGE_DEMO_DATA_<yyyy-mm-dd>')
+    AND Super Admin role; branding upload persists to Supabase Storage (M_parity
+    attachment pattern). 6 net-new permissions introduced (audit.verify,
+    email.config.manage, tenant.read, branding.manage,
+    notification.template.manage, demo.purge). Migrations 123..131 applied.
+    **Version bumped 1.0.2 → 1.0.3** — feature-additive; all prior routes
+    unchanged.
+  version: 1.0.3
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -12745,6 +12763,1156 @@ x-paths-root:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403":
           description: "Caller lacks `party.graph.manage` (42501)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ──────────────────────────────────────────────────────────
+  # M10 / CR-C — Audit Hardening + Multi-Tenancy + Admin Cockpit Foundation
+  # Migrations 123..131 | Generated 2026-05-10
+  # ──────────────────────────────────────────────────────────
+
+  /admin/audit/verify:
+    post:
+      summary: Walk and verify hash-chained audit_log integrity
+      description: >
+        Walks audit_log rows in id ASC order and verifies the SHA-256 hash chain
+        (fn_audit_chain_verify). Returns the first tamper-mismatch or
+        success=true. NFR < 30 s @ 100k rows. Rate-limited: 5/min/user.
+      operationId: adminAuditChainVerify
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: audit.verify
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                startSeq:
+                  type: integer
+                  nullable: true
+                  description: Inclusive lower bound on audit_log.id (optional).
+                endSeq:
+                  type: integer
+                  nullable: true
+                  description: Inclusive upper bound on audit_log.id. Must be >= startSeq.
+      responses:
+        "200":
+          description: Chain verified (or mismatch found).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      verified: { type: boolean }
+                      totalRows: { type: integer }
+                      brokenAtSeq: { type: integer, nullable: true }
+                      expectedHash: { type: string, nullable: true }
+                      actualHash: { type: string, nullable: true }
+                      checkedAt: { type: string, format: date-time }
+        "400":
+          description: startSeq > endSeq — `{ field: 'startSeq', message: 'invalid_range' }`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks audit.verify permission.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/demo/purge:
+    post:
+      summary: Delete all demo-classified rows across 38 content tables
+      description: >
+        Idempotent purge of every row WHERE data_classification = 'demo'.
+        Deletes children-first in dependency-safe order. Emits a sentinel
+        __demo_purge__ audit row (fn_demo_data_purge). Requires Super Admin role
+        AND demo.purge permission AND confirmToken = 'PURGE_DEMO_DATA_<yyyy-mm-dd>'
+        (unless dryRun = true). Rate-limited: 5/min/user.
+      operationId: adminDemoPurge
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin"]
+      x-required-permission: "demo.purge AND role.name = 'Super Admin'"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmToken]
+              properties:
+                confirmToken:
+                  type: string
+                  description: >
+                    'PURGE_DEMO_DATA_<YYYY-MM-DD>' where date is today's UTC date.
+                    Required when dryRun != true.
+                dryRun:
+                  type: boolean
+                  default: false
+                  description: When true, returns counts without deleting anything.
+      responses:
+        "200":
+          description: Purge completed (or dry-run result).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      success: { type: boolean }
+                      tablesPurged: { type: array, items: { type: string } }
+                      rowsDeleted: { type: integer }
+                      details: { type: object, description: Per-table counts. }
+                      dryRun: { type: boolean }
+        "400":
+          description: Missing or mismatched confirmToken (dryRun=false).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller is not Super Admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500":
+          description: FK violation — demo row referenced by non-demo row.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/demo/data-classification-summary:
+    get:
+      summary: Per-table per-classification record counts
+      description: >
+        Returns demo/pilot/production counts for every content table (38 tables).
+        Powers the /app/admin/demo/purge summary card (fn_data_classification_summary).
+      operationId: adminDataClassificationSummary
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: "audit.verify OR demo.purge OR Super Admin role"
+      responses:
+        "200":
+          description: Classification summary.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      tables:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            tableName: { type: string }
+                            demo: { type: integer }
+                            pilot: { type: integer }
+                            production: { type: integer }
+                            total: { type: integer }
+                      totals:
+                        type: object
+                        properties:
+                          demo: { type: integer }
+                          pilot: { type: integer }
+                          production: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks required permission.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/tenants:
+    get:
+      summary: Paginated list of tenants
+      description: >
+        Paginated list of tenants. Returns the seeded ADNOC row in v1 (fn_tenant_list).
+        Search matches name OR slug case-insensitively.
+      operationId: adminTenantList
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: tenant.read
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: search
+          in: query
+          schema: { type: string }
+          description: Case-insensitive partial match on name OR slug.
+      responses:
+        "200":
+          description: Tenant list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: string, format: uuid }
+                            name: { type: string }
+                            slug: { type: string }
+                            industry: { type: string, nullable: true }
+                            riskAppetite: { type: string, enum: [low, standard, high] }
+                            dataRegion: { type: string, nullable: true }
+                            configPack: { type: string }
+                            isActive: { type: boolean }
+                            createdAt: { type: string, format: date-time }
+                      pagination: { $ref: "#/components/schemas/PaginationMeta" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks tenant.read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/tenants/{id}:
+    get:
+      summary: Single tenant detail
+      description: Returns full tenant record by UUID (fn_tenant_get_by_id).
+      operationId: adminTenantGetById
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: tenant.read
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Tenant detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, format: uuid }
+                      name: { type: string }
+                      slug: { type: string }
+                      displayName: { type: string }
+                      industry: { type: string, nullable: true }
+                      riskAppetite: { type: string, enum: [low, standard, high] }
+                      dataRegion: { type: string, nullable: true }
+                      configPack: { type: string }
+                      isActive: { type: boolean }
+                      createdAt: { type: string, format: date-time }
+                      updatedAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks tenant.read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'tenant_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/roles:
+    post:
+      summary: Create a new application role
+      description: >
+        Creates a role. name must be unique; built-in names are protected
+        (fn_role_create). UNIQUE constraint on role.name → 409 on collision.
+      operationId: adminRoleCreate
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: role.manage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, description: Required, unique, non-empty after trim. }
+                description: { type: string, nullable: true }
+      responses:
+        "201":
+          description: Role created.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      name: { type: string }
+        "400":
+          description: "`{ field: 'name', message: 'name_required' }` on blank name."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks role.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: "`{ field: 'name', message: 'role_name_already_exists' }` on UNIQUE collision."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/roles/{id}:
+    patch:
+      summary: Rename or update description of a role
+      description: >
+        Updates role name/description (fn_role_update). Built-in role names
+        ('Super Admin', 'Admin', 'User', 'platform_admin', 'executive',
+        'legal_counsel', 'contract_drafter', 'contract_approver') cannot be renamed.
+      operationId: adminRoleUpdate
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: role.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Role updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      name: { type: string }
+                      description: { type: string, nullable: true }
+                      isActive: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks role.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'role_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Name collision on UNIQUE constraint.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: "`{ message: 'cannot_rename_system_role' }` on built-in role."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    delete:
+      summary: Soft-delete a role
+      description: >
+        Sets role.is_active = FALSE (fn_role_delete). Blocks if any active user
+        is assigned this role, or if it is a built-in role.
+      operationId: adminRoleDelete
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: role.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Role soft-deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      isActive: { type: boolean, enum: [false] }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks role.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'role_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: >
+            `{ message: 'cannot_delete_system_role' }` on built-in OR
+            `{ message: 'role_in_use', detail: { userCount: N } }` when active users assigned.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/roles/{id}/permissions/{permId}/grant:
+    post:
+      summary: Grant a permission to a role
+      description: >
+        Idempotent grant (re-grant returns alreadyExists=true). Strict allowlist —
+        unknown permId returns 404 (fn_role_permission_grant, OPEN-DECISION-F).
+      operationId: adminRolePermissionGrant
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: role.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+          description: Role id.
+        - name: permId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: Permission id (allowlisted against permission table).
+      responses:
+        "200":
+          description: Permission granted (or already existed).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      granted: { type: boolean }
+                      alreadyExists: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks role.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'role_not_found' }` OR `{ message: 'permission_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/roles/{id}/permissions/{permId}/revoke:
+    delete:
+      summary: Revoke a permission from a role
+      description: >
+        Idempotent revoke. Super Admin essential grants (8 hard-coded permission codes)
+        reject with 422 (fn_role_permission_revoke).
+      operationId: adminRolePermissionRevoke
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: role.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: permId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Permission revoked (or was not granted).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      revoked: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks role.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'role_not_found' }` OR `{ message: 'permission_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "422":
+          description: "`{ message: 'cannot_revoke_system_grant' }` — Super Admin essential grant."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/notification-templates:
+    get:
+      summary: Paginated list of notification templates
+      description: >
+        Lists notification templates for the current tenant with optional channel
+        filter and ILIKE search (fn_notification_template_list).
+      operationId: adminNotificationTemplateList
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: notification.template.manage
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: channel
+          in: query
+          schema: { type: string, enum: [email, in_app, teams_capture, slack_capture] }
+        - name: search
+          in: query
+          schema: { type: string }
+          description: Case-insensitive partial match on templateId / subjectEn / subjectAr.
+      responses:
+        "200":
+          description: Template list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            templateId: { type: string }
+                            channel: { type: string }
+                            subjectEn: { type: string, nullable: true }
+                            subjectAr: { type: string, nullable: true }
+                            isActive: { type: boolean }
+                            updatedAt: { type: string, format: date-time }
+                      pagination: { $ref: "#/components/schemas/PaginationMeta" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks notification.template.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/notification-templates/{id}:
+    get:
+      summary: Full notification template detail
+      description: Returns template with subject, body EN+AR, parameter_schema (fn_notification_template_get_by_id). Tenant-scoped.
+      operationId: adminNotificationTemplateGetById
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: notification.template.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Template detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      templateId: { type: string }
+                      channel: { type: string }
+                      subjectEn: { type: string, nullable: true }
+                      subjectAr: { type: string, nullable: true }
+                      bodyEn: { type: string }
+                      bodyAr: { type: string }
+                      parameterSchema: { type: object }
+                      isActive: { type: boolean }
+                      createdAt: { type: string, format: date-time }
+                      updatedAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks notification.template.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'template_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      summary: Update editable notification template fields
+      description: >
+        Updates subjectEn, subjectAr, bodyEn, bodyAr, parameterSchema
+        (fn_notification_template_update). templateId + channel are IMMUTABLE
+        after create — Zod rejects with 400 immutable_field if forwarded.
+      operationId: adminNotificationTemplateUpdate
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: notification.template.manage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subjectEn: { type: string, nullable: true }
+                subjectAr: { type: string, nullable: true }
+                bodyEn: { type: string, description: Non-empty if updated. }
+                bodyAr: { type: string, description: Non-empty if updated. }
+                parameterSchema:
+                  type: object
+                  description: "Must be a JSON object (not array/scalar). Keys = placeholder names, values = types."
+      responses:
+        "200":
+          description: Updated template.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    description: Full NotificationTemplate record.
+        "400":
+          description: >
+            `body_en_required` / `body_ar_required` / `parameter_schema_must_be_object`
+            / `immutable_field` (templateId or channel).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks notification.template.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'template_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/notification-templates/render:
+    post:
+      summary: Render a template with locale + parameter substitution
+      description: >
+        Substitutes {{paramName}} placeholders (HTML-escaped) and returns rendered
+        subject + body + missingParameters[] + extraParameters[]. Used by the BE
+        notification dispatcher and exposed for FE template preview
+        (fn_notification_template_render).
+      operationId: adminNotificationTemplateRender
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "__system__"]
+      x-required-permission: "notification.template.manage OR system actor"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [templateId, channel, locale, parameters]
+              properties:
+                templateId: { type: string, description: "e.g. signature.invitation.email" }
+                channel:
+                  type: string
+                  enum: [email, in_app, teams_capture, slack_capture]
+                locale:
+                  type: string
+                  enum: [en, ar]
+                parameters:
+                  type: object
+                  description: Substituted into {{paramName}} placeholders. HTML-escaped.
+      responses:
+        "200":
+          description: Rendered template.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      subject: { type: string, nullable: true }
+                      body: { type: string }
+                      missingParameters: { type: array, items: { type: string } }
+                      extraParameters: { type: array, items: { type: string } }
+        "400":
+          description: "`{ field: 'locale', message: 'invalid_locale' }` — must be 'en' or 'ar'."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks notification.template.manage and is not a system actor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'template_not_found' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/settings:
+    get:
+      summary: List system settings (all or by category)
+      description: >
+        Lists system_setting rows. is_secret values returned as '***REDACTED***'.
+        Optional category filter for one of 7 tabs (fn_system_setting_list).
+      operationId: adminSystemSettingList
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: settings.read
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [general, uae_pass, branding, security, email, calendar, audit_retention]
+          description: Filter to one of 7 setting categories.
+      responses:
+        "200":
+          description: Settings list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            key: { type: string }
+                            value: { description: "JSONB value; is_secret rows return '***REDACTED***'" }
+                            category: { type: string }
+                            isSecret: { type: boolean }
+                            description: { type: string, nullable: true }
+                            updatedAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks settings.read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/settings/{key}:
+    patch:
+      summary: Update a single system setting by dot-notation key
+      description: >
+        Updates one system_setting row. Per-key value-shape validators enforce
+        type correctness (port range, hex color, weekday, HH:MM, email, integer
+        ranges, boolean). is_secret response values are redacted
+        (fn_system_setting_set).
+      operationId: adminSystemSettingSet
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: settings.write
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+          description: "Dot-notation key (e.g. email.smtp.port, branding.color_primary)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  description: JSONB value; shape varies per key.
+                description: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Updated setting (is_secret values redacted).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      key: { type: string }
+                      value: { description: "Post-update JSONB value; is_secret rows return '***REDACTED***'" }
+                      category: { type: string }
+                      isSecret: { type: boolean }
+        "400":
+          description: "`{ field: 'value', message: 'invalid_setting_value', detail: '<reason>' }` on shape failure."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks settings.write.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "`{ message: 'setting_not_found' }` on unknown key."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/email-config:
+    get:
+      summary: Read SMTP server configuration block
+      description: >
+        Returns email.* system settings composed as SmtpConfig. authPassRef is
+        never returned — authPassRefSet boolean indicates whether a value is
+        configured (fn_system_setting_list filtered by category='email').
+      operationId: adminEmailConfigGet
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: email.config.manage
+      responses:
+        "200":
+          description: SMTP config (authPassRef replaced by authPassRefSet boolean).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    description: SmtpConfig shape.
+                    properties:
+                      smtpHost: { type: string, nullable: true }
+                      smtpPort: { type: integer, nullable: true }
+                      smtpEncryption: { type: string, nullable: true }
+                      authUser: { type: string, nullable: true }
+                      authPassRefSet: { type: boolean }
+                      fromAddress: { type: string, nullable: true }
+                      fromNameEn: { type: string, nullable: true }
+                      fromNameAr: { type: string, nullable: true }
+                      replyTo: { type: string, nullable: true }
+                      dailySendLimit: { type: integer, nullable: true }
+                      enabled: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks email.config.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+    patch:
+      summary: Bulk-update email SMTP configuration keys
+      description: >
+        Updates any subset of email.* system_setting keys in a transactional batch.
+        authPassRef is write-only — when omitted, existing value is retained.
+        Returns post-update SmtpConfig with authPassRefSet recomputed
+        (fn_system_setting_set per supplied key).
+      operationId: adminEmailConfigPatch
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: "email.config.manage AND settings.write"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                smtpHost: { type: string }
+                smtpPort: { type: integer, description: "1..65535" }
+                smtpEncryption: { type: string, enum: [none, starttls, tls] }
+                authUser: { type: string }
+                authPassRef: { type: string, description: Write-only. Empty string clears. }
+                fromAddress: { type: string, format: email }
+                fromNameEn: { type: string }
+                fromNameAr: { type: string }
+                replyTo: { type: string, format: email }
+                dailySendLimit: { type: integer, description: "1..1_000_000" }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Post-update SmtpConfig.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    description: SmtpConfig (same shape as GET).
+        "400":
+          description: Per-key shape failure.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks email.config.manage or settings.write.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/email-config/test-send:
+    post:
+      summary: Send a test email using the saved SMTP config
+      description: >
+        Sends a test email via NodemailerMailer using the current email.* settings.
+        Default recipient is the calling admin's email; optional override. Returns
+        deliveryMs on success. Not a fn_ call — pure BE mailer invocation.
+      operationId: adminEmailConfigTestSend
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin]
+      x-required-permission: email.config.manage
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                recipient:
+                  type: string
+                  format: email
+                  description: Optional override; when omitted, sends to caller's email.
+      responses:
+        "200":
+          description: Test email delivered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      delivered: { type: boolean }
+                      recipient: { type: string, format: email }
+                      deliveryMs: { type: integer }
+        "400":
+          description: "`{ field: 'recipient', message: 'invalid_email' }`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks email.config.manage.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: "`{ message: 'email_disabled' }` when email.enabled = false."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "504":
+          description: "`{ message: 'smtp_timeout' }` on SMTP round-trip > 5 s."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/branding/upload:
+    post:
+      summary: Upload logo or favicon to Supabase Storage
+      description: >
+        Multipart upload of PNG or SVG (≤ 2 MB) to Supabase Storage at
+        branding/<tenant_id>/<filename>. Persists the resulting URI to
+        branding.logo_uri or branding.favicon_uri via fn_system_setting_set.
+      operationId: adminBrandingUpload
+      tags: ["M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-required-permission: branding.manage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [kind, file]
+              properties:
+                kind:
+                  type: string
+                  enum: [logo, favicon]
+                file:
+                  type: string
+                  format: binary
+                  description: PNG or SVG, ≤ 2 MB.
+      responses:
+        "200":
+          description: Upload successful; URI persisted to system settings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      kind: { type: string, enum: [logo, favicon] }
+                      uri: { type: string, format: uri }
+                      storagePath: { type: string }
+        "400":
+          description: "`{ field: 'logo'|'favicon', message: 'invalid_file_type_or_size' }` — file not PNG/SVG or > 2 MB."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks branding.manage.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }

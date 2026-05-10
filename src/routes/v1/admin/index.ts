@@ -13,6 +13,14 @@ import settingsRouter from './settings.routes';
 import auditRouter from './audit.routes';
 import sourceHealthRouter from './source-health.routes';
 import partiesSanctionsMatchRouter from './parties-sanctions-match.routes';
+// CR-C M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit Foundation.
+import auditChainRouter from './audit-chain.routes';
+import demoRouter from './demo.routes';
+import tenantsRouter from './tenants.routes';
+import rolesMgmtRouter from './roles-mgmt.routes';
+import notificationTemplatesRouter from './notification-templates.routes';
+import emailConfigRouter from './email-config.routes';
+import brandingRouter from './branding.routes';
 
 const router = Router();
 
@@ -42,5 +50,33 @@ router.use('/source-health', sourceHealthRouter);
 // expansion. Gated by party.graph.manage (admin-narrowed). Returns matches
 // only — does NOT update party.sanctions_status (HITL Q-DA4).
 router.use('/parties/sanctions-match', partiesSanctionsMatchRouter);
+
+// ============================================================
+// CR-C M10 — Audit Hardening + Multi-Tenancy + Admin Cockpit Foundation
+// ============================================================
+
+// S3 — POST /admin/audit/verify (mounted alongside the R-PA5 /admin/audit
+// router; sub-paths are disjoint so the two routers cohabit cleanly).
+router.use('/audit', auditChainRouter);
+
+// S6 — demo data purge + S7 data classification summary.
+router.use('/demo', demoRouter);
+
+// S8 — multi-tenancy list / get-by-id (read-only in v1; ADNOC seed only).
+router.use('/tenants', tenantsRouter);
+
+// S15 + S16 — Roles & Permissions Editor (write surface). Existing
+// /api/v1/roles handles read paths; this admin-mounted router covers the
+// write path introduced by CR-C.
+router.use('/roles', rolesMgmtRouter);
+
+// S12 + S13 — bilingual notification template CRUD + render.
+router.use('/notification-templates', notificationTemplatesRouter);
+
+// S14 — email server config (composed read + multi-key patch + test-send).
+router.use('/email-config', emailConfigRouter);
+
+// S11 — branding asset upload + color / footer edit.
+router.use('/branding', brandingRouter);
 
 export default router;

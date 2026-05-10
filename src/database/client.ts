@@ -375,11 +375,21 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
       case 'P0002': // no_data_found — entity lookup miss inside fn_
         {
           const firstLine = message.split('\n')[0]?.trim() ?? message;
+          // Three-token form: 'fn_X: field: message' — field + message both present.
           const m = STRUCTURED_RAISE_RE.exec(firstLine);
           if (m) {
             const field = m[2] ?? 'id';
             const msg = m[3]?.trim() ?? 'Not found';
             return new NotFoundError(msg, { [field]: msg });
+          }
+          // Two-token form: 'fn_X: tag' — e.g. 'fn_role_permission_grant: permission_not_found'.
+          // The STRUCTURED_RAISE_RE requires three tokens; handle the two-token variant here
+          // so semantic tags (permission_not_found, role_not_found, etc.) surface in the response
+          // rather than being swallowed by the generic 'Resource not found' fallback.
+          const twoToken = /^(fn_[a-z0-9_]+):\s*([a-zA-Z][a-zA-Z0-9_]*)$/.exec(firstLine);
+          if (twoToken) {
+            const tag = twoToken[2]?.trim() ?? 'not_found';
+            return new NotFoundError(tag);
           }
         }
         return new NotFoundError('Resource not found');

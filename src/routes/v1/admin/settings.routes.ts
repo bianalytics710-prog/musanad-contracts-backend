@@ -30,8 +30,13 @@ const keyParamSchema = z.object({
     .string()
     .trim()
     .min(1)
-    .max(80)
-    .regex(/^[a-zA-Z][a-zA-Z0-9]*$/u, 'key must be camelCase identifier'),
+    .max(120)
+    // Allow dot-notation keys (email.smtp.host, branding.color_primary) AND
+    // legacy camelCase keys (brandingLogoUrl). Both schemes coexist per 097/126.
+    .regex(
+      /^[a-zA-Z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)*$/u,
+      'key must be a camelCase or dot-notation identifier (e.g. email.smtp.host)',
+    ),
 });
 
 const setBodySchema = z

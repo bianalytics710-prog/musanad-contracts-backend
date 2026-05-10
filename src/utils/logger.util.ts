@@ -717,6 +717,31 @@ const SENSITIVE_PATHS: string[] = [
   'req.params.metadata',
   '*.metadata',
   '*.*.metadata',
+
+  // -- CR-C M10 — email server SMTP secret (S14) --
+  //    auth_pass_ref / authPassRef (system_setting key + EmailConfigPatchDto
+  //    write-only field). is_secret=true at the DB layer; redacted here as
+  //    defence-in-depth across every controller log path.
+  'authPassRef',
+  'req.body.authPassRef',
+  'req.body.*.authPassRef',
+  '*.authPassRef',
+  '*.*.authPassRef',
+  'auth_pass_ref',
+  'req.body.auth_pass_ref',
+  'req.body.*.auth_pass_ref',
+  '*.auth_pass_ref',
+  '*.*.auth_pass_ref',
+  // smtpPass + smtp_pass alias — historical name; not in the contract but
+  // covered defensively in case a future caller forwards the legacy field.
+  'smtpPass',
+  'req.body.smtpPass',
+  '*.smtpPass',
+  '*.*.smtpPass',
+  'smtp_pass',
+  'req.body.smtp_pass',
+  '*.smtp_pass',
+  '*.*.smtp_pass',
 ];
 
 const baseConfig = {

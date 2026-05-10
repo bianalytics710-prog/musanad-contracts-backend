@@ -31,15 +31,26 @@ interface SystemSettingSetResponse {
 export const adminSettingsController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
+    // Optional category filter — when present, delegates to the
+    // fn_system_setting_list(TEXT) overload (migration 130 §13b).
+    const category =
+      typeof req.query['category'] === 'string' ? req.query['category'] : undefined;
+
     req.logger.info(
-      { action: 'admin.settings.list', userId: req.user?.id, method: req.method, path: req.path },
+      {
+        action: 'admin.settings.list',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+        category: category ?? 'all',
+      },
       'Controller entry',
     );
 
     try {
       const result = await db.callFunction<SystemSettingListResponse>(
         'fn_system_setting_list',
-        [],
+        category !== undefined ? [category] : [],
         { actorId: req.user!.id },
       );
 
@@ -50,6 +61,7 @@ export const adminSettingsController = {
           count: result?.settings?.length ?? 0,
           duration: Date.now() - startTime,
           statusCode: 200,
+          category: category ?? 'all',
         },
         'Controller exit',
       );
