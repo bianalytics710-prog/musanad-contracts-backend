@@ -326,7 +326,128 @@ info:
     - **Q-DA6** — `osint_signal.metadata` JSONB column: ADD (Implementation A);
       M7 RESTRICTIVE deny-direct-update policy extended with permission-gated
       USING clause for `internal_signal.resolve`.
-  version: 1.0.1
+
+    **M9 (CR-B — Counterparty Graph)** — extends the existing M_parity 058 +
+    R-LC 070/075 party surface with a directed-typed ownership graph,
+    chain traversal, and sanctions-match foundation for the OFAC chain
+    hero scenario. **8 net-new endpoints** under two namespaces — 7 on the
+    existing `/api/v1/parties/*` path (relationship CRUD + chain traverse +
+    chain-summary + party PATCH for the editable subset), and 1 admin
+    endpoint at `POST /api/v1/admin/parties/sanctions-match`. **2 existing
+    endpoints widen** their response (`GET /api/v1/parties/:id` adds 11
+    fields; `GET /api/v1/parties` adds 6 badge fields per list item) — the
+    URL signatures and Zod schemas are unchanged; only the projection grows
+    (`fn_party_get_by_id` / `fn_party_list` rewritten in migration 120 with
+    additive widening). **All 8 new endpoints JWT-authed**; **zero new PUBLIC
+    EXECUTE grants** (S2-21 sustained at the M3 baseline of 5 names —
+    **tenth consecutive clean module**). **1 new table**
+    (`party_relationship` — BIGSERIAL id, tenant UUID FK, parent_id +
+    child_id BIGINT FKs to `party.id`, `relationship_type` CHECK enum-of-6
+    (`parent` / `ubo` / `subsidiary` / `sub_contractor` / `jv` /
+    `controlling_shareholder`), optional `ownership_pct` 0..100,
+    optional `effective_from` / `effective_to` window with
+    `effectiveTo >= effectiveFrom` DB CHECK, `source` CHECK enum-of-4
+    (`dnb` / `sayari` / `manual` / `demo_seed`), confidence 0..1, JSONB
+    metadata, audit cols + soft-delete; UNIQUE (tenant_id, parent_id,
+    child_id, relationship_type) idempotency key; FORCE RLS + 2 SELECT/MODIFY
+    policies + 1 RESTRICTIVE deny-direct-DELETE; audit trigger). **1 extended
+    table** — `party` gains 11 columns per Q-DA1=1a (parent_id, ubo_id self-FKs,
+    sanctions_status (CHECK enum-of-4), sanctions_last_checked,
+    sanctions_match_signal_id FK → osint_signal, esg_score CHECK 0..100,
+    icv_status (CHECK enum-of-5), icv_pct 0..100, icv_last_checked,
+    aliases JSONB array of strings, metadata JSONB), **6 new indexes**
+    (FK btrees + GIN trigram on `name_en` for fuzzy matching + GIN on
+    `aliases` for alias hits + the 2 `party_no_self_parent` /
+    `party_no_self_ubo` CHECK constraints). **9 net-new fn_'s** —
+    `fn_party_relationship_create / _update / _delete / _list`,
+    `fn_party_chain_traverse_up / _down` (recursive CTE with **silent
+    cap + `chainTruncated` metadata flag** per Q-DA3=3a; cycle handled
+    via path-uniqueness; UNION of edge-table + party self-FK shortcut),
+    `fn_party_chain_summary` (single round-trip ancestorsByDepth +
+    descendantsByDepth pre-pivot for the FE OwnershipChainTab; emits all
+    6 relationshipType counts even when 0 — AC-S8-03 invariant — and a
+    single OR-merged `chainTruncated` flag — AC-S8-04),
+    `fn_party_sanctions_match` (return-only per Q-DA4=4a — does **NOT**
+    write `party.sanctions_status`; pg_trgm fuzzy match against
+    `party.name_en` + `party.aliases`; threshold resolution
+    per-call-param → `app.party_sanctions_match_threshold` GUC override
+    → `0.7` default per Q-DA2=2a; chain expansion via traverse_up/_down
+    per direct match), and `fn_party_update` (Q-DA6=6a editable-subset
+    path; `fn_party_create` from R-LC 073 stays UNTOUCHED; **silent-ignore
+    on `sanctions_*` payload fields** per AC-S9-05 / Q-DA4 — they are not
+    parameters of the fn signature; defence-in-depth in the Zod schema
+    AND the fn body). **3 CREATE OR REPLACE EXTEND fn_'s** —
+    `fn_audit_trigger` (redact list extended 30 → 32 names; added
+    `aliases`, `metadata`), `fn_party_get_by_id` (projection extended
+    +11 fields), `fn_party_list` (projection extended +6 badge fields —
+    parentId, aliases, sanctionsStatus, sanctionsLastChecked, icvStatus,
+    icvPct). **2 new permissions** — `party.graph.read` (broad —
+    Super Admin + platform_admin + legal_counsel + contract_drafter +
+    contract_approver + executive; conditional WHERE-EXISTS no-op for the
+    deferred `compliance_esg` role) and `party.graph.manage` (Super Admin
+    + platform_admin + legal_counsel). **9 unconditional role grants**
+    + **1 WHERE-EXISTS no-op** for the deferred CR-G role.
+    **9 migrations applied** (114..122; 122 was a Smoke-caught dedup patch
+    on `fn_party_chain_traverse_up` + `_down` — convergent paths produced
+    duplicate `(party_id, depth, via)` tuples; resolved via
+    `DISTINCT ON (party_id, depth, via)` representative-row dedup CTE +
+    standard REVOKE/GRANT trio re-applied per
+    `feedback_fn_rewrites_lose_safety_guards.md`). **ADNOC seed pack** —
+    5 hero counterparty chains (OFAC sanctioned UBO chain Synthetic
+    Holdings Cyprus Ltd → Mid-East Energy Trading FZE → Schlumberger
+    Limited; Halliburton hierarchy; Saudi-Aramco-MoU JV web; PetroChina
+    LNG joint venture; Sumatra Field Equipment Singapore subcontractor
+    cascade). **23 party_relationship rows** + **35 scaffold parties** +
+    alias backfills on the top 10 ADNOC parties (ADNOC alias
+    "Abu Dhabi National Oil Company"; "ADNOC Dist."; etc.). **27 DB
+    integration + 22 BE integration + 5 FE Playwright E2E tests** —
+    2 E2E PASS, 3 E2E flagged-for-human due to the carry-forward FE
+    Zustand-persist auth-hydration race that also affects M7+M8 specs
+    (FE-E1; functional coverage NOT gapped — covered by API-layer surrogates
+    + manual smoke walks on /app/parties/31). **Cross-module regression:
+    1073/1073 BE PASS** (vs M8 baseline 1024 — +49 net-new tests, **zero
+    regressions**). **2 defects caught + resolved during the pipeline**
+    — DEFECT-1 (HIGH) BE service `party-graph.service.ts` passed JS string
+    array to `db.callFunction` which inferred Postgres TEXT[] not JSONB
+    (fn_party_update.p_aliases expects JSONB) → fix: pre-stringify aliases
+    at the service-layer call site; DEFECT-2 (LOW) chain-summary surfaced
+    duplicate `(party_id, depth, via)` tuples on convergent paths →
+    fix: migration 122 dedup CTE. **Codex Review SKIPPED** per Dexian
+    decision 2026-05-04 (**tenth consecutive validated** — pattern fully
+    entrenched). **Version bumped 1.0.1 → 1.0.2** — minor feature
+    follow-up in the CRIP enhancement layer; additive widening on existing
+    party endpoints + 8 net-new endpoints.
+
+    **Key Design Decisions locked at HITL Gate 2 (M9 — 7 decisions; all
+    auto-applied per autonomous-mode brief recommendations):**
+
+    - **Q-DA1** — party table extension scope: **1a — extend party with all
+      11 columns** (PartyDetail superset; sidecar table rejected for
+      JOIN-cost vs benefit on 11 mostly-NULL fields).
+    - **Q-DA2** — pg_trgm fuzzy-match threshold tunability: **2a — 0.7
+      default + `app.party_sanctions_match_threshold` GUC override +
+      per-call parameter override** (matches M7 GUC tuning pattern).
+    - **Q-DA3** — recursive-CTE cycle handling: **3a — silent cap with
+      `chainTruncated` metadata flag** + `depthReached` field; no
+      RAISE NOTICE / EXCEPTION (UBO chains commonly have circularity in
+      real-world data; fail-soft is the right default).
+    - **Q-DA4** — sanctions match write semantics: **4a — return-only**;
+      `fn_party_sanctions_match` does NOT write `party.sanctions_status`;
+      `fn_party_update` does NOT accept `sanctions_*` parameters
+      (defence-in-depth — CR-E rule engine writes status via separate
+      DEFINER carve-out, out of M9 scope).
+    - **Q-DA5** — relationship_type extensibility: **5a — closed CHECK
+      constraint with 6 values**; pilot adds via M1b 010 dynamic-rename
+      pattern when needed (`COMMENT ON COLUMN` documents upgrade path).
+    - **Q-DA6** — fn_party_create vs new fn_party_update: **6a — leave
+      `fn_party_create` UNTOUCHED**; `fn_party_update` is the only path
+      for editable subset (parent_id, ubo_id, aliases, esg_score, icv_*).
+    - **Q-DA7** — tenant-scope asymmetry between party_relationship
+      (tenant-scoped) and party (single-tenant): **7a — document the
+      assumption + ship as designed for the demo** (single-tenant ADNOC
+      → no leak risk; pilot remediation path documented in db-design.md
+      §10).
+  version: 1.0.2
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -769,6 +890,57 @@ tags:
       `fn_internal_signal_ingest` for required-field enforcement, plus
       EN+AR display names and `defaultSeverity` reusing the M7 osint_signal
       severity vocabulary (`informational/low/medium/high/critical`).
+  - name: M9 — Counterparty Graph (Parties)
+    description: |
+      Counterparty graph endpoints (M9 — CR-B). 7 endpoints under
+      `/api/v1/parties/*`: relationship CRUD (POST + PATCH + DELETE + GET
+      list), chain traversal (`GET /:id/chain` discriminated-union response
+      across `direction=up | down | both`), single-roundtrip pre-pivoted
+      chain summary (`GET /:id/chain-summary` — primary backend for the FE
+      `OwnershipChainTab`), and the editable-subset PATCH on the party
+      (`PATCH /:id` — `fn_party_update` is the only write path for the
+      11 new CR-B columns; `fn_party_create` from R-LC 073 stays UNTOUCHED
+      per Q-DA6=6a).
+      All JWT-authed. `party.graph.read` (read fns) is granted broadly —
+      Super Admin + platform_admin + legal_counsel + contract_drafter +
+      contract_approver + executive (conditional WHERE-EXISTS no-op for
+      `compliance_esg`). `party.graph.manage` (write fns) is restricted to
+      Super Admin + platform_admin + legal_counsel.
+      Tenant-scoping: `party_relationship` is tenant-scoped via FORCE RLS
+      with `current_setting('app.current_tenant_id')::uuid` matching;
+      `party` self-FK shortcuts (`parent_id` / `ubo_id`) are
+      single-tenant-only in v1 per Q-DA7=7a (documented assumption — see
+      db-design.md §10 + the recursive-CTE SOURCE B comments). The chain
+      recursive CTE handles cycles via path-uniqueness; depth-limit hits
+      emit `chainTruncated=true` + `depthReached` (Q-DA3=3a silent cap).
+      The 2 existing M_parity endpoints (`GET /api/v1/parties` +
+      `GET /api/v1/parties/:id`) widen their response projections additively
+      via the M9 migration 120 `CREATE OR REPLACE` rewrite of
+      `fn_party_list` and `fn_party_get_by_id` — the URL signatures and
+      Zod schemas are unchanged; only the response shape grows. Existing
+      callers receive a structurally-compatible superset.
+
+  - name: M9 — Admin Sanctions Match
+    description: |
+      Admin/system test endpoint for fuzzy entity match (M9 — CR-B — S7).
+      Single endpoint `POST /api/v1/admin/parties/sanctions-match`. JWT-authed;
+      controller-narrowed via `authorise(['party.graph.manage'])` to
+      Super Admin + platform_admin + legal_counsel.
+      `fn_party_sanctions_match` is **return-only** (Q-DA4=4a) — it does
+      NOT update `party.sanctions_status`. The CR-E rule engine (future
+      module) is the production caller and writes status via a separate
+      DEFINER carve-out, out of M9 scope.
+      Threshold resolution order: per-call `similarityThreshold` body
+      param → `app.party_sanctions_match_threshold` GUC override → 0.7
+      default (Q-DA2=2a). Match types: `direct_name` (pg_trgm hit on
+      `party.name_en`), `direct_alias` (hit on any element of
+      `party.aliases` JSONB array), `chain_ancestor` / `chain_descendant`
+      (chain expansion via `fn_party_chain_traverse_up` / `_down` from
+      every direct match — depth bounded by the same `maxDepth` 1..10
+      contract). Performance NFR: 5-entity signal < 200ms (AC-S7-07).
+      Every match envelope includes `matchedEntityName` for
+      source-traceability (AC-S7-05 / Production-Credibility Invariant #8).
+
   - name: M8 — Internal Signals
     description: |
       Internal-signal read + resolve API (M8 — CR-A2 — S4/S5).
@@ -5927,6 +6099,537 @@ components:
         resolutionKind: { $ref: "#/components/schemas/SignalResolutionKind" }
         resolvedBy: { type: integer, nullable: true }
         resolvedAt: { type: string, format: date-time }
+
+    # ============================================================
+    # M9 — Counterparty Graph (CR-B)
+    # ============================================================
+
+    RelationshipType:
+      type: string
+      description: |
+        Closed CHECK enum on `party_relationship.relationship_type`
+        (Q-DA5=5a — 6 values; pilot adds via M1b 010 dynamic-rename
+        pattern when needed; COMMENT ON COLUMN documents the upgrade
+        path).
+      enum:
+        - parent
+        - ubo
+        - subsidiary
+        - sub_contractor
+        - jv
+        - controlling_shareholder
+
+    SanctionsStatus:
+      type: string
+      description: |
+        Closed CHECK enum on `party.sanctions_status` (4 values). `clean`
+        is the column DEFAULT. `flagged` and `sanctioned` are written by
+        the CR-E rule engine (future module — out of M9 scope per
+        Q-DA4=4a). M9's `fn_party_sanctions_match` is return-only and
+        does NOT mutate this column. M9's `fn_party_update` does NOT
+        accept `sanctions_*` parameters (defence-in-depth).
+      enum:
+        - clean
+        - flagged
+        - sanctioned
+        - under_review
+
+    IcvStatus:
+      type: string
+      description: "Closed CHECK enum on `party.icv_status` (5 values)."
+      enum:
+        - certified
+        - expired
+        - downgraded
+        - pending
+        - none
+
+    RelationshipSource:
+      type: string
+      description: |
+        Closed CHECK enum on `party_relationship.source` — provenance of
+        the edge. `manual` is the column DEFAULT.
+      enum:
+        - dnb
+        - sayari
+        - manual
+        - demo_seed
+
+    ChainHopVia:
+      type: string
+      description: |
+        Discriminator on each `PartyChainNode.via` indicating how this
+        hop was reached: `edge` = via the `party_relationship` edge
+        table (tenant-scoped); `self_fk_parent` = via `party.parent_id`
+        self-FK shortcut (single-tenant in v1 per Q-DA7=7a);
+        `self_fk_ubo` = via `party.ubo_id` self-FK shortcut.
+      enum: [edge, self_fk_parent, self_fk_ubo]
+
+    SanctionsMatchType:
+      type: string
+      description: |
+        Discriminator on each `PartySanctionsMatchEntry.matchType`.
+        `direct_name` = pg_trgm hit on `party.name_en`. `direct_alias`
+        = hit on any element of `party.aliases`. `chain_ancestor` /
+        `chain_descendant` = expansion via `fn_party_chain_traverse_up`
+        / `_down` from a direct match.
+      enum: [direct_name, direct_alias, chain_ancestor, chain_descendant]
+
+    ChainDirection:
+      type: string
+      description: |
+        Query-string enum for `GET /api/v1/parties/:id/chain?direction=`.
+        `up` returns ancestors; `down` returns descendants; `both`
+        (default) returns both flat-array payloads in a single response
+        (BE merges via Promise.all of `_up` + `_down` fns).
+      enum: [up, down, both]
+
+    PartyAliasArray:
+      type: array
+      description: |
+        Trimmed, deduped, non-empty alias list stored on `party.aliases`
+        (JSONB array of strings). FE PartyAliasesField chip-list editor
+        enforces the same invariants client-side; `fn_party_update`
+        raises 22023 `invalid_aliases_shape` if the body is not a JSONB
+        array of strings (AC-S9-04). GIN index on aliases supports
+        fuzzy-alias hits in `fn_party_sanctions_match`.
+      items: { type: string, minLength: 1 }
+
+    PartyRelationship:
+      type: object
+      description: |
+        A single directed-typed edge in the counterparty graph
+        (db-design.md §6.2). `parent_id` and `child_id` are immutable
+        post-create (PATCH silently ignores them per AC-S2-04). Soft
+        delete only (`is_active=FALSE`); RESTRICTIVE
+        `party_relationship_deny_direct_delete` policy blocks hard
+        DELETE — only `fn_party_relationship_delete` allowed.
+      required:
+        - id
+        - tenantId
+        - parentId
+        - childId
+        - relationshipType
+        - source
+        - confidence
+        - metadata
+        - createdAt
+        - updatedAt
+        - isActive
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        parentId: { type: integer }
+        childId: { type: integer }
+        relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+        ownershipPct: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+          description: "If both effectiveFrom + effectiveTo are set, DB CHECK enforces effectiveTo >= effectiveFrom."
+        source: { $ref: "#/components/schemas/RelationshipSource" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        isActive: { type: boolean }
+
+    CreateRelationshipPayload:
+      type: object
+      description: |
+        Body for `POST /api/v1/parties/:id/relationships`. URL `:id`
+        supplies `parentId` (the URL is always the parent); body supplies
+        `childId`. Self-loop guard: `childId === pathId` raises 22023
+        `self_loop_not_allowed` (AC-S1-06; defence-in-depth in Zod via
+        cross-field refine() AND in fn body).
+      required: [childId, relationshipType]
+      properties:
+        childId: { type: integer, minimum: 1 }
+        relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+        ownershipPct: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        source: { $ref: "#/components/schemas/RelationshipSource" }
+        confidence: { type: number, minimum: 0, maximum: 1, default: 1.0 }
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    UpdateRelationshipPayload:
+      type: object
+      description: |
+        Partial update body for `PATCH /api/v1/parties/:id/relationships/:relId`.
+        `parentId` + `childId` are immutable post-create — silently dropped if
+        present (AC-S2-04). All fields optional; at least one required.
+      properties:
+        relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+        ownershipPct: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        source: { $ref: "#/components/schemas/RelationshipSource" }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    RelationshipListEdge:
+      type: object
+      description: |
+        A single edge as projected by `fn_party_relationship_list`
+        (db-design.md §6.2). Each edge embeds the joined other-party
+        `{ partyId, nameEn, nameAr, sanctionsStatus }` so the FE renders
+        the panel without a follow-up GET /parties/:id roundtrip
+        (AC-S4-02).
+      required: [id, relationshipType, otherParty, isOutgoing]
+      properties:
+        id: { type: integer }
+        relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+        ownershipPct: { type: number, nullable: true }
+        effectiveFrom: { type: string, format: date, nullable: true }
+        effectiveTo: { type: string, format: date, nullable: true }
+        source: { $ref: "#/components/schemas/RelationshipSource" }
+        confidence: { type: number }
+        isOutgoing:
+          type: boolean
+          description: "true → this edge points OUT from the anchor party (anchor is parent_id); false → IN to the anchor (anchor is child_id)."
+        otherParty:
+          type: object
+          required: [partyId, nameEn, sanctionsStatus]
+          properties:
+            partyId: { type: integer }
+            nameEn: { type: string }
+            nameAr: { type: string, nullable: true }
+            sanctionsStatus: { $ref: "#/components/schemas/SanctionsStatus" }
+
+    ListRelationshipsResponse:
+      type: object
+      description: "Bare-array (no pagination) — bounded result; <50 edges typical."
+      required: [incoming, outgoing, counts]
+      properties:
+        incoming:
+          type: array
+          items: { $ref: "#/components/schemas/RelationshipListEdge" }
+        outgoing:
+          type: array
+          items: { $ref: "#/components/schemas/RelationshipListEdge" }
+        counts:
+          type: object
+          required: [incoming, outgoing]
+          properties:
+            incoming: { type: integer }
+            outgoing: { type: integer }
+
+    DeleteRelationshipResponse:
+      type: object
+      description: |
+        Response from `fn_party_relationship_delete`. Idempotent —
+        re-deleting an already-soft-deleted edge returns 200 with the
+        original `deletedAt` + `idempotent=true` (AC-S3-02).
+      required: [success, deletedAt, idempotent]
+      properties:
+        success: { type: boolean, enum: [true] }
+        deletedAt: { type: string, format: date-time }
+        idempotent: { type: boolean }
+
+    PartyChainNode:
+      type: object
+      description: |
+        Single node in a chain traversal result. Each node embeds
+        `nameEn` / `nameAr` / `sanctionsStatus` for FE rendering without
+        follow-up roundtrips (AC-S5-06). `via` discriminates how this
+        hop was reached (edge vs. self-FK shortcut).
+      required:
+        - partyId
+        - depth
+        - relationshipType
+        - sanctionsStatus
+        - nameEn
+        - via
+      properties:
+        partyId: { type: integer }
+        depth: { type: integer, minimum: 0 }
+        relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+        ownershipPct: { type: number, nullable: true }
+        sanctionsStatus: { $ref: "#/components/schemas/SanctionsStatus" }
+        nameEn: { type: string }
+        nameAr: { type: string, nullable: true }
+        via: { $ref: "#/components/schemas/ChainHopVia" }
+
+    PartyChainTraverseUpResponse:
+      type: object
+      description: "Response shape when `direction=up`."
+      required: [rootPartyId, ancestors, chainTruncated, depthReached]
+      properties:
+        rootPartyId: { type: integer }
+        ancestors:
+          type: array
+          items: { $ref: "#/components/schemas/PartyChainNode" }
+        chainTruncated:
+          type: boolean
+          description: "true when p_max_depth was hit (Q-DA3=3a silent cap; no RAISE on cycle / depth-limit)."
+        depthReached: { type: integer }
+
+    PartyChainTraverseDownResponse:
+      type: object
+      description: "Response shape when `direction=down`."
+      required: [rootPartyId, descendants, chainTruncated, depthReached]
+      properties:
+        rootPartyId: { type: integer }
+        descendants:
+          type: array
+          items: { $ref: "#/components/schemas/PartyChainNode" }
+        chainTruncated: { type: boolean }
+        depthReached: { type: integer }
+
+    PartyChainBothResponse:
+      type: object
+      description: |
+        Response shape when `direction=both` (default). BE merges
+        `fn_party_chain_traverse_up` + `_down` results via Promise.all;
+        `chainTruncated` is OR-merged; `depthReached` is MAX-merged.
+      required: [rootPartyId, ancestors, descendants, chainTruncated, depthReached]
+      properties:
+        rootPartyId: { type: integer }
+        ancestors:
+          type: array
+          items: { $ref: "#/components/schemas/PartyChainNode" }
+        descendants:
+          type: array
+          items: { $ref: "#/components/schemas/PartyChainNode" }
+        chainTruncated: { type: boolean }
+        depthReached: { type: integer }
+
+    PartyChainTraverseResponse:
+      description: |
+        Discriminated union on `direction` query param. The exact response
+        shape is one of `PartyChainTraverseUpResponse` /
+        `PartyChainTraverseDownResponse` / `PartyChainBothResponse`.
+      oneOf:
+        - $ref: "#/components/schemas/PartyChainTraverseUpResponse"
+        - $ref: "#/components/schemas/PartyChainTraverseDownResponse"
+        - $ref: "#/components/schemas/PartyChainBothResponse"
+
+    RelationshipTypeCounts:
+      type: object
+      description: |
+        Direct-relationship counts for the chain root. AC-S8-03
+        invariant: ALL 6 keys ALWAYS present with default 0; never
+        undefined keys.
+      required:
+        - parent
+        - ubo
+        - subsidiary
+        - sub_contractor
+        - jv
+        - controlling_shareholder
+      properties:
+        parent: { type: integer }
+        ubo: { type: integer }
+        subsidiary: { type: integer }
+        sub_contractor: { type: integer }
+        jv: { type: integer }
+        controlling_shareholder: { type: integer }
+
+    PartyChainSummary:
+      type: object
+      description: |
+        Single-roundtrip flattened chain summary. Combines
+        `fn_party_chain_traverse_up` + `_down` + `fn_party_relationship_list`
+        internally. Pre-pivots ancestors/descendants by depth (AC-S8-02
+        — string-keyed map `{ "1": [...], "2": [...] }`); emits all 6
+        relationshipType counts even when 0 (AC-S8-03); single
+        `chainTruncated` flag covering both directions (AC-S8-04 —
+        OR of up.chainTruncated and down.chainTruncated). Drives the
+        FE `OwnershipChainTab` tree-layout component without further
+        client-side grouping.
+      required: [rootParty, ancestorsByDepth, descendantsByDepth, directRelationshipCounts, chainTruncated]
+      properties:
+        rootParty:
+          type: object
+          required: [id, nameEn, sanctionsStatus]
+          properties:
+            id: { type: integer }
+            nameEn: { type: string }
+            nameAr: { type: string, nullable: true }
+            sanctionsStatus: { $ref: "#/components/schemas/SanctionsStatus" }
+            esgScore: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+            icvStatus:
+              allOf:
+                - $ref: "#/components/schemas/IcvStatus"
+              nullable: true
+            icvPct: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        ancestorsByDepth:
+          type: object
+          additionalProperties:
+            type: array
+            items: { $ref: "#/components/schemas/PartyChainNode" }
+          description: "Keys are depth strings ('1', '2', ...)."
+        descendantsByDepth:
+          type: object
+          additionalProperties:
+            type: array
+            items: { $ref: "#/components/schemas/PartyChainNode" }
+        directRelationshipCounts: { $ref: "#/components/schemas/RelationshipTypeCounts" }
+        chainTruncated: { type: boolean }
+
+    PartySanctionsMatchInput:
+      type: object
+      description: |
+        Body for `POST /api/v1/admin/parties/sanctions-match`. The
+        `signalEntities` array shape mirrors `osint_signal.affected_entities`
+        verbatim per S2-19 cross-fn signature stability — the same
+        `EntityReference` shape produced by `fn_osint_signal_upsert`.
+      required: [signalEntities]
+      properties:
+        signalEntities:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [entityType, name]
+            properties:
+              entityType: { type: string }
+              name: { type: string, minLength: 1 }
+              identifier: { type: string }
+              partyId: { type: integer }
+        similarityThreshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: |
+            Optional per-call override. Resolution order:
+            param → `app.party_sanctions_match_threshold` GUC override
+            → 0.7 default (Q-DA2=2a).
+
+    PartySanctionsMatchEntry:
+      type: object
+      description: |
+        Single match envelope. Includes `matchedEntityName` for
+        source-traceability (AC-S7-05). `chainPath` is non-null only when
+        `matchType` is `chain_ancestor` or `chain_descendant`.
+      required: [partyId, name, matchedEntityName, matchType, similarity]
+      properties:
+        partyId: { type: integer }
+        name: { type: string }
+        matchedEntityName: { type: string }
+        matchType: { $ref: "#/components/schemas/SanctionsMatchType" }
+        similarity: { type: number, minimum: 0, maximum: 1 }
+        chainPath:
+          type: array
+          nullable: true
+          items:
+            type: object
+            required: [partyId, depth, relationshipType]
+            properties:
+              partyId: { type: integer }
+              depth: { type: integer }
+              relationshipType: { $ref: "#/components/schemas/RelationshipType" }
+
+    PartySanctionsMatchResponse:
+      type: object
+      description: |
+        Return-only envelope (Q-DA4=4a). `party.sanctions_status` is
+        verifiable as unchanged via select-before / select-after
+        (AC-S7-06); CR-E rule engine writes status via separate DEFINER
+        carve-out (out of M9 scope).
+      required: [matches]
+      properties:
+        matches:
+          type: array
+          items: { $ref: "#/components/schemas/PartySanctionsMatchEntry" }
+
+    PartyUpdatePayload:
+      type: object
+      description: |
+        Partial-update body for `PATCH /api/v1/parties/:id` (db-design.md
+        §3.4). Editable subset only — `sanctionsStatus` /
+        `sanctionsLastChecked` / `sanctionsMatchSignalId` are silently
+        ignored even if forwarded (defence-in-depth — Q-DA4=4a +
+        AC-S9-05; the fn signature does NOT accept them as parameters).
+        `parentId` / `uboId` use a sentinel-mapping convention:
+        `undefined` → leave alone; `null` → BE controller maps to `-1`
+        which the fn body interprets as explicit unset (db-design.md
+        §3.4 convention).
+      properties:
+        nameEn: { type: string, maxLength: 200 }
+        nameAr: { type: string, maxLength: 200, nullable: true }
+        emirate: { type: string, maxLength: 40, nullable: true }
+        freeZone: { type: string, maxLength: 80, nullable: true }
+        country: { type: string, maxLength: 60, nullable: true }
+        contactEmail: { type: string, format: email, maxLength: 255, nullable: true }
+        contactPhone: { type: string, maxLength: 40, nullable: true }
+        registeredAddress: { type: string, nullable: true }
+        notes: { type: string, nullable: true }
+        tradeLicenseNumber: { type: string, maxLength: 80, nullable: true }
+        tradeLicenseIssuer: { type: string, maxLength: 80, nullable: true }
+        parentId:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: "Send null to explicitly unset; BE maps null → -1 before fn call."
+        uboId:
+          type: integer
+          minimum: 1
+          nullable: true
+          description: "Same sentinel convention as parentId."
+        aliases: { $ref: "#/components/schemas/PartyAliasArray" }
+        esgScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+          description: "DB CHECK 0..100 (AC-S9-06). CHECK violation surfaces as 23514, routed to 400 via translatePgError."
+        icvStatus:
+          allOf:
+            - $ref: "#/components/schemas/IcvStatus"
+          nullable: true
+        icvPct: { type: number, minimum: 0, maximum: 100, nullable: true }
+        icvLastChecked: { type: string, format: date-time, nullable: true }
+        metadata:
+          type: object
+          additionalProperties: true
+
+    PartyDetail:
+      type: object
+      description: |
+        Extended party detail projection. Migration 120 rewrites
+        `fn_party_get_by_id` to add 11 new fields per Q-DA1=1a; existing
+        M_parity 058 + R-LC 070/075 fields preserved verbatim
+        (additive widening — backward-compat invariant). Returned by
+        `GET /api/v1/parties/:id` (transitive widening per OI-M9-2),
+        `PATCH /api/v1/parties/:id`, and `POST /api/v1/parties` (R-LC 073
+        `fn_party_create` ends with `RETURN fn_party_get_by_id(...)` —
+        also widens transparently). Workspace types.ts is the canonical
+        source of truth for the full key list — this schema documents the
+        M9-introduced additions only; existing M_parity / R-LC fields
+        omitted here for brevity (see `data-dictionary.md` §`party`).
+      properties:
+        id: { type: integer }
+        nameEn: { type: string }
+        nameAr: { type: string, nullable: true }
+        parentId: { type: integer, nullable: true, description: "M9 — self-FK shortcut to direct parent party." }
+        uboId: { type: integer, nullable: true, description: "M9 — self-FK shortcut to ultimate beneficial owner." }
+        sanctionsStatus: { $ref: "#/components/schemas/SanctionsStatus" }
+        sanctionsLastChecked: { type: string, format: date-time, nullable: true }
+        sanctionsMatchSignalId:
+          type: integer
+          nullable: true
+          description: "M9 — FK → osint_signal.id; written by CR-E rule engine (out of scope)."
+        esgScore: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+        icvStatus:
+          allOf: [{ $ref: "#/components/schemas/IcvStatus" }]
+          nullable: true
+        icvPct: { type: number, nullable: true, minimum: 0, maximum: 100 }
+        icvLastChecked: { type: string, format: date-time, nullable: true }
+        aliases: { $ref: "#/components/schemas/PartyAliasArray" }
+        metadata:
+          type: object
+          additionalProperties: true
 
   responses:
     Unauthenticated:
@@ -11474,6 +12177,574 @@ x-paths-root:
             NOT_FOUND — signal id not found for current tenant. ERRCODE
             P0002 'Signal not found' routed via translatePgError default
             P0002 → 404 path.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ============================================================
+  # M9 — Counterparty Graph (CR-B)
+  #   /parties/:id/relationships             GET, POST
+  #   /parties/:id/relationships/:relId      PATCH, DELETE
+  #   /parties/:id/chain                     GET (direction=up|down|both)
+  #   /parties/:id/chain-summary             GET
+  #   /parties/:id                           PATCH (M9 — write path)
+  #   /admin/parties/sanctions-match         POST
+  #
+  # M9 also widens the existing M_parity endpoints (URL signatures and Zod
+  # schemas unchanged; only the response projection grows additively):
+  #   GET /api/v1/parties/:id   → response gains 11 PartyDetail fields
+  #   GET /api/v1/parties       → each list item gains 6 badge fields
+  # ============================================================
+
+  /parties/{id}/relationships:
+    get:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyRelationshipList
+      summary: List direct edges of a party (incoming + outgoing)
+      description: |
+        List direct edges (incoming + outgoing) of the anchor party
+        (db-design.md §6.2). Each edge embeds the joined other-party
+        `{ partyId, nameEn, nameAr, sanctionsStatus }` so FE renders
+        the panel without a follow-up GET /parties/:id roundtrip
+        (AC-S4-02). Tenant-scoped via the
+        `party_relationship_tenant_select` RLS policy on
+        `current_setting('app.current_tenant_id')::uuid`. Bounded result
+        (<50 edges typical) — bare-array (no pagination).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, executive]
+      x-deferredAuthorisedRoles: [compliance_esg]
+      x-requiredPermissions: [party.graph.read]
+      x-authMode: jwt
+      x-storyId: S4
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: "`party.id` of the anchor party."
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ListRelationshipsResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.read` (42501)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "Anchor party not found (P0002 — AC-S4-03)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    post:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyRelationshipCreate
+      summary: Add a directed-typed edge under the current tenant
+      description: |
+        Add a directed-typed edge (db-design.md §6.1). URL `:id` supplies
+        `parentId`; body supplies `childId`. AddRelationshipDialog UX.
+        Idempotency: ON CONFLICT
+        `(tenant_id, parent_id, child_id, relationship_type)` DO NOTHING —
+        duplicate returns 409 with `relationship_already_exists`
+        (23505 — AC-S1-05). Self-loop (`childId === pathId`) raises
+        22023 `self_loop_not_allowed` (AC-S1-06; defence-in-depth in Zod
+        cross-field refine() AND in fn body).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [party.graph.manage]
+      x-authMode: jwt
+      x-storyId: S1
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: "Parent `party.id` (the URL `:id` is always the parent)."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateRelationshipPayload" }
+      responses:
+        "201":
+          description: Created
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartyRelationship" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — missing field / invalid relationshipType /
+            self-loop / invalid ownershipPct / effectiveTo < effectiveFrom
+            (22023 — AC-S1-03 / AC-S1-06).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.manage` (42501 — AC-S1-02)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: |
+            NOT_FOUND — `parentId` or `childId` not found / inactive
+            (P0002 — AC-S1-04). Error body includes
+            `field: 'parentId' | 'childId'`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: |
+            CONFLICT — `relationship_already_exists`. ON CONFLICT
+            `(tenant_id, parent_id, child_id, relationship_type)` DO NOTHING
+            mapped to 23505 → 409 (AC-S1-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /parties/{id}/relationships/{relId}:
+    patch:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyRelationshipUpdate
+      summary: Partial update of an edge
+      description: |
+        Partial update of an edge (db-design.md §6.3). `parentId` +
+        `childId` are immutable post-create — body fields with those
+        names are silently dropped (AC-S2-04). Tenant-scoped via RLS —
+        cross-tenant `relId` returns 404 (AC-S2-05). RESTRICTIVE
+        `party_relationship_deny_direct_delete` policy doesn't apply
+        here (PATCH path); only DELETE is blocked.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [party.graph.manage]
+      x-authMode: jwt
+      x-storyId: S2
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: "Parent `party.id` (validated against the relationship's parent_id at controller layer)."
+        - in: path
+          name: relId
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: "`party_relationship.id`."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateRelationshipPayload" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartyRelationship" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — invalid relationshipType / out-of-range
+            ownershipPct or confidence / effectiveTo < effectiveFrom
+            (22023).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.manage` (42501 — AC-S2-02)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: |
+            NOT_FOUND — `relId` not found OR `is_active=FALSE` OR
+            cross-tenant (P0002 — AC-S2-03 / AC-S2-05).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+    delete:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyRelationshipDelete
+      summary: Soft-delete an edge (idempotent)
+      description: |
+        Soft-delete (`is_active=FALSE`; preserves audit_log row).
+        Idempotent — re-deleting an already-soft-deleted edge returns
+        200 with the original `deletedAt` + `idempotent=true` (AC-S3-02).
+        RESTRICTIVE `party_relationship_deny_direct_delete` policy
+        prevents hard DELETE — only this fn path allowed.
+        FE precondition: T9 destructive-confirmation modal
+        (`DeleteRelationshipConfirm`) gates this call (AC-S3-05; UI
+        deferred per DEFER-M9-FE-2 — service method wired).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [party.graph.manage]
+      x-authMode: jwt
+      x-storyId: S3
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - in: path
+          name: relId
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: OK (or idempotent re-delete)
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/DeleteRelationshipResponse" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.manage` (42501 — AC-S3-03)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "relationship_not_found (P0002 — AC-S3-04)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /parties/{id}/chain:
+    get:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyChainTraverse
+      summary: Walk ancestors / descendants / both via recursive CTE
+      description: |
+        Walk the chain of ancestors (`direction=up`), descendants
+        (`direction=down`), or both (`direction=both`, default).
+        `maxDepth` bounded 1..10 (AC-S5-04 / AC-S6-03). Recursive CTE
+        UNIONs the `party_relationship` edge table with the `party.parent_id`
+        / `ubo_id` self-FK shortcuts; SOURCE A is tenant-scoped via RLS,
+        SOURCE B is single-tenant in v1 per Q-DA7=7a (documented assumption).
+        **Silent cap with `chainTruncated=true` + `depthReached`** on
+        depth-limit hit (Q-DA3=3a lock); cycles are handled via path
+        uniqueness (no RAISE NOTICE / EXCEPTION). Each node embeds
+        `nameEn` / `nameAr` / `sanctionsStatus` for FE rendering without
+        follow-up roundtrips (AC-S5-06).
+        **Performance NFR:** depth=5 / ~100 parties / ~300 edges < 100ms
+        (AC-S5-05 / AC-S6-04).
+        **Response shape is a discriminated union on `direction`** —
+        `up` returns `{ rootPartyId, ancestors[], chainTruncated, depthReached }`;
+        `down` returns `{ rootPartyId, descendants[], ... }`; `both` (default)
+        returns both arrays in a single envelope; BE merges via Promise.all
+        of `_up` + `_down` fns and OR-merges `chainTruncated` /
+        MAX-merges `depthReached`.
+        **Convergent-paths dedup (DEFECT-2 / migration 122):** the
+        recursive CTEs in `fn_party_chain_traverse_up` + `_down` previously
+        emitted duplicate `(party_id, depth, via)` tuples when a node was
+        reachable through both an edge AND a self-FK shortcut at the same
+        depth. Migration 122 added `DISTINCT ON (party_id, depth, via)`
+        representative-row dedup CTEs; FE keys are now stable.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, executive]
+      x-deferredAuthorisedRoles: [compliance_esg]
+      x-requiredPermissions: [party.graph.read]
+      x-authMode: jwt
+      x-storyId: S5
+      x-alsoServes: [S6, S10]
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: direction
+          required: false
+          schema:
+            $ref: "#/components/schemas/ChainDirection"
+          description: "Default `both`."
+        - in: query
+          name: maxDepth
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10, default: 5 }
+          description: "Out-of-range returns 400 with `field='maxDepth'`, `message='max_depth_out_of_range'`."
+      responses:
+        "200":
+          description: |
+            OK. Response shape varies by `direction` query param —
+            see the `PartyChainTraverseResponse` discriminated union.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartyChainTraverseResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: "VALIDATION_ERROR — direction not in enum / maxDepth out of 1..10 (22023)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.read` (42501)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "Anchor party not found (P0002)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /parties/{id}/chain-summary:
+    get:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyChainSummary
+      summary: Single-roundtrip pre-pivoted chain summary
+      description: |
+        Single-roundtrip flattened chain summary (db-design.md §6.4).
+        Combines `fn_party_chain_traverse_up` + `_down` +
+        `fn_party_relationship_list` internally. **Pre-pivots
+        ancestors/descendants by depth** (AC-S8-02 — string-keyed map
+        `{ "1": [...], "2": [...] }`); **emits all 6 relationshipType
+        counts even when 0** (AC-S8-03 invariant); **single
+        `chainTruncated` flag covering both directions** (AC-S8-04 — OR
+        of up.chainTruncated and down.chainTruncated). Drives the FE
+        `OwnershipChainTab` tree-layout component without further
+        client-side grouping. Inherits the M9 migration 122 dedup CTEs
+        from the underlying `fn_party_chain_traverse_*` fns (DEFECT-2).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, executive]
+      x-deferredAuthorisedRoles: [compliance_esg]
+      x-requiredPermissions: [party.graph.read]
+      x-authMode: jwt
+      x-storyId: S8
+      x-alsoServes: [S10]
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+        - in: query
+          name: maxDepth
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 10, default: 5 }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartyChainSummary" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: "VALIDATION_ERROR — maxDepth out of 1..10 (22023)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.read` (42501 — AC-S8-06)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: "Anchor party not found (P0002 — AC-S8-05)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /parties/{id}:
+    patch:
+      tags: [M9 — Counterparty Graph (Parties)]
+      operationId: partyUpdate
+      summary: Partial update of party (M9 — editable subset)
+      description: |
+        Partial update of party (db-design.md §3.4). M9 introduces this
+        write path; `fn_party_create` from R-LC 073 stays UNTOUCHED per
+        Q-DA6=6a — `fn_party_update` is the only path to set the
+        editable subset (`parentId` / `uboId` / `aliases` / `esgScore` /
+        `icvStatus` / `icvPct` / etc.).
+        **`sanctions_*` fields are silently ignored** (AC-S9-05 /
+        Q-DA4=4a — defence-in-depth; the fn signature does NOT accept
+        them; the Zod schema also drops them). The CR-E rule engine
+        (future) writes `sanctions_status` via a separate DEFINER
+        carve-out, out of M9 scope.
+        **Permission gate:** `contract.edit` OR `party.graph.manage`
+        (RAISE 42501 if neither). All 3 authorised roles already have
+        `contract.edit` per M0 / R-LC seeds.
+        **Sentinel mapping:** `parentId` / `uboId` use `undefined` →
+        leave alone; `null` → BE controller maps to `-1` which fn body
+        interprets as explicit unset. Self-reference
+        (`parentId === id || uboId === id`) raises 22023
+        `self_reference_not_allowed`.
+        **Aliases JSONB invariant:** the `aliases` payload MUST be a
+        JSONB array of strings (AC-S9-04). The BE service-layer
+        pre-stringifies the JS string array via `JSON.stringify` before
+        binding to the JSONB parameter (DEFECT-1 fix — `db.callFunction`
+        infers Postgres TEXT[] for raw string arrays, breaking the
+        JSONB binding contract).
+        **Response widens transitively:** ends with
+        `RETURN fn_party_get_by_id(...)` so the response carries the
+        full extended `PartyDetail` (recentContracts5 + all 11 new CR-B
+        columns).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [contract.edit, party.graph.manage]
+      x-permissionGate: "contract.edit OR party.graph.manage"
+      x-authMode: jwt
+      x-storyId: S9
+      x-rateLimit: authedWriteRateLimiter
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartyUpdatePayload" }
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartyDetail" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — invalid email / out-of-range esgScore (CHECK
+            violation 23514) / out-of-range icvPct / invalid icvStatus
+            enum / aliases not array of strings / self-reference (22023 —
+            AC-S9-02 / AC-S9-04 / AC-S9-06 / AC-S9-07).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks both `contract.edit` AND `party.graph.manage` (42501)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: |
+            NOT_FOUND — subject party not found OR `parentId` /
+            `uboId` not found / inactive (P0002 — AC-S9-03). Error body
+            includes `field='parentId' | 'uboId'` for inactive-pointee
+            cases.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/parties/sanctions-match:
+    post:
+      tags: [M9 — Admin Sanctions Match]
+      operationId: partySanctionsMatch
+      summary: Fuzzy entity match against parties (return-only)
+      description: |
+        Admin/system test endpoint (S7). Fuzzy entity match against
+        `party.name_en` + `party.aliases` via pg_trgm (GIN trigram
+        index on `name_en`; GIN on `aliases`); chain expansion via
+        `fn_party_chain_traverse_up` + `_down` per direct match.
+        **Return-only** (Q-DA4=4a) — does NOT update
+        `party.sanctions_status`. The CR-E rule engine (future module)
+        is the production caller and writes status via a separate
+        DEFINER carve-out, out of M9 scope.
+        **Threshold resolution order:** per-call `similarityThreshold`
+        body param → `app.party_sanctions_match_threshold` GUC override
+        → 0.7 default (Q-DA2=2a). `signalEntities[]` shape mirrors
+        `osint_signal.affected_entities` verbatim per S2-19 cross-fn
+        signature stability.
+        **Performance NFR:** 5-entity signal < 200ms (AC-S7-07). Every
+        match envelope includes `matchedEntityName` for
+        source-traceability (AC-S7-05 / Production-Credibility
+        Invariant #8). Verifiable via select-before / select-after on
+        `party.sanctions_status` — the column is unchanged (AC-S7-06).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel]
+      x-requiredPermissions: [party.graph.manage]
+      x-authMode: jwt
+      x-storyId: S7
+      x-rateLimit: authedWriteRateLimiter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PartySanctionsMatchInput" }
+      responses:
+        "200":
+          description: OK — return-only matches
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/PartySanctionsMatchResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — `signalEntities` not array / element
+            missing `name` / `similarityThreshold` out of 0..1
+            (22023 — AC-S7-08). Empty `signalEntities` array enforced
+            at Zod (`minItems:1`); the fn body itself iterates and
+            naturally returns `{matches:[]}` if Zod is bypassed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `party.graph.manage` (42501)."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }

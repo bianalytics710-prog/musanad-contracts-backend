@@ -12,6 +12,7 @@ import healthRouter from './health.routes';
 import settingsRouter from './settings.routes';
 import auditRouter from './audit.routes';
 import sourceHealthRouter from './source-health.routes';
+import partiesSanctionsMatchRouter from './parties-sanctions-match.routes';
 
 const router = Router();
 
@@ -36,5 +37,10 @@ router.use('/audit', auditRouter);
 
 // M7 — OSINT source health monitor (cron-driven; bare-array bounded set).
 router.use('/source-health', sourceHealthRouter);
+
+// M9 (CR-B) — admin/system test endpoint: fuzzy entity match with chain
+// expansion. Gated by party.graph.manage (admin-narrowed). Returns matches
+// only — does NOT update party.sanctions_status (HITL Q-DA4).
+router.use('/parties/sanctions-match', partiesSanctionsMatchRouter);
 
 export default router;

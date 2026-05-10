@@ -692,6 +692,31 @@ const SENSITIVE_PATHS: string[] = [
   'req.body.last_error_message',
   '*.last_error_message',
   '*.*.last_error_message',
+
+  // -- M9 (CR-B) — aliases (party.aliases JSONB array + body field on
+  //    PATCH /parties/:id and POST /admin/parties/sanctions-match).
+  //    Aliases may carry UBO personal names; audit-log redacted by
+  //    fn_audit_trigger via migration 116. Mirrors that DB redact list at
+  //    the log layer.
+  'aliases',
+  'req.body.aliases',
+  'req.body.*.aliases',
+  'req.query.aliases',
+  'req.params.aliases',
+  '*.aliases',
+  '*.*.aliases',
+
+  // -- M9 (CR-B) — metadata (party.metadata + party_relationship.metadata
+  //    JSONB bag). Pre-emptively redacted; the bag is intentionally
+  //    extensible and may carry sensitive auxiliary fields. Audit-log
+  //    redacted by fn_audit_trigger via migration 116.
+  'metadata',
+  'req.body.metadata',
+  'req.body.*.metadata',
+  'req.query.metadata',
+  'req.params.metadata',
+  '*.metadata',
+  '*.*.metadata',
 ];
 
 const baseConfig = {

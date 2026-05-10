@@ -2769,3 +2769,205 @@ SELECT n.nspname || '.' || p.proname AS fn,
 ---
 
 *Generated 2026-05-10 by Documentation Generator from M8 db-design.md (Stage 2 PASS first-run; 0 design-time patches), db-implementation-summary.json (5 migrations applied 109..113; 1 patch round 113; PUBLIC count baseline-5 preserved; 12 runtime probes PASS on both branches), be-implementation-summary.json (8 new files + 1 modified), fe-implementation-summary.json (4 new files + 3 modified; 0/3 hardened, 3/3 regenerated; 31 i18n keys per locale; tsc clean at 1024MB), integration-verifier-report.md (PASS round 1; 4/4 endpoints), module-M8-test-report.md (1024/1024/1/0; 40 net-new tests; 3 E2E specs flagged-for-human), and qa-stage4-report.md (51/52 + F4 WARN; PASS-WITH-WARNINGS). No Codex review for M8 (Dexian decision 2026-05-04; **eighth consecutive validated**).*
+
+---
+
+# M9 — Counterparty Graph (CR-B) — Data Dictionary
+
+**Generated:** 2026-05-10
+**Module class:** CRIP Wave 1 — counterparty graph + ownership chain + sanctions match foundation (downstream CR-E rule engine consumes the new `party.aliases` GIN trigram index + `fn_party_sanctions_match` return-only matches; CR-E DEFINER carve-out writes `party.sanctions_status` outside M9 scope)
+**Migrations:** 114..122 (8 design + 1 Smoke-caught patch — `122_crb_dedupe_chain_summary.sql` for DEFECT-2)
+
+---
+
+## Tables (1 new)
+
+### `party_relationship` — directed-typed ownership/control graph edge
+
+**Purpose.** A single directed-typed edge between two parties under a tenant. `parent_id` and `child_id` reference `party.id`; `relationship_type` is a closed CHECK enum-of-6. Supports the OFAC chain hero scenario, JV web modeling, and subcontractor cascade. Tenant-scoped via FORCE RLS. Soft delete only — RESTRICTIVE policy blocks hard DELETE; only `fn_party_relationship_delete` allowed.
+
+**DDL highlights** (migration 115):
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| id | BIGSERIAL | PRIMARY KEY | Auto-incrementing edge identifier |
+| tenant_id | UUID | NOT NULL, FK → tenant.id ON DELETE RESTRICT | M7-introduced tenant scope; `current_setting('app.current_tenant_id')::uuid` matches via RLS |
+| parent_id | BIGINT | NOT NULL, FK → party.id | The "from" side of the directed edge |
+| child_id | BIGINT | NOT NULL, FK → party.id | The "to" side |
+| relationship_type | TEXT | NOT NULL, CHECK enum-of-6 | parent / ubo / subsidiary / sub_contractor / jv / controlling_shareholder (Q-DA5=5a) |
+| ownership_pct | NUMERIC(5,2) | nullable, CHECK 0..100 | Percentage ownership where applicable |
+| effective_from | DATE | nullable | Edge effective date — start |
+| effective_to | DATE | nullable, CHECK effective_to >= effective_from | Edge effective date — end (when both set) |
+| source | TEXT | NOT NULL DEFAULT 'manual', CHECK enum-of-4 | Provenance: dnb / sayari / manual / demo_seed |
+| confidence | NUMERIC(3,2) | NOT NULL DEFAULT 1.0, CHECK 0..1 | Match-confidence score |
+| metadata | JSONB | NOT NULL DEFAULT '{}'::jsonb | Free-form metadata (redacted in audit_log per migration 116) |
+| created_at | TIMESTAMPTZ | DEFAULT NOW() | Audit timestamp |
+| updated_at | TIMESTAMPTZ | DEFAULT NOW() | Audit timestamp |
+| created_by | BIGINT | FK → "user".id | Edge creator |
+| updated_by | BIGINT | FK → "user".id | Last updater |
+| is_active | BOOLEAN | DEFAULT TRUE | Soft delete flag |
+
+**Idempotency.** UNIQUE `(tenant_id, parent_id, child_id, relationship_type)` — duplicate INSERT raises 23505 → 409 `relationship_already_exists` (AC-S1-05).
+
+**Indexes (8 added).** PK + UNIQUE composite + 2 FK btrees on parent_id/child_id + 2 soft-delete partials (`WHERE is_active=TRUE` per parent_id and child_id) + `(tenant_id, parent_id) WHERE is_active=TRUE` composite + `(tenant_id, child_id) WHERE is_active=TRUE` composite.
+
+**RLS policies.** FORCE RLS + 3 policies:
+- `party_relationship_tenant_select` — SELECT WHERE `tenant_id = current_setting('app.current_tenant_id')::uuid AND is_active = TRUE`
+- `party_relationship_tenant_modify` — INSERT/UPDATE WHERE matching tenant + caller has `party.graph.manage`
+- `party_relationship_deny_direct_delete` — RESTRICTIVE; blocks raw `DELETE FROM party_relationship`. Soft delete only via `fn_party_relationship_delete`.
+
+**Audit trigger.** `audit_party_relationship_changes` (BIGSERIAL `id` — default `fn_audit_trigger` compatible; metadata redaction extended in migration 116).
+
+---
+
+## Tables extended (1 — `party` +11 columns)
+
+Migration 114 ALTERs `party` ADD COLUMN with defaults so existing rows back-fill safely:
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| parent_id | BIGINT | nullable, FK → party.id (self), CHECK `id <> parent_id` (`party_no_self_parent`) | Direct-parent self-FK shortcut. Single-tenant in v1 per Q-DA7=7a — recursive CTE SOURCE B does NOT filter on tenant_id. |
+| ubo_id | BIGINT | nullable, FK → party.id (self), CHECK `id <> ubo_id` (`party_no_self_ubo`) | Ultimate-beneficial-owner self-FK shortcut. Same Q-DA7 caveat. |
+| sanctions_status | TEXT | NOT NULL DEFAULT 'clean', CHECK enum-of-4 | clean / flagged / sanctioned / under_review. **Written ONLY by the CR-E rule engine** (future DEFINER carve-out, out of M9 scope per Q-DA4=4a). `fn_party_update` does NOT accept this as a parameter. |
+| sanctions_last_checked | TIMESTAMPTZ | nullable | Timestamp of last sanctions match scan. |
+| sanctions_match_signal_id | BIGINT | nullable, FK → osint_signal.id ON DELETE SET NULL | Pointer to the signal that triggered the flag (CR-E writes). |
+| esg_score | INTEGER | nullable, CHECK 0..100 | ESG composite score. CHECK violation surfaces as 23514 (check_violation) — translatePgError routes to 400. |
+| icv_status | TEXT | nullable, CHECK enum-of-5 | certified / expired / downgraded / pending / none |
+| icv_pct | NUMERIC(5,2) | nullable, CHECK 0..100 | In-Country Value percentage |
+| icv_last_checked | TIMESTAMPTZ | nullable | Timestamp of last ICV review |
+| aliases | JSONB | NOT NULL DEFAULT '[]'::jsonb | Trimmed, deduped, non-empty alias array. GIN index supports `fn_party_sanctions_match` fuzzy alias hits. `fn_party_update` raises 22023 `invalid_aliases_shape` if not a JSONB array of strings. |
+| metadata | JSONB | NOT NULL DEFAULT '{}'::jsonb | Free-form metadata (redacted in audit_log per migration 116) |
+
+**6 new indexes:**
+
+| Index | Type | Purpose |
+|---|---|---|
+| `idx_party_parent_id` | btree | FK lookup for parent_id |
+| `idx_party_ubo_id` | btree | FK lookup for ubo_id |
+| `idx_party_sanctions_status` | btree (partial `WHERE sanctions_status <> 'clean'`) | Sparse index — most rows are 'clean' |
+| `idx_party_name_en_trgm` | GIN with `gin_trgm_ops` | pg_trgm fuzzy match for `fn_party_sanctions_match` direct_name hits |
+| `idx_party_aliases` | GIN with `jsonb_path_ops` | Alias-array containment for direct_alias hits |
+| `idx_party_sanctions_match_signal` | btree | FK lookup back to the signal that triggered the flag |
+
+---
+
+## Functions (9 net-new + 3 CREATE OR REPLACE EXTEND)
+
+### `fn_party_relationship_create` (INVOKER, write)
+Creates a directed-typed edge under the current tenant. Permission gate `party.graph.manage`. Validates pointee party existence (raises P0002 with `field='parentId'` or `field='childId'`); self-loop (childId === parentId) raises 22023 `self_loop_not_allowed`. Idempotency via the UNIQUE composite — 23505 → 409.
+
+### `fn_party_relationship_update` (INVOKER, write)
+Partial update. `parent_id` + `child_id` are immutable (silently dropped at the BE layer per AC-S2-04). Cross-tenant `relId` returns P0002 → 404 (RLS scopes the lookup; AC-S2-05).
+
+### `fn_party_relationship_delete` (INVOKER, write)
+Soft-delete (`is_active=FALSE`; preserves audit_log row). Idempotent — re-deleting an already-soft-deleted edge returns the original `deletedAt` + `idempotent=true` (AC-S3-02).
+
+### `fn_party_relationship_list` (STABLE INVOKER, read)
+Returns `{ incoming[], outgoing[], counts: { incoming, outgoing } }`. Each edge embeds the joined other-party `{ partyId, nameEn, nameAr, sanctionsStatus }` so FE renders without follow-up roundtrip (AC-S4-02).
+
+### `fn_party_chain_traverse_up` (STABLE INVOKER, read)
+Recursive CTE walk of ancestors. UNIONs the `party_relationship` edge table (SOURCE A — tenant-scoped) with `party.parent_id` / `ubo_id` self-FK shortcuts (SOURCE B — single-tenant in v1 per Q-DA7=7a). Cycle handled via path-uniqueness (no RAISE). Depth cap via `p_max_depth` 1..10; on hit emits `chainTruncated=true` + `depthReached` (Q-DA3=3a silent cap). Migration 122 wrapped the inner CTE with `DISTINCT ON (party_id, depth, via)` representative-row dedup (DEFECT-2 fix).
+
+### `fn_party_chain_traverse_down` (STABLE INVOKER, read)
+Symmetric to `_up` — recursive CTE walk of descendants. Same cycle/depth/dedup behavior.
+
+### `fn_party_chain_summary` (STABLE INVOKER, read)
+Single-roundtrip wrapper. Calls `_up` + `_down` + `fn_party_relationship_list` and projects ancestors/descendants pre-pivoted by depth (string-keyed map; AC-S8-02), all 6 relationshipType counts even when 0 (AC-S8-03 invariant), and a single OR-merged `chainTruncated` flag (AC-S8-04). Drives the FE `OwnershipChainTab` without further client-side grouping. **S2-24 nested-aggregate pattern observed** — uses inner-subquery `grouped` + outer `jsonb_object_agg`.
+
+### `fn_party_sanctions_match` (STABLE INVOKER, read — return-only)
+Fuzzy entity match against `party.name_en` + `party.aliases` via pg_trgm (GIN trigram index). Chain expansion via `_up` + `_down` per direct match. **Return-only** (Q-DA4=4a) — does NOT write `party.sanctions_status`. Threshold resolution: per-call param → `app.party_sanctions_match_threshold` GUC override → 0.7 default (Q-DA2=2a). Every match envelope includes `matchedEntityName` for source-traceability (AC-S7-05). Performance NFR: 5-entity signal < 200ms (AC-S7-07).
+
+### `fn_party_update` (INVOKER, write)
+Partial update editable subset. Permission gate `contract.edit OR party.graph.manage`. **Silently ignores `sanctions_*` payload fields** at fn-signature level (defence-in-depth — AC-S9-05 / Q-DA4=4a). Self-reference (`parentId == id || uboId == id`) raises 22023 `self_reference_not_allowed`. Inactive pointee (`parentId` / `uboId`) raises P0002 with `field='parentId' | 'uboId'`. Aliases JSONB invariant — raises 22023 `invalid_aliases_shape` if not array of strings (AC-S9-04). Ends with `RETURN fn_party_get_by_id(...)` so response carries the full extended `PartyDetail` shape transitively.
+
+### `fn_audit_trigger` (CREATE OR REPLACE EXTEND — migration 116)
+Redact list extended **30 → 32** names — added `aliases` and `metadata`. REVOKE/GRANT trio re-applied per `feedback_fn_rewrites_lose_safety_guards.md` (B14).
+
+### `fn_party_get_by_id` (CREATE OR REPLACE EXTEND — migration 120)
+Projection extended **+11 fields**. Existing M_parity 058 + R-LC 070/075 fields preserved verbatim (additive widening — backward-compat invariant). Argument signature unchanged. REVOKE/GRANT trio re-applied. Transitively widens `fn_party_create` and `fn_party_update` responses (both `RETURN fn_party_get_by_id(...)`).
+
+### `fn_party_list` (CREATE OR REPLACE EXTEND — migration 120)
+Projection extended **+6 badge fields** per list item (parentId, aliases, sanctionsStatus, sanctionsLastChecked, icvStatus, icvPct). Full ESG / metadata stay detail-only. Argument signature unchanged. REVOKE/GRANT trio re-applied.
+
+---
+
+## Audit triggers (1 new)
+
+| Table | Trigger name | Notes |
+|---|---|---|
+| `party_relationship` | `audit_party_relationship_changes` | BIGSERIAL `id` — default `fn_audit_trigger` compatible. Redact list extended in migration 116 covers the new `metadata` column. |
+
+`party` audit trigger remains in place from M_parity (already redacts via the extended `aliases` + `metadata` list).
+
+---
+
+## RLS policies (3 new on `party_relationship`)
+
+| Policy | Command | Condition |
+|---|---|---|
+| `party_relationship_tenant_select` | SELECT | `tenant_id = current_setting('app.current_tenant_id')::uuid AND is_active = TRUE` |
+| `party_relationship_tenant_modify` | INSERT/UPDATE | matching tenant AND caller has `party.graph.manage` |
+| `party_relationship_deny_direct_delete` | DELETE (RESTRICTIVE) | Always FALSE — only `fn_party_relationship_delete` soft-delete path allowed |
+
+---
+
+## Permissions seeded (2 net-new — migration 117)
+
+| Permission code | Granted unconditionally to | Notes |
+|---|---|---|
+| `party.graph.read` | Super Admin, platform_admin, legal_counsel, contract_drafter, contract_approver, executive | Conditional `WHERE EXISTS` no-op grant for the deferred `compliance_esg` role — produces 0 rows in CR-B; CR-G activation migration backfills. |
+| `party.graph.manage` | Super Admin, platform_admin, legal_counsel | Write ops + admin sanctions-match. |
+
+**Total grants:** 9 unconditional + 1 WHERE-EXISTS no-op (= 0 rows applied; CR-G activation backfills).
+
+---
+
+## Seed data (1 new tenant footprint — migration 121 + Smoke-caught dedup migration 122)
+
+ADNOC seed (single tenant `00000000-0000-0000-0000-000000000001`):
+
+- **5 hero counterparty chains** —
+  1. **OFAC sanctioned UBO chain:** `Synthetic Holdings Cyprus Ltd (sanctioned)` → `Mid-East Energy Trading FZE` → `Schlumberger Limited`
+  2. **Halliburton hierarchy:** `Halliburton Energy Holdings Inc` → `Halliburton Worldwide` (with subsidiaries)
+  3. **Saudi-Aramco-MoU JV web:** multiple JV nodes
+  4. **PetroChina LNG joint venture:** JV-typed edges
+  5. **Sumatra Field Equipment Singapore:** subcontractor cascade
+- **23 `party_relationship` rows** — distribution 3+5+4+5+6 across the 5 chains
+- **35 scaffold parties** seeded as supporting nodes
+- **Alias backfill on top 10 ADNOC parties** — e.g., ADNOC alias "Abu Dhabi National Oil Company" + "ADNOC Dist."; Schlumberger aliases ["Schlumberger", "SLB", "Schlumberger Ltd"] (live count: 35 parties have non-empty aliases on both branches — 10 backfilled + 25 hero-chain inline).
+- **2 `parent_id` self-FK shortcuts** seeded (Schlumberger → Mid-East, Halliburton → Halliburton Energy Holdings)
+- **2 `ubo_id` self-FK shortcuts** seeded (Schlumberger → Synthetic, Sumatra Field Equipment → Kowloon)
+
+The `count_in_180_days >= 3` invariant from M8 still holds (M9 does not touch the EPC milestone scenario). The `Synthetic Holdings Cyprus Ltd` party is `sanctions_status='sanctioned'` (the lone sanctioned row across the seed pack — Probe 3 = 1 on both branches).
+
+---
+
+## PUBLIC EXECUTE invariant — S2-21 sustained at the M3 set of 5 (TENTH consecutive clean module)
+
+M9 contributes **0 net-new PUBLIC EXECUTE grants** despite introducing 12 fn writes (9 net-new + 3 CREATE OR REPLACE EXTEND). The full allowlist remains exactly 5 (all from M3). Every M9 fn_ ends with the explicit REVOKE/GRANT trio per migrations 116/118/119/120/122 (12 fn writes × trio = 36 grant/revoke statements emitted).
+
+```sql
+-- Expect exactly 5 rows, all from M3.
+SELECT n.nspname || '.' || p.proname AS fn,
+       pg_catalog.pg_get_userbyid(unnest(p.proacl)::aclitem) AS grantee
+  FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+ WHERE n.nspname = 'public' AND p.proname LIKE 'fn_%' AND p.proacl::text LIKE '%PUBLIC%';
+```
+
+---
+
+## Key DB Impl outcomes (M9)
+
+| ID | Severity | Topic | Outcome |
+|---|---|---|---|
+| **DEFECT-1** | HIGH | BE service `party-graph.service.ts` passed JS string array to `db.callFunction`; pg inferred TEXT[] not JSONB; `fn_party_update.p_aliases` expects JSONB | Fix: pre-stringify aliases at the service-layer call site — `payload.aliases !== undefined ? JSON.stringify(payload.aliases) : null`. Inline comment documents the rationale. Regression test in `tests/db/CR-B-fns.test.ts`. |
+| **DEFECT-2** | LOW | `fn_party_chain_summary` surfaced duplicate ancestor rows for the same `(party_id, depth, via)` tuple when convergent paths met (party_relationship edge + party self-FK shortcut at same depth, OR two distinct edge paths landing at the same depth) | Migration **122 NEW** (never edits 119) — `CREATE OR REPLACE FUNCTION` on `_up` + `_down` with `ancestors_dedup` / `descendants_dedup` CTE using `DISTINCT ON (party_id, depth, via) ORDER BY party_id, depth, via, ownership_pct DESC NULLS LAST, relationship_type ASC` for deterministic representative-row selection. `fn_party_chain_summary` unchanged (consumes dedup'd outputs of `_up` + `_down` via fn-to-fn invocation). REVOKE/GRANT trio + COMMENT re-applied per B14. Regression test asserts unique-tuple count = 0. |
+| **OBS-M9-IMPL-1** | INFO | Probe 5 literal-string probe ('Synthetic Holdings') shorter than seed party name ('Synthetic Holdings Cyprus Ltd') — similarity 0.633 < 0.7 default threshold | Function behavior is correct per Q-DA2=2a lock. With full seed name OR threshold=0.6, the function returns 3 matches including 2 chain_descendant. Calibration-only observation; no design change. |
+| **OBS-M9-IMPL-2** | INFO | seed-data.ts `isExisting=true` flag wrong for Schlumberger / Halliburton on m0-foundation + test branches; ON CONFLICT DO NOTHING + JOIN by name_en made migration 121 idempotent regardless | Tighten flags at next state-update. Non-blocking. |
+| **OBS-M9-IMPL-3 (S2-21)** | INFO | TENTH consecutive clean module on PUBLIC EXECUTE allowlist | Verified live on both branches via `pg_proc.proacl` enumeration. baseline 55 × 0 delta. |
+| **F-flag (FE-E1 carry-over)** | LOW (project-level FE) | 3 of 5 M9 E2E specs flagged-for-human due to Zustand-persist auth-hydration race | Same flakiness affects M7 + M8 specs. Functional coverage NOT gapped — covered by API-layer surrogates + manual smoke walks on /app/parties/31. |
+| **Doc-Drift Nit (W2)** | INFO | `api-contracts.json _meta.endpointsTotal=9` vs 8 in the array | Cosmetic. The 9th was an early count for `ep_party_list_extended` which is now in the `_extendsExistingEndpoints` block. Defer correction to next state-update. |
+
+---
+
+*Generated 2026-05-10 by Documentation Generator from M9 db-design.md (Stage 2 PASS 19/19 first-run; 0 design-time patches), db-implementation-summary.json (8 migrations 114..121 applied + 1 Smoke-caught patch 122 for DEFECT-2 chain dedup; PUBLIC count baseline-5 preserved; 8 runtime probes PASS on both branches), be-implementation-summary.json (6 new files + 3 modified; 8 endpoints; tsc clean at 1024MB; DEFECT-1 caught at smoke + fixed in service layer), fe-implementation-summary.json (9 new files + 4 modified; 0/9 hardened — net-new admin/parties surfaces in regenerate mode; +90 i18n keys per locale; tsc clean at 2048MB), integration-verifier-report.md (PASS round 1), module-M9-test-report.md (1073/1074/1/0 full-suite; +49 net-new tests = 27 DB + 22 BE; 5 E2E = 2 PASS + 3 flagged-for-human FE-E1 carry-over), and qa-stage4-report.md (52/52 PASS first-run; tenth consecutive S2-21 clean; zero regressions vs M8 baseline 1024). No Codex review for M9 (Dexian decision 2026-05-04; **tenth consecutive validated**).*

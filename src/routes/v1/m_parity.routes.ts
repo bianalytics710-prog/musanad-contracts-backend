@@ -6,9 +6,22 @@
  * permission gating happens inside the fn_ body
  * (contract.read.department OR contract.edit). 42501 → 403 via
  * translatePgError.
+ *
+ * M9 (CR-B) extension — /api/v1/parties is extended with:
+ *   - PATCH  /:id                                 — editable subset
+ *   - GET    /:id/relationships                   — list edges
+ *   - POST   /:id/relationships                   — create edge
+ *   - PATCH  /:id/relationships/:relId            — update edge
+ *   - DELETE /:id/relationships/:relId            — soft-delete edge
+ *   - GET    /:id/chain?direction=&maxDepth=      — traverse chain
+ *   - GET    /:id/chain-summary?maxDepth=         — chain summary
+ * All M9 sub-routes flow through rls.middleware (tenant GUC) and gate
+ * inside the fn_ body on party.graph.read / party.graph.manage /
+ * (contract.edit OR party.graph.manage).
  */
 import { Router } from 'express';
 import { authenticate } from '../../middleware/auth.middleware';
+import { rlsMiddleware } from '../../middleware/rls.middleware';
 import { authedReadRateLimiter, authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import {
@@ -17,6 +30,7 @@ import {
   clausesController,
   obligationsController,
 } from '../../controllers/m_parity.controller';
+import { partyGraphController } from '../../controllers/party-graph.controller';
 import {
   CreatePartySchema,
   CreateTemplateSchema,
@@ -24,12 +38,92 @@ import {
   CreateObligationSchema,
   IdParamSchema,
 } from '../../schemas/m_parity.schemas';
+import {
+  partyIdParamSchema,
+  partyRelationshipIdParamSchema,
+  createRelationshipSchema,
+  updateRelationshipSchema,
+  partyChainTraverseQuerySchema,
+  partyChainSummaryQuerySchema,
+  partyUpdateSchema,
+} from '../../schemas/party-graph.schemas';
 
 const partiesRouter = Router();
 partiesRouter.use(authenticate);
+// M9 — tenant GUC needed by party_relationship + chain fn_'s. Mounting the
+// middleware here is harmless for the existing M_parity reads (pre-M9 fn_'s
+// don't read app.current_tenant_id).
+partiesRouter.use(rlsMiddleware);
+
 partiesRouter.get('/', authedReadRateLimiter, partiesController.list);
 partiesRouter.post('/', authedWriteRateLimiter, validate(CreatePartySchema, 'body'), partiesController.create);
 partiesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), partiesController.getById);
+
+// ----------------------------------------------------------
+// M9 (CR-B) sub-routes — relationships + chain + chain-summary + PATCH /:id
+// ----------------------------------------------------------
+
+// PATCH /api/v1/parties/:id — editable subset (M9 ep_party_update / S9).
+// Gate: contract.edit OR party.graph.manage (fn body raises 42501 if neither).
+partiesRouter.patch(
+  '/:id',
+  authedWriteRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  validate(partyUpdateSchema, 'body'),
+  partyGraphController.updateParty,
+);
+
+// GET /api/v1/parties/:id/chain
+partiesRouter.get(
+  '/:id/chain',
+  authedReadRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  validate(partyChainTraverseQuerySchema, 'query'),
+  partyGraphController.traverseChain,
+);
+
+// GET /api/v1/parties/:id/chain-summary
+partiesRouter.get(
+  '/:id/chain-summary',
+  authedReadRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  validate(partyChainSummaryQuerySchema, 'query'),
+  partyGraphController.chainSummary,
+);
+
+// GET /api/v1/parties/:id/relationships
+partiesRouter.get(
+  '/:id/relationships',
+  authedReadRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  partyGraphController.listRelationships,
+);
+
+// POST /api/v1/parties/:id/relationships
+partiesRouter.post(
+  '/:id/relationships',
+  authedWriteRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  validate(createRelationshipSchema, 'body'),
+  partyGraphController.createRelationship,
+);
+
+// PATCH /api/v1/parties/:id/relationships/:relId
+partiesRouter.patch(
+  '/:id/relationships/:relId',
+  authedWriteRateLimiter,
+  validate(partyRelationshipIdParamSchema, 'params'),
+  validate(updateRelationshipSchema, 'body'),
+  partyGraphController.updateRelationship,
+);
+
+// DELETE /api/v1/parties/:id/relationships/:relId
+partiesRouter.delete(
+  '/:id/relationships/:relId',
+  authedWriteRateLimiter,
+  validate(partyRelationshipIdParamSchema, 'params'),
+  partyGraphController.deleteRelationship,
+);
 
 const templatesRouter = Router();
 templatesRouter.use(authenticate);

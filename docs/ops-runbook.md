@@ -2081,3 +2081,194 @@ SELECT n.nspname || '.' || p.proname AS fn,
 ---
 
 *Generated 2026-05-10 by Documentation Generator from M8 db-implementation-summary.json (5 migrations applied 109..113; 1 patch round 113 — surgical fn_internal_signal_resolve user_role-junction-lookup fix; PUBLIC count baseline-5 preserved; 12 runtime probes PASS on both branches), be-implementation-summary.json (8 new files + 1 modified; 4 endpoints; tsc clean), smoke-be-report.md (M8-DBI-003 caught at T8/T9 → 500 → fixed via migration 113 → reconfirmed PASS), and qa-stage4-report.md (51/52 + F4 WARN; PASS-WITH-WARNINGS). No Codex review for M8 (Dexian decision 2026-05-04; **eighth consecutive validated**).*
+
+---
+
+# M9 — Counterparty Graph (CR-B) — Operational notes
+
+## 1. Demo walkthrough — 5 hero UBO chain
+
+ADNOC seed pack ships 5 hero counterparty chains that exercise the entire M9 surface end-to-end. Tenant context: ADNOC `00000000-0000-0000-0000-000000000001`.
+
+**Chain 1 — OFAC sanctioned UBO chain (the marquee scenario).**
+
+`Synthetic Holdings Cyprus Ltd (sanctioned)` → `Mid-East Energy Trading FZE` → `Schlumberger Limited`
+
+- Chain head `Synthetic Holdings Cyprus Ltd` carries `sanctions_status='sanctioned'`.
+- Two paths exist between Schlumberger and Synthetic Holdings: via the `party_relationship` edge table AND via `party.parent_id` / `ubo_id` self-FK shortcuts. Migration 122 dedup CTE collapses these to representative rows.
+- Demo path on the FE: navigate to `/app/parties/31` (Schlumberger Limited on `m0-foundation`; resolve via name on `test`), click the `Ownership Chain` tab. Expect the ancestors band to show Mid-East Energy at depth 1 + Synthetic Holdings at depth 2 with a terracotta sanctioned badge. `chainTruncated=false` at default `maxDepth=5`.
+
+**Demo curl:**
+
+```bash
+# Resolve Schlumberger party_id by name (branch-agnostic helper)
+TOKEN="<JWT>"
+SCHLUMBERGER_ID=$(
+  curl -s "http://localhost:4000/api/v1/parties?search=Schlumberger&limit=5" \
+       -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.data.data[] | select(.nameEn=="Schlumberger Limited") | .id'
+)
+
+# Walk ancestors (direction=up). Expect depth=2, ancestors[].length>=2
+curl -s "http://localhost:4000/api/v1/parties/$SCHLUMBERGER_ID/chain?direction=up&maxDepth=5" \
+     -H "Authorization: Bearer $TOKEN" | jq '.data.ancestors | length, .data.depthReached'
+
+# Single round-trip pre-pivoted summary (FE OwnershipChainTab path)
+curl -s "http://localhost:4000/api/v1/parties/$SCHLUMBERGER_ID/chain-summary?maxDepth=5" \
+     -H "Authorization: Bearer $TOKEN" | jq '.data | { ancestorsByDepth: (.ancestorsByDepth | keys), chainTruncated, directRelationshipCounts }'
+```
+
+## 2. OFAC sanctions chain demo (Synthetic Holdings → Mid-East Energy → Schlumberger)
+
+`fn_party_sanctions_match` is the **return-only** entry point (Q-DA4=4a — does NOT write `party.sanctions_status`). The CR-E rule engine (future module) is the production caller; M9 ships the read fn for the demo.
+
+```bash
+# Demo: pretend an OSINT signal flagged "Synthetic Holdings Cyprus Ltd"
+# Use the FULL seed name for similarity above the 0.7 default; or pass similarityThreshold:0.6 to land on a partial.
+curl -s -X POST "http://localhost:4000/api/v1/admin/parties/sanctions-match" \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "signalEntities": [
+         { "entityType": "company", "name": "Synthetic Holdings Cyprus Ltd" }
+       ]
+     }' | jq '.data.matches[] | { name, matchType, similarity }'
+```
+
+**Expected matches (depth-bounded chain expansion):**
+- 1× `direct_name` on Synthetic Holdings Cyprus Ltd (similarity 1.0)
+- 1× `chain_descendant` on Mid-East Energy Trading FZE (similarity ~1.0; `chainPath` carries the hop)
+- 1× `chain_descendant` on Schlumberger Limited (similarity ~1.0; `chainPath` carries 2 hops)
+
+**Verify return-only invariant (AC-S7-06):**
+
+```sql
+-- Before / after sanctions_status — should be unchanged.
+SELECT id, name_en, sanctions_status, sanctions_last_checked
+  FROM party
+ WHERE name_en IN ('Synthetic Holdings Cyprus Ltd', 'Mid-East Energy Trading FZE', 'Schlumberger Limited')
+ ORDER BY name_en;
+```
+
+The `sanctioned` value on Synthetic Holdings Cyprus Ltd is the **seeded** value (migration 121); the match call did NOT mutate any row.
+
+## 3. pg_trgm.similarity threshold tuning (default 0.7; Q-DA2 GUC override)
+
+Threshold resolution order in `fn_party_sanctions_match`:
+
+1. Per-call `similarityThreshold` body parameter (0..1).
+2. Tenant-tunable GUC override — `app.party_sanctions_match_threshold` (set via `ALTER ROLE`/`ALTER DATABASE` or per-session `SET LOCAL`).
+3. Default 0.7 (hardcoded fallback).
+
+**Operator playbook — adjust threshold without redeploying:**
+
+```sql
+-- Lower threshold globally for the neondb_owner pool connection
+ALTER ROLE neondb_owner SET app.party_sanctions_match_threshold = '0.6';
+
+-- Or per-tenant via the connection string GUC:
+-- postgresql://...?options=-c%20app.party_sanctions_match_threshold%3D0.6
+
+-- Or per-call from the FE / admin tool (preferred — no operator action needed):
+-- POST /api/v1/admin/parties/sanctions-match { signalEntities: [...], similarityThreshold: 0.6 }
+```
+
+**Calibration observation OBS-M9-IMPL-1.** With the **default 0.7 threshold**, a partial-name probe like "Synthetic Holdings" against the seed name "Synthetic Holdings Cyprus Ltd" yields `similarity=0.633` — below threshold, zero direct matches. Lowering to 0.6 OR sending the full seed name produces 3 matches. The pilot `compliance_esg` UI should surface the threshold knob to the analyst rather than burying it in env config.
+
+## 4. Cycle detection semantics (Q-DA3 silent cap)
+
+`fn_party_chain_traverse_up` and `_down` use **path-uniqueness** to detect cycles within the recursive CTE — when a cycle is hit, that branch simply stops emitting rows; the rest of the tree continues. **No RAISE** (NOTICE or EXCEPTION) is emitted on cycle.
+
+`chainTruncated=true` is emitted **only when `p_max_depth` is hit**. A cycle that fits inside `maxDepth` produces a bounded result with `chainTruncated=false`. This is correct silent-cap behavior per Q-DA3=3a — the FE shows the truncation banner only when depth-limit is the cause of truncation, not on cycles (which are rendered as dead-end branches).
+
+**Operator probe — confirm cycle handling on a synthetic graph:**
+
+```sql
+-- Construct a tiny cycle: A→B→A, walk from any node, expect bounded result.
+-- (Run on a scratch tenant, NOT the ADNOC seed.)
+SELECT
+  fn_party_chain_traverse_up(p_actor_id := 1, p_party_id := <A_id>, p_max_depth := 5);
+-- ancestors[].length is bounded by the path-uniqueness invariant (no infinite loop).
+-- chainTruncated is FALSE because the cycle terminates the branch before depth=5.
+```
+
+Functional invariants the test suite asserts (`tests/db/CR-B-fns.test.ts`):
+- 2-second wall-clock budget (no infinite loop).
+- `depthReached <= maxDepth`.
+- `ancestors.length <= 20` rows.
+
+## 5. Performance NFR — chain traversal < 100ms at depth=5
+
+Per AC-S5-05 / AC-S6-04 the chain traversal NFR is **depth=5 over ~100 parties / ~300 edges in <100ms**. The ADNOC seed pack is well below this size; the runtime probe targets the worst-case shape (Schlumberger ancestor chain — depth 2, 6 ancestor entries before dedup, 5 after migration 122).
+
+**Worst-case observation knobs:**
+
+```bash
+# Time a chain-summary call (BE controller path; includes Postgres roundtrip + dedup CTE)
+time curl -s "http://localhost:4000/api/v1/parties/$SCHLUMBERGER_ID/chain-summary?maxDepth=5" \
+          -H "Authorization: Bearer $TOKEN" > /dev/null
+
+# Dedicated DB-only probe (excludes BE / network)
+psql "$DATABASE_URL" -c "
+  SET app.current_user_id = '1';
+  SET app.current_tenant_id = '00000000-0000-0000-0000-000000000001';
+  EXPLAIN (ANALYZE, BUFFERS)
+  SELECT fn_party_chain_summary(1, $SCHLUMBERGER_ID, 5);
+"
+```
+
+If the NFR slips beyond a future seed pack growth (say 10,000 parties), look at:
+1. Cardinality of the partial GIN trigram index (`idx_party_name_en_trgm`) — confirm `pg_stat_user_indexes` shows usage on the chain probe.
+2. CTE depth — bump `p_max_depth` only if business need. Each additional level multiplies the recursive rowset.
+3. Convert `fn_party_chain_summary` to a materialized view if the workload becomes truly read-heavy (out of scope for M9 demo).
+
+## 6. PUBLIC EXECUTE invariant — S2-21 sustained at the M3 set of 5 (TENTH consecutive)
+
+M9 contributes **0 net-new PUBLIC EXECUTE grants** despite introducing 12 fn writes (9 net-new + 3 CREATE OR REPLACE EXTEND). The full allowlist remains exactly 5 (all from M3). All M9 fn_'s end with the explicit REVOKE/GRANT trio per migrations 116/118/119/120/122.
+
+```sql
+-- Expect exactly 5 rows, all from M3.
+SELECT n.nspname || '.' || p.proname AS fn,
+       pg_catalog.pg_get_userbyid(unnest(p.proacl)::aclitem) AS grantee
+  FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+ WHERE n.nspname = 'public' AND p.proname LIKE 'fn_%' AND p.proacl::text LIKE '%PUBLIC%';
+```
+
+## 7. Migration 122 — Smoke-caught chain dedup patch
+
+Migration 122 was added during M9 Smoke testing — `fn_party_chain_traverse_up` + `_down` recursive CTEs emitted duplicate `(party_id, depth, via)` tuples when a node was reachable through both an edge AND a self-FK shortcut at the same depth. UI rendered correctly but emitted React duplicate-key warnings because `OwnershipChainTab` keys on `${partyId}-${depth}-${via}`.
+
+**Resolution.** `CREATE OR REPLACE FUNCTION` on both fns with an additional dedup CTE using `DISTINCT ON (party_id, depth, via) ORDER BY party_id, depth, via, ownership_pct DESC NULLS LAST, relationship_type ASC` for deterministic representative-row selection. Migration 119 was NOT amended; 122 stacks on top per the never-edit-an-applied-migration rule. REVOKE/GRANT trio + COMMENT re-applied on both fns per `feedback_fn_rewrites_lose_safety_guards.md` (B14).
+
+**Verify post-122 on both branches:**
+
+```sql
+-- Schlumberger ancestors_by_depth must have unique (party_id, depth, via) tuples
+WITH summary AS (SELECT fn_party_chain_summary(1, <SCHLUMBERGER_ID>, 5) AS s)
+SELECT party_id, depth, via, COUNT(*) AS dup_count
+  FROM summary,
+       LATERAL jsonb_each((s->'ancestorsByDepth')::jsonb) j(depth_key, depth_val),
+       LATERAL jsonb_array_elements(depth_val) AS node
+       CROSS JOIN LATERAL (
+         SELECT (node->>'partyId')::bigint AS party_id,
+                (node->>'depth')::int    AS depth,
+                node->>'via'             AS via
+       ) p
+ GROUP BY party_id, depth, via
+HAVING COUNT(*) > 1;
+-- Expect: 0 rows.
+```
+
+## 8. Tenant-scope asymmetry (Q-DA7 — single-tenant demo posture)
+
+`party_relationship` is tenant-scoped via FORCE RLS on `app.current_tenant_id`. `party` self-FK shortcuts (`parent_id` / `ubo_id`) are **single-tenant in v1** per Q-DA7=7a — the recursive CTE SOURCE B (party self-FK union) does NOT filter on tenant_id. In the v1 demo (single ADNOC tenant), this is a no-op. **Pilot remediation path** (when multi-tenant pilot lands):
+
+1. Add `party.tenant_id` BIGINT/UUID column.
+2. Extend RLS on `party` to scope by tenant.
+3. Tenant-filter the SOURCE B union in `fn_party_chain_traverse_up` / `_down` (single-line CTE WHERE clause).
+
+Documented in `db-design.md §10 Q-DA7` and inline in the recursive CTE SOURCE B comments. The Stage 2 risk register flags this as "design-by-decision; demo-acceptable".
+
+---
+
+*Generated 2026-05-10 by Documentation Generator from M9 db-implementation-summary.json (8 migrations 114..121 applied + 1 Smoke-caught patch 122 for DEFECT-2 chain dedup; PUBLIC count baseline-5 preserved; 8 runtime probes PASS on both branches; ADNOC seed pack 5 hero chains + 23 edges + 35 scaffold parties + alias backfills on top 10), be-implementation-summary.json (DEFECT-1 caught at smoke + fixed at service layer — JSON.stringify aliases before db.callFunction; translatePgError reused as-is), qa-stage4-report.md (52/52 PASS first-run; tenth consecutive S2-21 clean), and module-M9-test-report.md (1073/1074/1/0 full suite; +49 net-new tests; 3 E2E specs flagged-for-human FE-E1 carry-over). No Codex review for M9 (Dexian decision 2026-05-04; **tenth consecutive validated**).*
