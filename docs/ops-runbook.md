@@ -1874,3 +1874,210 @@ GRANT  EXECUTE ON FUNCTION fn_audit_trigger() TO neondb_owner;
 ---
 
 *Generated 2026-05-09 by Documentation Generator from M7 db-implementation-summary.json (8 migrations applied 100..107; 0 impl-time patches; PUBLIC count baseline-5 preserved), be-implementation-summary.json (2 workers + 8 adapters), smoke-test-be-report.md (DEF-1 + DEF-2 fixed in flight), and qa-stage4-report.md (PASS first-run). No Codex review for M7 (Dexian decision 2026-05-04; **seventh consecutive validated**).*
+
+---
+
+# M8 — Internal Signal Data Path — Operational notes
+
+> **Module:** M8 (CR-A2; CRIP Wave 1 follow-up to M7) | **Generated:** 2026-05-10 | **Schema version:** 113
+
+## 1. Demo harness — `POST /api/v1/admin/internal-signals`
+
+The internal-signal ingest endpoint is the **system-only debug harness** for this module — there is no FE form for it in CR-A2 (brief explicit: ingest UI deferred to CR-G dashboards). Admins drive it directly via the JWT debug route during demos and incident reproduction.
+
+**Permission requirement.** The caller's JWT must carry `internal_signal.ingest`. Granted in v1 to **Super Admin + platform_admin only** — defence-in-depth at fn body line 1 raises 42501 if missing.
+
+**System-only marker.** `fn_internal_signal_ingest` is `SECURITY DEFINER` with `REVOKE EXECUTE FROM PUBLIC` and **no role grant**. Only the `neondb_owner` pool connection invokes; the route handler runs as the platform_admin connection user which inherits OWNER capabilities. Mirrors M7 `fn_osint_signal_upsert` (system-only marker).
+
+**Tenant scoping** is automatic via `app.current_tenant_id` GUC (rls.middleware sets it from JWT `tenantId` claim with hard-coded ADNOC UUID fallback per Q-DA4 from M7 — single-tenant demo posture; multi-tenant JWT claim wiring deferred to CR-C). **Caller never passes `tenantId`.**
+
+**Idempotency.** Globally idempotent on `UNIQUE(tenant_id, dedup_hash)`. Dedup hash basis (deterministic SHA-256, AC-S7-01):
+
+```
+source_id || '|' || signal_type || '|' || COALESCE(contract_id::text, vendor_id::text, '') || '|' || observed_at_iso
+```
+
+Same payload posted twice yields `{ inserted: false, dedupHashHit: true }` with the same `signalId` — **201 in both cases (NOT 409)**, per AC-S2-02 + the M7 `fn_osint_signal_upsert` contract.
+
+**Example — milestone_slippage (the EPC SLA hero scenario):**
+
+```bash
+TOKEN=$(curl -s http://localhost:4000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@musanad.local","password":"<pwd>"}' | jq -r .data.accessToken)
+
+curl -s -X POST http://localhost:4000/api/v1/admin/internal-signals \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "signalType": "milestone_slippage",
+    "contractId": <epc_demo_contract_id>,
+    "milestoneRef": "M-2026-Q2",
+    "observedAt": "2026-04-15T10:00:00Z"
+  }' | jq
+
+# Response: { success: true, data: { signalId: 587314, inserted: true,
+#   dedupHashHit: false, signalKindSubtype: "milestone_slippage" }, requestId: "..." }
+```
+
+**Required-field enforcement** is per the catalogue row's `parameter_schema.required[]`:
+
+| signalType | Required keys (beyond signalType + observedAt) |
+|---|---|
+| `milestone_slippage` | `contractId`, `milestoneRef` |
+| `sla_breach` | `contractId` |
+| `payment_delay` | `contractId`, `invoiceRef`, `daysOverdue` |
+| `invoice_dispute` | `contractId`, `invoiceRef` |
+| `vendor_incident` | `vendorId` |
+| `ics_incident` | (none) |
+| `icv_status_change` | `vendorId` |
+| `certificate_expiry` | (none) |
+
+Severity override is OPTIONAL — `fn_internal_signal_ingest` defaults to the catalogue row's `defaultSeverity` if `severity` is omitted.
+
+## 2. Resolution endpoint — `POST /api/v1/internal-signals/:id/resolve`
+
+The resolution endpoint is the **single canonical resolution path** in v1 (Q-DA4 lock = ALWAYS-MANUAL). Auto-resolution is deferred to pilot (couples CR-A2 timing to CR-E rule engine landing).
+
+**Permission requirement.** `internal_signal.resolve` AND a per-signal_type role allowlist (Q-DA3 hardcoded mapping in fn body). Super Admin + platform_admin always allowed across all 8 subtypes.
+
+**Idempotency.** Re-resolve of an already-resolved signal returns the existing `{ signalId, resolvedAt, resolvedBy }` values unchanged AND **skips the pg_notify emission** (AC-S5-03; the fn detects this via `metadata->>'resolvedAt' IS NOT NULL`).
+
+**`pg_notify('internal_signal_resolved')` emission.** First-resolve only. Payload `{ signalId, tenantId, signalKindSubtype, resolutionKind, resolvedBy, resolvedAt }`. CR-E rule engine LISTENs for downstream re-evaluation (future module).
+
+**Production-direct-endpoint requirement** carries over from M7 F-3 — worker connections that subscribe to `internal_signal_resolved` MUST use Neon **direct** endpoint, not `-pooler`. PgBouncer transaction pooling drops session-level LISTEN. See ops-runbook M7 section 2.
+
+**Example — resolve a milestone_slippage signal:**
+
+```bash
+curl -s -X POST http://localhost:4000/api/v1/internal-signals/587314/resolve \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "resolutionKind": "cleared",
+    "resolutionNote": "Milestone M-2026-Q2 delivered on 2026-04-20."
+  }' | jq
+
+# First call:
+# { success: true, data: { signalId: 587314, idempotent: false,
+#   resolvedAt: "2026-05-09T23:35:10.611855+00:00", resolvedBy: 1,
+#   resolutionKind: "cleared" }, requestId: "..." }
+
+# Second call (idempotent re-resolve):
+# { success: true, data: { signalId: 587314, idempotent: true,
+#   resolvedAt: "2026-05-09T23:35:10.611855+00:00", resolvedBy: 1,
+#   resolutionKind: "cleared" }, requestId: "..." }
+# Note: same resolvedAt timestamp confirms idempotence path.
+```
+
+**Per-signal_type role allowlist (Q-DA3 hardcoded):**
+
+| signal_type | Required role(s) (in addition to Super Admin + platform_admin always-allowed) |
+|---|---|
+| milestone_slippage / sla_breach | operations |
+| payment_delay / invoice_dispute | finance_treasury |
+| vendor_incident / ics_incident | operations OR procurement |
+| icv_status_change | compliance_esg OR procurement |
+| certificate_expiry | compliance_esg OR legal_counsel |
+
+The 4 deferred CR-G persona roles (`operations`, `finance_treasury`, `procurement`, `compliance_esg`) are referenced in the CASE but absent from the role table in v1 — the EXISTS subquery returns FALSE for any caller carrying those role names today (admin-only resolution in v1).
+
+## 3. EPC SLA hero scenario — production-like demo invariant
+
+Migration 112(c) seeds a deterministic EPC scenario for demos. The scenario centres on:
+
+- **EPC Pipeline Contractors LLC** — counterparty seeded with `party_type='company'`, `is_seed=TRUE`, `trade_license_number='EPC-CRA2-DEMO-001'`. Idempotent SELECT-then-INSERT-with-ON-CONFLICT on the trade_license_number unique key.
+- **Contract `CRA2-EPC-2026-001`** — master_services contract at 4.5M AED, `counterparty_id=<v_counterparty_id>`. Idempotent on the `contract_number` UNIQUE key.
+- **10 internal signals** seeded via 10 PERFORMs of `fn_internal_signal_ingest` against this counterparty + contract: 4 milestone_slippage + 2 sla_breach + 2 payment_delay + 2 icv_status_change.
+
+**The hero invariant — `count_in_180_days >= 3` (AT-2 / AC-S3-01).** The 4 milestone_slippage rows are back-dated via `now() - interval 'N days'` with N values 30/60/120/170 (Q-DA5 RELATIVE lock). All 4 fall within the trailing 180-day window. **Verify post-deploy:**
+
+```sql
+SELECT count(*)
+  FROM osint_signal s
+  JOIN contract c ON c.contract_number = 'CRA2-EPC-2026-001'
+ WHERE s.kind = 'internal'
+   AND s.signal_kind_subtype = 'milestone_slippage'
+   AND (s.raw_payload->>'contractId')::bigint = c.id
+   AND s.fetched_at > now() - interval '180 days';
+-- Expect: 4 (probe 3 of the DB Impl runtime probes — passes on both branches at schema_migrations.version=113)
+```
+
+**Why RELATIVE back-dating?** Absolute timestamps decay; the demo would silently break after the 180-day window passes. RELATIVE keeps the invariant TRUE forever and the demo always fresh on every redeploy.
+
+**Demo-walk preflight checklist:**
+
+1. `schema_migrations.version >= 113` on both branches.
+2. `SELECT count(*) FROM internal_signal_kind WHERE tenant_id = '00000000-0000-0000-0000-000000000001';` returns 8.
+3. `SELECT count(*) FROM osint_signal WHERE source_id = 'internal:harness';` returns 10 (or higher if demos ingested more during the session).
+4. `SELECT count(*) FROM osint_signal WHERE signal_kind_subtype = 'milestone_slippage' AND fetched_at > now() - interval '180 days';` returns >= 4.
+5. POST `/api/v1/admin/internal-signals` with the milestone_slippage payload → 201 with `inserted=true`.
+6. POST the same payload again → 201 with `inserted=false, dedupHashHit=true` and the same `signalId`.
+7. POST `/api/v1/internal-signals/<signalId>/resolve` with `{resolutionKind:"cleared"}` → 200 with `idempotent=false`.
+8. Re-POST the same → 200 with `idempotent=true` and the same `resolvedAt` timestamp.
+9. GET `/api/v1/internal-signals?signalType=milestone_slippage&since=<180d ago>` returns the 4 EPC seed rows + any demo-added rows.
+
+## 4. Migration 113 patch context — the user_role junction table that doesn't exist
+
+**Background.** The original `fn_internal_signal_resolve` shipped in migration 111 referenced a `user_role` junction table in its Q-DA3 hardcoded role-allowlist EXISTS subquery:
+
+```sql
+-- BROKEN (migration 111, lines ~245):
+WHERE EXISTS (
+  SELECT 1 FROM user_role ur
+  JOIN role r ON r.id = ur.role_id
+  WHERE ur.user_id = p_actor_id
+    AND ur.is_active = TRUE
+    AND r.name IN (...)
+)
+```
+
+**The Musanad schema does not have `user_role`.** The schema is single-role-per-user via `"user".role_id BIGINT REFERENCES role(id)` (M0 migration 001 line 117). Smoke BE caught the bug at HTTP layer:
+
+```
+T8: POST /api/v1/internal-signals/587314/resolve → 500 INTERNAL_ERROR
+    fn_internal_signal_resolve: relation "user_role" does not exist
+```
+
+Blocked AC-S5-01..S5-04 + AC-S8-04 (pg_notify never reached).
+
+**Migration 113 fix.** Surgical `CREATE OR REPLACE FUNCTION fn_internal_signal_resolve` with the join swapped:
+
+```sql
+-- FIXED (migration 113):
+WHERE EXISTS (
+  SELECT 1 FROM "user" u
+  JOIN role r ON r.id = u.role_id
+  WHERE u.id = p_actor_id
+    AND u.is_active = TRUE
+    AND r.name IN (...)
+)
+```
+
+Q-DA3 per-signal_type role-name CASE/fallback list preserved verbatim. Standard tail block (`COMMENT ON FUNCTION` + `REVOKE EXECUTE FROM PUBLIC` + `GRANT EXECUTE TO neondb_owner`) re-applied per `feedback_fn_rewrites_lose_safety_guards.md` (B14) — `CREATE OR REPLACE FUNCTION` silently drops EXECUTE grants without explicit re-application.
+
+**Verification post-113 (5 runtime probes per branch — all PASS):**
+
+1. `proacl` clean (`{neondb_owner=X/neondb_owner}`; no `=X/` PUBLIC entry)
+2. First call: `idempotent=false`, returns `signalId / resolvedAt / resolvedBy / resolutionKind`
+3. Second call (same body): `idempotent=true`, **same resolvedAt timestamp**
+4. metadata contains all 4 keys: `{ resolvedAt, resolvedBy, resolutionKind, resolutionNote }`
+5. `schema_migrations.version=113` recorded
+
+**Codification candidate S2-22c.** This is the project's first **TABLE-existence** miss within fn JOIN bodies. Agent 4 + QA Stage 2's S2-22b focused on column-existence within already-validated FROM/JOIN paths, not on whether the target relations themselves exist. Agent 6's apply-time runtime probes did not exercise the resolve fn (only count + ingest paths); Smoke caught it. **Lesson:** extend column-existence check to include FROM/JOIN-target TABLE-existence verification across every fn body, AND apply-time runtime probes for write fn_'s should include at least one happy-path execution against seed data, not just COUNT/structural queries.
+
+## 5. PUBLIC EXECUTE invariant — S2-21 sustained at the M3 set of 5 (eighth consecutive)
+
+M8 contributes **0 net-new PUBLIC EXECUTE grants**. The full allowlist remains exactly 5 (all from M3). All 4 M8 fn_'s end with the explicit `REVOKE FROM PUBLIC` trio per migrations 111 + 113.
+
+```sql
+-- Expect exactly 5 rows, all from M3.
+SELECT n.nspname || '.' || p.proname AS fn,
+       pg_catalog.pg_get_userbyid(unnest(p.proacl)::aclitem) AS grantee
+  FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+ WHERE n.nspname = 'public' AND p.proname LIKE 'fn_%' AND p.proacl::text LIKE '%PUBLIC%';
+```
+
+---
+
+*Generated 2026-05-10 by Documentation Generator from M8 db-implementation-summary.json (5 migrations applied 109..113; 1 patch round 113 — surgical fn_internal_signal_resolve user_role-junction-lookup fix; PUBLIC count baseline-5 preserved; 12 runtime probes PASS on both branches), be-implementation-summary.json (8 new files + 1 modified; 4 endpoints; tsc clean), smoke-be-report.md (M8-DBI-003 caught at T8/T9 → 500 → fixed via migration 113 → reconfirmed PASS), and qa-stage4-report.md (51/52 + F4 WARN; PASS-WITH-WARNINGS). No Codex review for M8 (Dexian decision 2026-05-04; **eighth consecutive validated**).*

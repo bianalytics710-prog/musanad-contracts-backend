@@ -30,6 +30,11 @@ import {
 import impactSignalsRouter from './impact-signals.routes';
 import adminSourcesRouter from './admin-sources.routes';
 import signalsRouter from './signals.routes';
+import {
+  adminInternalSignalsRouter,
+  adminInternalSignalKindsRouter,
+} from './admin-internal-signals.routes';
+import internalSignalsRouter from './internal-signals.routes';
 
 const v1Router = Router();
 
@@ -94,5 +99,21 @@ v1Router.use('/impact-signals', impactSignalsRouter);
 // All JWT-authenticated; zero new PUBLIC fn_'s. Tenant GUC via rls.middleware.
 v1Router.use('/admin/sources', adminSourcesRouter);
 v1Router.use('/signals', signalsRouter);
+
+// M8 — Internal Signal Data Path (CR-A2). 4 endpoints across 3 namespaces:
+//   /api/v1/admin/internal-signals       — POST ingest (system-only,
+//                                          internal_signal.ingest in fn_)
+//   /api/v1/admin/internal-signal-kinds  — GET catalogue (bare-array,
+//                                          internal_signal.read in fn_)
+//   /api/v1/internal-signals             — GET paginated list + POST
+//                                          :id/resolve (idempotent;
+//                                          internal_signal.read /
+//                                          internal_signal.resolve gates
+//                                          + Q-DA3 per-signal_type role
+//                                          mapping inside fn_)
+// All JWT-authenticated; zero new PUBLIC fn_'s. Tenant GUC via rls.middleware.
+v1Router.use('/admin/internal-signals', adminInternalSignalsRouter);
+v1Router.use('/admin/internal-signal-kinds', adminInternalSignalKindsRouter);
+v1Router.use('/internal-signals', internalSignalsRouter);
 
 export default v1Router;

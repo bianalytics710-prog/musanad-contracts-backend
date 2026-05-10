@@ -190,16 +190,69 @@ const translatePgError = (err: unknown, fnName: string): ApiError => {
             const msg = m[3]?.trim() ?? 'Invalid value';
             return new ValidationError(msg, { [field]: msg });
           }
+          // M8 (CR-A2) fn_internal_signal_*: WHEN OTHERS wrapper produces
+          // 'fn_X: <natural-language msg>'. Strip the wrapper so message-based
+          // routing (/not found/, field-extraction below) can run against the
+          // raw raise text. M2's STRUCTURED_RAISE_RE does NOT defeat this
+          // because the wrapped body for M2 is 'fn_X: field:msg' — that
+          // already matched STRUCTURED_RAISE_RE above, so we only reach this
+          // path for non-structured raises.
+          const wrapMatch = /^(fn_[a-z0-9_]+):\s+(.+)$/.exec(firstLine);
+          const innerMsg = wrapMatch?.[2]?.trim() ?? firstLine;
           // M7 (CR-A) fn_osint_* raise 22023 with unstructured literal messages
           // (no field prefix) for not-found / disabled / immutable cases. Route
           // by message content to the right HTTP status — same literal-prefix
           // pattern as the M1c "Counter underflow" P0001 routing block. See
           // feedback_translatePgError_p0001_routing.md.
-          if (/not found/i.test(firstLine)) {
-            return new NotFoundError(firstLine);
+          if (/not found/i.test(innerMsg)) {
+            // M8 / M7: derive field from the message subject for inline error
+            // display ("Contract not found" → contractId; "Vendor not found"
+            // → vendorId; "Signal not found" → signalId; otherwise leave undef).
+            let field: string | undefined;
+            if (/^contract not found/i.test(innerMsg)) field = 'contractId';
+            else if (/^vendor not found/i.test(innerMsg)) field = 'vendorId';
+            else if (/^signal not found/i.test(innerMsg)) field = 'signalId';
+            return new NotFoundError(innerMsg, field ? { [field]: innerMsg } : undefined);
           }
-          if (/(is disabled|is immutable|already exists|cannot be (?:disabled|deleted|modified))/i.test(firstLine)) {
-            return new ConflictError(firstLine);
+          if (/(is disabled|is immutable|already exists|cannot be (?:disabled|deleted|modified))/i.test(innerMsg)) {
+            return new ConflictError(innerMsg);
+          }
+          // M8 (CR-A2) natural-language validation raises — derive field from
+          // recognised message shapes so the API envelope carries
+          // `error.details.<field>` and FE can show the inline error.
+          // Patterns are intentionally narrow — only known M8 raise shapes.
+          const fieldExtractors: Array<{ re: RegExp; field: string }> = [
+            { re: /^required field missing for signal_type=[^:]+:\s*(\w+)/i, field: '__capture' },
+            { re: /^unknown internal signal type:/i, field: 'signalType' },
+            { re: /^signaltype is required/i, field: 'signalType' },
+            { re: /^signaltype must be one of/i, field: 'signalType' },
+            { re: /^observedat is required/i, field: 'observedAt' },
+            { re: /^contractid must be a bigint/i, field: 'contractId' },
+            { re: /^vendorid must be a bigint/i, field: 'vendorId' },
+            { re: /^since must be an iso/i, field: 'since' },
+            { re: /^status must be one of/i, field: 'status' },
+            { re: /^severity must be one of/i, field: 'severity' },
+            { re: /^invalid resolution kind/i, field: 'resolutionKind' },
+            { re: /^signal is not an internal signal/i, field: 'signalId' },
+            { re: /^tenant context not set/i, field: '_root' },
+          ];
+          for (const ex of fieldExtractors) {
+            const fx = ex.re.exec(innerMsg);
+            if (fx) {
+              let field = ex.field;
+              if (field === '__capture' && fx[1]) {
+                // Required-field-missing pattern: capture the field name from
+                // the trailing ': <field>' chunk.
+                field = fx[1];
+              }
+              return new ValidationError(innerMsg, { [field]: innerMsg });
+            }
+          }
+          // Fallback: preserve the inner raise message rather than discarding
+          // it for the generic placeholder. Better DX for both the FE and the
+          // smoke / testing agents.
+          if (wrapMatch) {
+            return new ValidationError(innerMsg, { _root: innerMsg });
           }
         }
         return new ValidationError(`${fnName}: invalid parameter value`);

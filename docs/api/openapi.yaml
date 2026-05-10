@@ -223,7 +223,110 @@ info:
     - **Q-DA2** — RESTRICTIVE deny-direct-update on `osint_signal` verified safe.
     - **Q-DA3** — `osint_source_id` NULL on R-LC backfill rows.
     - **Q-DA4** — `rls.middleware` ADNOC fallback for v1 single-tenant demo.
-  version: 1.0.0
+
+    **M8 (CR-A2 — CRIP Wave 1 follow-up to M7)** — Internal Signal Data Path.
+    Establishes the minimal ingestion path for internal operational signals
+    (milestone slippage / SLA breach / payment delay / invoice dispute /
+    vendor incident / ICS incident / ICV status change / certificate expiry)
+    feeding the future CR-E rule engine. **4 new endpoints** across two
+    namespaces — `POST /api/v1/admin/internal-signals` (system-only debug
+    ingest harness; permission `internal_signal.ingest` REVOKE-only on
+    PUBLIC), `GET /api/v1/admin/internal-signal-kinds` (read-only admin
+    viewer of the 8-row tenant catalogue; bare-array response per S2-12
+    EXCEPTION-PASS — bounded set), `GET /api/v1/internal-signals`
+    (paginated list filtered by signalType / contractId / vendorId /
+    since / status), and `POST /api/v1/internal-signals/:id/resolve`
+    (idempotent manual resolution; emits `pg_notify('internal_signal_resolved')`
+    on first-resolve only). All 4 JWT-authed; **zero new PUBLIC EXECUTE
+    grants** — sustained at the M3 baseline of 5 names (eighth consecutive
+    clean module on S2-21). **1 new table** (`internal_signal_kind` —
+    BIGSERIAL id, tenant UUID FK, `signal_type` CHECK enum-of-8 +
+    UNIQUE(tenant_id, signal_type), `parameter_schema` JSONB defining
+    required/optional ingest payload fields per signal_type,
+    `default_severity` CHECK enum-of-5 reusing the M7 osint_signal vocabulary;
+    8 ADNOC seed rows in migration 112). **1 new column** on `osint_signal`
+    (`metadata JSONB NOT NULL DEFAULT '{}'::jsonb` per Q-DA6 lock —
+    carries the resolution lifecycle sub-object
+    `{resolvedAt, resolvedBy, resolutionKind, resolutionNote}`; idempotent
+    re-resolve detection key). **4 new fn_'s** —
+    `fn_internal_signal_ingest` DEFINER system-only (REVOKE-only on PUBLIC;
+    no role grant; only neondb_owner pool connection invokes; constructs
+    the 9-required-key M7 OsintSignalUpsertPayload contract verbatim per
+    S2-19 LOCK and DELEGATES via PERFORM to `fn_osint_signal_upsert`;
+    deterministic SHA-256 dedup_hash basis
+    `source_id || '|' || signal_type || '|' || COALESCE(contract_id::text,
+    vendor_id::text, '') || '|' || observed_at_iso`),
+    `fn_internal_signal_resolve` INVOKER (writes via the new
+    permission-gated USING extension on the M7 RESTRICTIVE
+    deny-direct-update policy; idempotent on `metadata->>'resolvedAt'
+    IS NOT NULL` — re-resolve returns existing values unchanged + skips
+    pg_notify per AC-S5-03; per-signal_type role allowlist hardcoded as
+    CASE on signal_kind_subtype per Q-DA3 lock; v_actor=0 → NULL coercion
+    per S2-20 sentinel pattern), `fn_internal_signal_kind_list` INVOKER
+    STABLE (bare-array per M7 fn_source_health_list precedent),
+    `fn_internal_signal_list` INVOKER STABLE (direct osint_signal scan
+    with `kind='internal'` filter + jsonb predicates on
+    `raw_payload->>'contractId'` / `'vendorId'` — does NOT wrap M7
+    `fn_osint_signal_list`, different filter set + different permission gate).
+    **1 new audit trigger** (`audit_internal_signal_kind_changes`; the
+    catalogue is bounded and volume-safe to audit). **osint_signal audit
+    trigger remains OFF** (M7 migration 108 dropped it for write-volume
+    safety; M8 keeps it OFF — `pg_notify('osint_signal_inserted')` (M7) +
+    `internal_signal_resolved` (M8) channels are the canonical write trail).
+    **3 new permissions** — `internal_signal.ingest` (system-only marker;
+    Super Admin + platform_admin), `internal_signal.read` (Super Admin +
+    platform_admin + legal_counsel + executive; 4 deferred CR-G persona
+    roles via WHERE EXISTS no-op), `internal_signal.resolve` (Super Admin +
+    platform_admin + per-signal_type allowlist via Q-DA3 hardcoded CASE).
+    **1 new pg_notify channel** — `internal_signal_resolved` payload
+    `{ signalId, tenantId, signalKindSubtype, resolutionKind, resolvedBy,
+    resolvedAt }`; emitted on first-resolve only; CR-E rule engine LISTENs
+    for downstream re-evaluation. **1 RESTRICTIVE policy extension** on
+    `osint_signal` — the M7 `osint_signal_deny_direct_update` policy gains
+    a permission-gated USING/WITH CHECK clause for
+    `fn_current_user_has_permission('internal_signal.resolve')` so the
+    INVOKER `fn_internal_signal_resolve` write path can land cleanly without
+    a DEFINER bypass. **EPC SLA hero scenario** — migration 112(c) Route B
+    pre-seeds an EPC counterparty (`EPC Pipeline Contractors LLC`,
+    party_type=`company`, `trade_license_number='EPC-CRA2-DEMO-001'`) +
+    EPC master_services contract (`contract_number='CRA2-EPC-2026-001'`,
+    value 4.5M AED) via idempotent SELECT-then-INSERT-with-ON-CONFLICT,
+    then PERFORMs 10 internal-signal ingest calls with `now() - interval
+    'N days'` relative back-dating (Q-DA5 lock; N=30/60/120/170 spanning
+    the 180-day window). Subtype breakdown 4 milestone_slippage + 2
+    sla_breach + 2 payment_delay + 2 icv_status_change. The `count_in_180_days
+    >= 3` invariant (AT-2) holds at exactly 4 on both branches per probe 3.
+    **5 migrations applied** (109..113; 113 was a patch round resolving
+    M8-DBI-003 — fn_internal_signal_resolve referenced a non-existent
+    `user_role` junction table; the Musanad schema is single-role-per-user
+    via `"user".role_id`. Surgical CREATE OR REPLACE FUNCTION with the join
+    swapped for `FROM "user" u JOIN role r ON r.id = u.role_id`; standard
+    REVOKE/GRANT trio re-applied per feedback_fn_rewrites_lose_safety_guards.md).
+    `schema_migrations.version=113` on both `m0-foundation` + `test`
+    branches. **1024 tests / 1024 pass / 1 skip / 0 fail** (full suite
+    snapshot post-M8; 40 net-new tests = 19 DB + 21 BE; 3 E2E specs
+    flagged-for-human due to a pre-existing FE auth-bootstrap race that
+    ALSO affects M7 specs — carry-forward as FE-E1). **Codex Review SKIPPED**
+    per Dexian decision 2026-05-04 (eighth consecutive validated). **Version
+    bumped 1.0.0 → 1.0.1** — M8 is a feature follow-up to the M7 chassis CR;
+    minor-patch bump matches semantic-versioning intent for additive
+    endpoints + 1 column extension.
+
+    **Key Design Decisions locked at HITL Gate 2 (M8 — 6 decisions; all
+    auto-applied per autonomous-mode brief recommendations):**
+
+    - **Q-DA1** — `osint_signal` CHECK constraint extension: DEFER (upstream
+      validation in fn_internal_signal_ingest is canonical guard).
+    - **Q-DA2** — Resolution event mechanism: PG_NOTIFY-ONLY (no
+      `signal_event` table; CR-A2 minimal-scope mandate).
+    - **Q-DA3** — Resolve permission gate per signal_type: HARDCODED in fn body.
+    - **Q-DA4** — Auto-resolution rules: ALWAYS-MANUAL.
+    - **Q-DA5** — Seed pack `fetched_at` strategy: RELATIVE
+      (`now() - interval 'N days'`).
+    - **Q-DA6** — `osint_signal.metadata` JSONB column: ADD (Implementation A);
+      M7 RESTRICTIVE deny-direct-update policy extended with permission-gated
+      USING clause for `internal_signal.resolve`.
+  version: 1.0.1
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -616,6 +719,93 @@ tags:
       OFF on `source_health`** (Q-NEW6 / OQ-6 lock — 5-min × 8 sources
       × N tenants would flood audit_log; the table's own
       `checked_at + state` columns are its ledger).
+  - name: M8 — Internal Signal Ingest (Admin)
+    description: |
+      Internal-signal ingestion debug surface (M8 — CR-A2 — S2/S7).
+      Single endpoint `POST /api/v1/admin/internal-signals`. JWT-authed;
+      `internal_signal.ingest` permission. **System-only marker** — fn
+      `fn_internal_signal_ingest` is DEFINER with `REVOKE EXECUTE FROM
+      PUBLIC` and **no role grant**; only the neondb_owner pool connection
+      invokes. The `internal_signal.ingest` permission row is granted to
+      Super Admin + platform_admin so admins can hit this debug route via
+      JWT in v1 demos; defence-in-depth permission gate at fn body line 1
+      raises 42501 if the caller's permission set does not include it.
+      Validates `signalType` against the tenant's `internal_signal_kind`
+      catalogue + `parameter_schema.required[]` for the matching row;
+      constructs the 9-required-key M7 OsintSignalUpsertPayload contract
+      verbatim per S2-19 LOCK (`sourceId / sourceReliability / fetchedAt /
+      kind / title / severity / confidence / rawPayload / dedupHash`) and
+      DELEGATES via PERFORM to `fn_osint_signal_upsert`. Idempotent on
+      `UNIQUE(tenant_id, dedup_hash)` — same payload posted twice yields
+      `{ inserted: false, dedupHashHit: true }` with the same `signalId`
+      (201 in both cases, NOT 409 — per AC-S2-02 + the M7
+      `fn_osint_signal_upsert` contract). Deterministic SHA-256 dedup_hash
+      basis: `source_id || '|' || signal_type || '|' || COALESCE(contract_id::text,
+      vendor_id::text, '') || '|' || observed_at_iso`. Tenant scoping
+      auto via `app.current_tenant_id` GUC (rls.middleware sets it from JWT
+      `tenantId` claim with hard-coded ADNOC UUID fallback per Q-DA4 from M7
+      — single-tenant demo posture; multi-tenant JWT claim wiring deferred
+      to CR-C). Caller never passes `tenantId`. `source_id` always set to
+      `'internal:harness'` for v1; pilot will substitute `'internal:erp_<system>'`
+      once the mock ERP connector lands.
+  - name: M8 — Internal Signal Kinds (Admin)
+    description: |
+      Read-only admin viewer of the 8 internal-signal kinds catalogue (M8 —
+      CR-A2 — S6). Single endpoint `GET /api/v1/admin/internal-signal-kinds`.
+      JWT-authed; `internal_signal.read` permission (granted to Super
+      Admin + platform_admin + legal_counsel + executive in v1; operations /
+      finance_treasury / procurement / compliance_esg conditional WHERE
+      EXISTS no-op until those roles are introduced by a future CR — likely
+      CR-G). **Bare-array response shape** (no pagination envelope) per
+      S2-12 documented design exception — bounded set per tenant (8 rows).
+      Mirrors the M7 `fn_source_health_list` precedent. Returns `is_active=TRUE`
+      rows only (the v1 seed inserts all 8 active; future deactivations
+      filter at the fn layer). Tenant-scoped via the
+      `internal_signal_kind_tenant_select` RLS policy on
+      `current_setting('app.current_tenant_id')::uuid`. Ordered
+      `signal_type ASC` (deterministic for FE / screen-reader iteration).
+      Each row carries `parameterSchema` JSON-Schema-style spec
+      (`{ required: string[], optional: string[] }`) consumed by
+      `fn_internal_signal_ingest` for required-field enforcement, plus
+      EN+AR display names and `defaultSeverity` reusing the M7 osint_signal
+      severity vocabulary (`informational/low/medium/high/critical`).
+  - name: M8 — Internal Signals
+    description: |
+      Internal-signal read + resolve API (M8 — CR-A2 — S4/S5).
+      2 endpoints under `/api/v1/internal-signals/*`. All JWT-authed.
+      Permission gates: `internal_signal.read` (list) and
+      `internal_signal.resolve` (resolve). Tenant-scoped via the M7
+      `osint_signal_tenant_isolation_select` RLS policy on
+      `current_setting('app.current_tenant_id')::uuid` — cross-tenant
+      requests return empty data array (AC-S4-04 / AC-S8-02).
+      `GET /api/v1/internal-signals` does NOT wrap M7 `fn_osint_signal_list`
+      (per collision-report S2-19 finding 2 — different filter set + different
+      permission gate); direct osint_signal scan with `kind='internal'`
+      filter + jsonb predicates on `raw_payload->>'contractId'` / `'vendorId'`,
+      ordered `fetched_at DESC NULLS LAST, id DESC`, page/limit clamped to
+      `LEAST(p_limit, 100)` per M7 fn_osint_signal_list precedent.
+      `POST /api/v1/internal-signals/:id/resolve` is **idempotent** —
+      re-resolve of an already-resolved signal returns the existing
+      `{ signalId, resolvedAt, resolvedBy }` values unchanged AND skips
+      the `pg_notify('internal_signal_resolved')` emission (AC-S5-03; the
+      fn detects this via `metadata->>'resolvedAt' IS NOT NULL`).
+      **Per-signal_type role allowlist** (Q-DA3 hardcoded mapping in fn body):
+      milestone_slippage / sla_breach require `operations`; payment_delay /
+      invoice_dispute require `finance_treasury`; vendor_incident /
+      ics_incident require `operations` OR `procurement`; icv_status_change
+      requires `compliance_esg` OR `procurement`; certificate_expiry
+      requires `compliance_esg` OR `legal_counsel`. Super Admin +
+      platform_admin always allowed across all 8 subtypes. The 4 deferred
+      CR-G persona roles (`operations`, `finance_treasury`, `procurement`,
+      `compliance_esg`) are referenced in the CASE but absent from the role
+      table in v1 — the EXISTS subquery returns FALSE for any caller carrying
+      those role names today, which is correct (v1 is admin-only resolution).
+      `pg_notify('internal_signal_resolved')` payload:
+      `{ signalId, tenantId, signalKindSubtype, resolutionKind, resolvedBy,
+      resolvedAt }`. CR-E rule engine LISTENs for downstream re-evaluation
+      (future module). The M7 F-3 ops note applies — production worker
+      connections that LISTEN MUST use the Neon **direct** endpoint, not
+      `-pooler`.
 
 components:
   securitySchemes:
@@ -5464,6 +5654,279 @@ components:
         sourceId: { type: string }
         actorId: { type: integer }
         requestedAt: { type: string, format: date-time }
+
+    # ============================================================
+    # M8 — Internal Signal Data Path (CR-A2)
+    # ============================================================
+
+    InternalSignalType:
+      type: string
+      description: |
+        The 8 SOT-sealed internal signal sub-types (db-design.md §1.1
+        CHECK enum). Maps 1:1 to `internal_signal_kind.signal_type` AND
+        to `osint_signal.signal_kind_subtype` for rows where `kind = 'internal'`.
+      enum:
+        - milestone_slippage
+        - sla_breach
+        - payment_delay
+        - invoice_dispute
+        - vendor_incident
+        - ics_incident
+        - icv_status_change
+        - certificate_expiry
+
+    SignalResolutionKind:
+      type: string
+      description: |
+        Resolution-kind closed list (db-design.md §5.2 step 5). Single
+        4-value enum applied uniformly across all 8 signal_types (Agent 5
+        decision). Per-subtype reason codes belong in `resolutionNote`
+        free-text; pilot can promote a subset to structured tags via a
+        separate `resolution_reason_code` lookup table when admin demand
+        exists.
+      enum:
+        - cleared
+        - superseded
+        - mitigated
+        - false_positive
+
+    InternalSignalStatusFilter:
+      type: string
+      description: |
+        Status filter for `GET /api/v1/internal-signals?status=...`.
+        Maps to `metadata.resolvedAt IS NULL` (open) /
+        `IS NOT NULL` (resolved). `'all'` is the controller-side default
+        (no predicate; stripped before passing to fn body).
+      enum: [open, resolved, all]
+
+    InternalSignalParameterSchema:
+      type: object
+      description: |
+        Shape of the `parameter_schema` JSONB column on
+        `internal_signal_kind`. Consumed by `fn_internal_signal_ingest`
+        for required-field enforcement (db-design.md §5.1 step 5).
+        `required[]` keys MUST be present on the ingest payload root.
+        `optional[]` is documentary (FE form hints / Zod schema generators).
+      required: [required, optional]
+      properties:
+        required:
+          type: array
+          items: { type: string }
+        optional:
+          type: array
+          items: { type: string }
+
+    InternalSignalKind:
+      type: object
+      description: |
+        `internal_signal_kind` row as projected by
+        `fn_internal_signal_kind_list` (db-design.md §5.3). Tenant-scoped
+        via `app.current_tenant_id` GUC (RLS policy
+        `internal_signal_kind_tenant_select`).
+      required:
+        - id
+        - signalType
+        - displayName
+        - displayNameAr
+        - parameterSchema
+        - defaultSeverity
+        - isActive
+        - createdAt
+        - updatedAt
+      properties:
+        id: { type: integer }
+        signalType: { $ref: "#/components/schemas/InternalSignalType" }
+        displayName: { type: string }
+        displayNameAr: { type: string }
+        description: { type: string, nullable: true }
+        parameterSchema: { $ref: "#/components/schemas/InternalSignalParameterSchema" }
+        defaultSeverity: { $ref: "#/components/schemas/Severity" }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    InternalSignalMetadata:
+      type: object
+      description: |
+        Resolution-lifecycle JSONB sub-object stored on
+        `osint_signal.metadata` (Q-DA6 lock = ADD column). Written ONLY by
+        `fn_internal_signal_resolve` (db-design.md §5.2 step 8).
+        Idempotence (AC-S5-03): re-resolve of an already-resolved signal
+        returns the existing object unchanged (fn detects via
+        `metadata->>'resolvedAt' IS NOT NULL` and skips the pg_notify).
+      required: [resolvedAt, resolvedBy, resolutionKind]
+      properties:
+        resolvedAt: { type: string, format: date-time }
+        resolvedBy: { type: integer, nullable: true }
+        resolutionKind: { $ref: "#/components/schemas/SignalResolutionKind" }
+        resolutionNote: { type: string, nullable: true }
+
+    InternalSignalRow:
+      type: object
+      description: |
+        Internal signal row as projected by `fn_internal_signal_list`
+        (db-design.md §5.4). Narrows the M7 OsintSignal contract to
+        `kind='internal'` AND adds CR-A2-specific projections (`signalType`,
+        `metadata`, flat `resolvedAt / resolvedBy / resolutionKind`).
+        Omits `geographies` / `affectedEntities` / `dedupHash` from the
+        M7 OsintSignal projection — uninteresting for the internal-signal
+        admin / executive read path.
+      required:
+        - id
+        - tenantId
+        - signalType
+        - kind
+        - title
+        - severity
+        - confidence
+        - fetchedAt
+        - sourceId
+        - sourceReliability
+        - rawPayload
+        - metadata
+        - createdAt
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        signalType: { $ref: "#/components/schemas/InternalSignalType" }
+        kind: { type: string, enum: [internal] }
+        title: { type: string }
+        summary: { type: string, nullable: true }
+        severity: { $ref: "#/components/schemas/Severity" }
+        confidence: { type: number }
+        fetchedAt: { type: string, format: date-time }
+        eventDate: { type: string, format: date-time, nullable: true }
+        sourceId: { type: string, enum: ["internal:harness"] }
+        sourceReliability: { type: number }
+        rawPayload:
+          type: object
+          additionalProperties: true
+          description: "Full original ingest payload — contractId/vendorId/milestoneRef/invoiceRef/etc."
+        metadata:
+          type: object
+          additionalProperties: true
+          description: "Empty `{}` for unresolved signals; `InternalSignalMetadata` shape after resolve."
+        resolvedAt: { type: string, format: date-time, nullable: true }
+        resolvedBy: { type: integer, nullable: true }
+        resolutionKind:
+          allOf:
+            - $ref: "#/components/schemas/SignalResolutionKind"
+          nullable: true
+        createdAt: { type: string, format: date-time }
+
+    InternalSignalIngestPayload:
+      type: object
+      description: |
+        Caller payload for `POST /api/v1/admin/internal-signals` →
+        `fn_internal_signal_ingest(p_payload JSONB)` (db-design.md §5.1
+        parameters). The fn translates this into the M7
+        `OsintSignalUpsertPayload` shape internally and DELEGATES to
+        `fn_osint_signal_upsert`.
+
+        Required keys: `signalType` + `observedAt`. Conditional keys per
+        the catalogue row's `parameterSchema.required[]`:
+          - milestone_slippage: contractId, milestoneRef
+          - sla_breach:         contractId
+          - payment_delay:      contractId, invoiceRef, daysOverdue
+          - invoice_dispute:    contractId, invoiceRef
+          - vendor_incident:    vendorId
+          - ics_incident:       (none beyond observedAt)
+          - icv_status_change:  vendorId
+          - certificate_expiry: (none beyond observedAt)
+
+        Severity override is OPTIONAL — `fn_internal_signal_ingest`
+        defaults to the catalogue row's `defaultSeverity`.
+      required: [signalType, observedAt]
+      properties:
+        signalType: { $ref: "#/components/schemas/InternalSignalType" }
+        observedAt:
+          type: string
+          format: date-time
+          description: "ISO-8601 UTC timestamp."
+        contractId: { type: integer }
+        vendorId: { type: integer }
+        milestoneRef: { type: string }
+        invoiceRef: { type: string }
+        daysOverdue: { type: integer }
+        severityCalcInput:
+          type: object
+          additionalProperties: true
+        severity: { $ref: "#/components/schemas/Severity" }
+        dataClassification: { $ref: "#/components/schemas/DataClassification" }
+
+    InternalSignalIngestResponse:
+      type: object
+      description: |
+        Response from `fn_internal_signal_ingest` (db-design.md §5.1
+        step 11). `inserted=true` means a new row was written;
+        `inserted=false` means the dedup_hash UNIQUE(tenant_id, dedup_hash)
+        suppressed the insert (idempotent AC-S2-02).
+      required: [signalId, inserted, dedupHashHit, signalKindSubtype]
+      properties:
+        signalId: { type: integer }
+        inserted: { type: boolean }
+        dedupHashHit: { type: boolean }
+        signalKindSubtype: { $ref: "#/components/schemas/InternalSignalType" }
+
+    InternalSignalResolvePayload:
+      type: object
+      description: |
+        Body for `POST /api/v1/internal-signals/:id/resolve`
+        (db-design.md §5.2 parameters).
+      required: [resolutionKind]
+      properties:
+        resolutionKind: { $ref: "#/components/schemas/SignalResolutionKind" }
+        resolutionNote:
+          type: string
+          description: "Optional free-text. Persisted to metadata.resolutionNote."
+
+    InternalSignalResolveResponse:
+      type: object
+      description: |
+        Response from `fn_internal_signal_resolve` (db-design.md §5.2
+        step 10). Idempotent — re-resolve returns the existing values
+        without re-emitting the pg_notify (AC-S5-03).
+      required: [signalId, resolvedAt]
+      properties:
+        signalId: { type: integer }
+        resolvedAt: { type: string, format: date-time }
+        resolvedBy: { type: integer, nullable: true }
+        resolutionKind:
+          $ref: "#/components/schemas/SignalResolutionKind"
+          description: "Optional. Echoed by BE; not present in workspace types.ts (Doc-Drift Nit deferred)."
+        idempotent:
+          type: boolean
+          description: "Optional. true on idempotent re-resolve; absent or false on first-resolve. Not present in workspace types.ts (Doc-Drift Nit deferred)."
+
+    InternalSignalListResponse:
+      type: object
+      description: |
+        Paginated list response for `GET /api/v1/internal-signals`
+        (db-design.md §5.4).
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/InternalSignalRow" }
+        pagination: { $ref: "#/components/schemas/PaginationMeta" }
+
+    InternalSignalResolvedNotification:
+      type: object
+      description: |
+        `pg_notify('internal_signal_resolved')` payload. Emitted by
+        `fn_internal_signal_resolve` (INVOKER) on first-resolve only —
+        NOT on idempotent re-resolve (AC-S5-03). CR-E rule engine LISTENs
+        for downstream re-evaluation. Mirrors the M7
+        `OsintSignalInsertedNotification` naming convention. NOT exposed
+        via HTTP — documented for future CR-E worker implementations.
+      required: [signalId, tenantId, signalKindSubtype, resolutionKind, resolvedAt]
+      properties:
+        signalId: { type: integer }
+        tenantId: { type: string, format: uuid }
+        signalKindSubtype: { $ref: "#/components/schemas/InternalSignalType" }
+        resolutionKind: { $ref: "#/components/schemas/SignalResolutionKind" }
+        resolvedBy: { type: integer, nullable: true }
+        resolvedAt: { type: string, format: date-time }
 
   responses:
     Unauthenticated:
@@ -10696,6 +11159,321 @@ x-paths-root:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403":
           description: "Caller lacks source.read (42501 → AC-S8-06)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ============================================================
+  # M8 — Internal Signal Data Path (CR-A2 — CRIP Wave 1 follow-up to M7)
+  #   /admin/internal-signals    POST  — system-only debug ingest
+  #   /admin/internal-signal-kinds GET  — read-only catalogue viewer
+  #   /internal-signals          GET   — paginated list
+  #   /internal-signals/:id/resolve POST — idempotent manual resolve
+  # ============================================================
+
+  /admin/internal-signals:
+    post:
+      tags: [M8 — Internal Signal Ingest (Admin)]
+      operationId: internalSignalIngest
+      summary: Ingest an internal signal (system-only debug harness)
+      description: |
+        Ingest an internal signal of one of 8 SOT-sealed sub-types
+        (`milestone_slippage` / `sla_breach` / `payment_delay` /
+        `invoice_dispute` / `vendor_incident` / `ics_incident` /
+        `icv_status_change` / `certificate_expiry`). Validates `signalType`
+        against the tenant's `internal_signal_kind` catalogue and the
+        per-signal-type `parameter_schema.required[]` field set, then
+        DELEGATES to `fn_osint_signal_upsert` (S2-19 LOCK — constructed
+        payload satisfies the M7 9-required-key contract verbatim).
+        Idempotent on `dedup_hash UNIQUE(tenant_id, dedup_hash)` — same
+        payload posted twice yields `{ inserted: false, dedupHashHit: true }`
+        with the same `signalId` (201 in both cases, NOT 409).
+        **System-only** — `fn_internal_signal_ingest` is DEFINER with
+        `REVOKE EXECUTE FROM PUBLIC` and **no role grant**; only the
+        neondb_owner pool connection invokes. The
+        `internal_signal.ingest` permission row is granted to Super Admin +
+        platform_admin so admins can hit this debug route via JWT.
+        Defence-in-depth: fn body line 1 raises 42501 if caller lacks the
+        permission. Tenant scoping auto via `app.current_tenant_id` GUC
+        (rls.middleware sets from JWT `tenantId` claim with hard-coded
+        ADNOC UUID fallback per Q-DA4 from M7).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-requiredPermissions: [internal_signal.ingest]
+      x-authMode: jwt
+      x-storyId: S2
+      x-rateLimit: authedWriteRateLimiter
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InternalSignalIngestPayload" }
+      responses:
+        "201":
+          description: |
+            Created (or idempotent re-post). `inserted=true` on first
+            insert; `inserted=false` + `dedupHashHit=true` on duplicate
+            payload. Same `signalId` returned in both cases.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/InternalSignalIngestResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — tenant context missing OR `signalType` not in
+            8-value enum OR `parameter_schema.required[]` field missing
+            (`Required field missing for signal_type=<type>: <field>`) OR
+            severity override invalid (CHECK violation 23514) OR
+            `contractId`/`vendorId` not BIGINT.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `internal_signal.ingest` (42501 → AC-S2-06)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: |
+            NOT_FOUND — `contractId` / `vendorId` not found for current
+            tenant. Routed via the existing translatePgError 22023 +
+            `/not found/i` pattern (M7 precedent — same as
+            `fn_osint_source_get_by_id` 'Source not found' routing).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /admin/internal-signal-kinds:
+    get:
+      tags: [M8 — Internal Signal Kinds (Admin)]
+      operationId: internalSignalKindList
+      summary: List the 8 internal-signal kinds catalogue (admin viewer)
+      description: |
+        Read-only admin viewer of the 8 internal-signal kinds catalogue
+        for the current tenant. Returns a **bare array** (no pagination
+        envelope) per S2-12 documented design exception — bounded set
+        per tenant; mirrors M7 `fn_source_health_list` precedent.
+        Returns `is_active=TRUE` rows only. Ordered `signal_type ASC`
+        (deterministic for FE / screen-reader iteration). Tenant-scoped
+        via `internal_signal_kind_tenant_select` RLS policy on
+        `current_setting('app.current_tenant_id')::uuid`. Each row
+        carries `parameterSchema` JSON-Schema-style spec consumed by
+        `fn_internal_signal_ingest` for required-field enforcement, plus
+        EN+AR display names and `defaultSeverity` reusing the M7
+        osint_signal severity vocabulary.
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, executive]
+      x-deferredAuthorisedRoles: [operations, finance_treasury, procurement, compliance_esg]
+      x-requiredPermissions: [internal_signal.read]
+      x-authMode: jwt
+      x-storyId: S6
+      x-rateLimit: authedReadRateLimiter
+      responses:
+        "200":
+          description: Bare array of 8 internal-signal kind rows.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/InternalSignalKind" }
+                  requestId: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `internal_signal.read` (42501 → AC-S6-05)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /internal-signals:
+    get:
+      tags: [M8 — Internal Signals]
+      operationId: internalSignalList
+      summary: Paginated list of internal signals
+      description: |
+        Paginated list of internal signals (`osint_signal` rows where
+        `kind='internal'`) for the current tenant. Filters: `signalType`
+        (one of 8 enum values; filters on `osint_signal.signal_kind_subtype`),
+        `contractId` (filters on `raw_payload->>'contractId'` — used to
+        assemble the EPC SLA hero scenario per AT-2), `vendorId`
+        (filters on `raw_payload->>'vendorId'`), `since` (ISO-8601 UTC;
+        `fetched_at >= since` — required for the `count_in_180_days`
+        predicate per AT-2 / AC-S4-02), `status` ('open' →
+        `metadata.resolvedAt IS NULL`, 'resolved' → `IS NOT NULL`, 'all'
+        → no predicate, default).
+        Does NOT wrap M7 `fn_osint_signal_list` (per collision-report
+        S2-19 finding 2 — different filter set + different permission gate);
+        direct osint_signal scan with `kind='internal'` filter.
+        Order: `fetched_at DESC NULLS LAST, id DESC`. `limit` clamped to
+        `LEAST(p_limit, 100)` per M7 fn_osint_signal_list precedent.
+        Tenant-scoped via the M7 `osint_signal_tenant_isolation_select`
+        RLS policy — cross-tenant requests return empty data array
+        (AC-S4-04 / AC-S8-02).
+      x-authorisedRoles: [Super Admin, platform_admin, legal_counsel, executive]
+      x-deferredAuthorisedRoles: [operations, finance_treasury, procurement, compliance_esg]
+      x-requiredPermissions: [internal_signal.read]
+      x-authMode: jwt
+      x-storyId: S4
+      x-rateLimit: authedReadRateLimiter
+      parameters:
+        - in: query
+          name: signalType
+          schema: { $ref: "#/components/schemas/InternalSignalType" }
+        - in: query
+          name: contractId
+          schema: { type: integer }
+        - in: query
+          name: vendorId
+          schema: { type: integer }
+        - in: query
+          name: since
+          schema: { type: string, format: date-time }
+        - in: query
+          name: status
+          schema:
+            $ref: "#/components/schemas/InternalSignalStatusFilter"
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Paginated list of internal signals.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/InternalSignalListResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — `signalType` not in 8-value enum OR
+            `status` not in 'open|resolved|all'.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: "Caller lacks `internal_signal.read` (42501 → AC-S4-03)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /internal-signals/{id}/resolve:
+    post:
+      tags: [M8 — Internal Signals]
+      operationId: internalSignalResolve
+      summary: Mark an internal signal resolved (idempotent)
+      description: |
+        Mark an internal signal resolved. Updates `osint_signal.metadata`
+        JSONB with `{ resolvedAt, resolvedBy, resolutionKind, resolutionNote }`,
+        then emits `pg_notify('internal_signal_resolved')` for downstream
+        re-evaluation by the future CR-E rule engine.
+        **Idempotent** — re-resolve of an already-resolved signal returns
+        the existing `{ signalId, resolvedAt, resolvedBy }` values
+        unchanged AND skips the pg_notify emission (AC-S5-03; the fn
+        detects this via `metadata->>'resolvedAt' IS NOT NULL`).
+        Permission gate: `internal_signal.resolve` AND a per-signal_type
+        role allowlist (Q-DA3 hardcoded mapping in fn body):
+          - milestone_slippage / sla_breach → `operations`
+          - payment_delay / invoice_dispute → `finance_treasury`
+          - vendor_incident / ics_incident → `operations` OR `procurement`
+          - icv_status_change → `compliance_esg` OR `procurement`
+          - certificate_expiry → `compliance_esg` OR `legal_counsel`
+        Super Admin + platform_admin always allowed across all 8 subtypes.
+        The 4 deferred CR-G persona roles (`operations`, `finance_treasury`,
+        `procurement`, `compliance_esg`) are referenced in the CASE but
+        absent from the role table in v1 — the EXISTS subquery returns
+        FALSE for any caller carrying those role names today (admin-only
+        resolution in v1).
+        Writes via the M7 `osint_signal_deny_direct_update` RESTRICTIVE
+        policy permission-gated USING extension. Defence-in-depth: the
+        DEFINER bypass route (used by M7 `fn_osint_signal_upsert`) still
+        works; this INVOKER fn write path lands cleanly without DEFINER
+        privilege.
+        Production worker connections that LISTEN on
+        `internal_signal_resolved` MUST use the Neon **direct** endpoint
+        (M7 F-3 — `-pooler` PgBouncer transaction pooling drops session
+        LISTEN).
+      x-authorisedRoles: [Super Admin, platform_admin]
+      x-deferredAuthorisedRoles: [operations, finance_treasury, procurement, compliance_esg, legal_counsel]
+      x-requiredPermissions: [internal_signal.resolve]
+      x-authMode: jwt
+      x-storyId: S5
+      x-rateLimit: authedWriteRateLimiter
+      x-pgNotify:
+        channel: internal_signal_resolved
+        payloadShape: InternalSignalResolvedNotification
+        emittedOn: first-resolve only (NOT on idempotent re-resolve)
+        consumer: CR-E rule engine (future) — LISTENs for downstream re-evaluation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: "`osint_signal.id` of the signal to resolve."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InternalSignalResolvePayload" }
+      responses:
+        "200":
+          description: |
+            OK. Idempotent re-resolve returns the existing values unchanged
+            and skips the pg_notify emission.
+          headers:
+            X-Request-ID: { $ref: "#/components/headers/X-Request-ID" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/InternalSignalResolveResponse" }
+                  requestId: { type: string, format: uuid }
+        "400":
+          description: |
+            VALIDATION_ERROR — signal exists but `kind != 'internal'`
+            ('Signal is not an internal signal') OR `resolutionKind` not
+            in 4-value enum ('Invalid resolution kind').
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: |
+            PERMISSION_DENIED — caller lacks `internal_signal.resolve`
+            permission OR caller's role is not in the per-signal_type
+            allowlist (message 'Permission denied for signal_type=<type>').
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: |
+            NOT_FOUND — signal id not found for current tenant. ERRCODE
+            P0002 'Signal not found' routed via translatePgError default
+            P0002 → 404 path.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }

@@ -2556,3 +2556,216 @@ M7 contributes **0 net-new PUBLIC EXECUTE grants**. The full allowlist remains e
 ---
 
 *Generated 2026-05-09 by Documentation Generator from M7 db-design.md (post Stage 2 Patch Round 1), db-implementation-summary.json (8 migrations applied 100..107; 0 impl-time patches; PUBLIC count baseline-5 preserved), be-implementation-summary.json (21 new files + 8 modified), fe-implementation-summary.json (17 new files + 3 modified), integration-verifier-report.md (PASS round 1; 9/9 endpoints), module-M7-test-report.md (985/984/1/0; 126 net-new tests), and qa-stage4-report.md (PASS first-run). No Codex review for M7 (Dexian decision 2026-05-04; **seventh consecutive validated**).*
+
+---
+
+# M8 — Internal Signal Data Path — Data Dictionary
+
+> **Module:** M8 (CR-A2; CRIP Wave 1 follow-up to M7)
+> **Generated:** 2026-05-10
+> **Source migrations:** `database/migrations/109_cra2_create_internal_signal_kind.sql` through `database/migrations/113_cra2_fix_resolve_role_lookup.sql` (5 files; 1 patch round 113 — surgical CREATE OR REPLACE FUNCTION fn_internal_signal_resolve resolving M8-DBI-003 user_role-junction-table assumption mismatch)
+> **Schema version:** `schema_migrations.version = 113` on both `m0-foundation` + `test` branches
+
+---
+
+## Tables (1 new)
+
+### 1. `internal_signal_kind`
+
+**Purpose.** Reference catalogue of the 8 SOT-sealed internal-signal sub-types per SOT Annex D.6.1. Defines the `parameter_schema` each ingestion payload must conform to, default severity, and EN/AR display names. Tenant-scoped from day one (every M7 table is tenant-scoped — same posture). Admin-managed via read-only viewer; CRUD deferred to pilot.
+**Owned by:** M8. **Audit columns:** `created_at`, `updated_at`, `created_by`, `updated_by`. **Audit trigger:** `audit_internal_signal_kind_changes` (volume-safe — bounded set of 8 rows per tenant). **RLS:** FORCE; 2 policies (`tenant_self_select` via `app.current_tenant_id` GUC; RESTRICTIVE `deny_direct_modify` — catalogue is seed-only in CR-A2; pilot adds CRUD).
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `id` | BIGSERIAL | PRIMARY KEY | Auto-incrementing identifier. |
+| `tenant_id` | UUID | NOT NULL FK → tenant(id) ON DELETE RESTRICT | Per SOT 4.9 hybrid multi-tenancy — inherited from M7. ADNOC seed `00000000-0000-0000-0000-000000000001`. |
+| `signal_type` | TEXT | NOT NULL CHECK enum-of-8 | One of: `milestone_slippage / sla_breach / payment_delay / invoice_dispute / vendor_incident / ics_incident / icv_status_change / certificate_expiry`. UNIQUE per tenant. |
+| `display_name` | TEXT | NOT NULL | EN locale display label. |
+| `display_name_ar` | TEXT | NOT NULL | AR locale display label (RTL) — project AR parity standard requires every catalogue row carries Arabic. |
+| `description` | TEXT | nullable | Optional human-readable description. |
+| `parameter_schema` | JSONB | NOT NULL | JSON-Schema-style spec `{ required: string[], optional: string[] }` describing payload-shape per signal_type. `fn_internal_signal_ingest` validates against `required[]`. |
+| `default_severity` | TEXT | NOT NULL CHECK IN ('informational','low','medium','high','critical') | Reuses M7 osint_signal severity vocabulary — no new lookup table. |
+| `is_active` | BOOLEAN | NOT NULL DEFAULT TRUE | Soft-delete flag. |
+| audit cols | (see above) | | |
+
+**Indexes (5).**
+- PK on `id`
+- UNIQUE(`tenant_id`, `signal_type`) — drives idempotent seed and one-row-per-subtype invariant
+- FK btree on `tenant_id`
+- Soft-delete partial: `idx_internal_signal_kind_active ON internal_signal_kind(tenant_id) WHERE is_active = TRUE`
+- Composite: `idx_internal_signal_kind_lookup ON internal_signal_kind(tenant_id, signal_type) WHERE is_active = TRUE`
+
+**Seed (migration 112(b)).** 8 rows for ADNOC tenant, all `is_active=TRUE`. Each row carries:
+- EN+AR display names (e.g. `'Milestone Slippage'` / `'تأخر إنجاز معلم'`)
+- `parameter_schema` per signal_type — milestone_slippage requires `[contractId, milestoneRef]`; sla_breach requires `[contractId]`; payment_delay requires `[contractId, invoiceRef, daysOverdue]`; invoice_dispute requires `[contractId, invoiceRef]`; vendor_incident requires `[vendorId]`; ics_incident requires `[]`; icv_status_change requires `[vendorId]`; certificate_expiry requires `[]`. All eight carry `optional[]` documenting which keys the FE form / Zod schema generators may surface for free-form input.
+- `default_severity` per business risk-tier (sla_breach + payment_delay → `high`; milestone_slippage + invoice_dispute → `medium`; vendor_incident + ics_incident → `medium`; icv_status_change + certificate_expiry → `low`).
+
+**ON CONFLICT(`tenant_id`, `signal_type`) DO NOTHING** — seed migration is idempotent.
+
+---
+
+## Tables extended (1 — osint_signal +1 column)
+
+### `osint_signal` — `metadata` JSONB column added (Q-DA6 lock)
+
+**Migration 109 ALTER TABLE.**
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| `metadata` | JSONB | NOT NULL DEFAULT '{}'::jsonb | Resolution-lifecycle JSONB carrying `{ resolvedAt, resolvedBy, resolutionKind, resolutionNote }` after manual resolve. Empty `{}` for unresolved signals. May also carry pilot-time annotations (review state, escalation flags) under other top-level keys. Idempotent re-resolve detection key: `metadata->>'resolvedAt' IS NOT NULL`. |
+
+**Why a column, not a separate table?** Q-DA6 lock = **ADD column** (Implementation A). Brief AC-S5-01 implies this — "metadata gets {resolvedAt, resolvedBy, resolutionKind, resolutionNote}". Cleanest physical separation between ingest payload (`raw_payload`) and operational state (`metadata`). Q-DA2 lock explicitly defers a separate `signal_event` table to CR-C audit redesign.
+
+**RESTRICTIVE policy extension (Q-DA6 second-half).** The M7 `osint_signal_deny_direct_update` RESTRICTIVE policy (which previously rejected ALL non-DEFINER writes) now has a permission-gated USING/WITH CHECK carve-out:
+
+```sql
+ALTER POLICY osint_signal_deny_direct_update ON osint_signal
+  USING (fn_current_user_has_permission('internal_signal.resolve'))
+  WITH CHECK (fn_current_user_has_permission('internal_signal.resolve'));
+```
+
+**Defence-in-depth:** the DEFINER bypass route (used by M7 `fn_osint_signal_upsert`) still works (DEFINER fns bypass RLS by default); the new INVOKER `fn_internal_signal_resolve` write path lands cleanly without needing DEFINER privilege.
+
+---
+
+## Functions (4 new)
+
+### `fn_internal_signal_ingest(p_payload JSONB) RETURNS JSONB`
+
+**Type:** Write. **Security:** SECURITY DEFINER. **System-only marker** — `REVOKE EXECUTE FROM PUBLIC`; **no role grant**; only the `neondb_owner` pool connection invokes. The `internal_signal.ingest` permission row is granted to Super Admin + platform_admin so admins can hit the debug route via JWT; defence-in-depth permission gate at fn body line 1 raises 42501 if caller lacks the permission.
+**Purpose.** Validates `signalType` against the tenant's `internal_signal_kind` catalogue + `parameter_schema.required[]` for the matching row; constructs the 9-required-key M7 OsintSignalUpsertPayload contract verbatim per S2-19 LOCK and DELEGATES via PERFORM to `fn_osint_signal_upsert`. Idempotent on `UNIQUE(tenant_id, dedup_hash)` — same payload posted twice yields `{ inserted: false, dedupHashHit: true }` with the same `signalId`.
+**Dedup hash basis (deterministic SHA-256, AC-S7-01):**
+
+```
+source_id || '|' || signal_type || '|' || COALESCE(contract_id::text, vendor_id::text, '') || '|' || observed_at_iso
+```
+
+**Returns:** JSONB `{ signalId, inserted, dedupHashHit, signalKindSubtype }`.
+**Error conditions:**
+- 22023 `'Tenant context not set'` → 400
+- 22023 `'Unknown internal signal type: <value>'` → 400
+- 22023 `'Required field missing for signal_type=<type>: <field>'` → 400
+- 22023 `'Contract not found'` / `'Vendor not found'` → 404 (via existing translatePgError `/not found/i` pattern)
+- 23514 severity CHECK violation → 400
+- 42501 caller lacks `internal_signal.ingest` → 403
+
+### `fn_internal_signal_resolve(p_actor_id BIGINT, p_signal_id BIGINT, p_resolution_kind TEXT, p_resolution_note TEXT) RETURNS JSONB`
+
+**Type:** Write. **Security:** SECURITY INVOKER. `REVOKE EXECUTE FROM PUBLIC` + `GRANT EXECUTE TO neondb_owner`.
+**Purpose.** Marks an internal signal resolved. Updates `osint_signal.metadata` JSONB with `{ resolvedAt, resolvedBy, resolutionKind, resolutionNote }`, then emits `pg_notify('internal_signal_resolved')` for the future CR-E rule engine. Writes via the new permission-gated USING extension on the M7 `osint_signal_deny_direct_update` RESTRICTIVE policy (Q-DA6 design decision).
+**Idempotence (AC-S5-03):** re-resolve of an already-resolved signal returns the existing `{ signalId, resolvedAt, resolvedBy }` values unchanged AND skips the pg_notify emission. Detected via `metadata->>'resolvedAt' IS NOT NULL`.
+**Q-DA3 hardcoded role allowlist** (CASE on signal_kind_subtype):
+
+| signal_type | Required role(s) (in addition to Super Admin + platform_admin always-allowed) |
+|---|---|
+| milestone_slippage | operations |
+| sla_breach | operations |
+| payment_delay | finance_treasury |
+| invoice_dispute | finance_treasury |
+| vendor_incident | operations OR procurement |
+| ics_incident | operations OR procurement |
+| icv_status_change | compliance_esg OR procurement |
+| certificate_expiry | compliance_esg OR legal_counsel |
+
+The 4 deferred CR-G persona roles (`operations`, `finance_treasury`, `procurement`, `compliance_esg`) are referenced in the CASE but absent from the role table in v1 — the EXISTS subquery returns FALSE for any caller carrying those role names today (admin-only resolution in v1).
+
+**S2-20 sentinel pattern.** `v_actor=0 → NULL` coercion preserved per CC4 from M7.
+
+**S2-22b / S2-22c lesson.** The role-allowlist EXISTS subquery in migration 111 originally referenced a non-existent `user_role` junction table (Musanad schema is single-role-per-user via `"user".role_id`). Migration 113 surgically `CREATE OR REPLACE FUNCTION` rewrote the join to `FROM "user" u JOIN role r ON r.id = u.role_id WHERE u.id = p_actor_id AND u.is_active = TRUE`. Standard tail block (COMMENT + REVOKE FROM PUBLIC + GRANT TO neondb_owner) re-applied per `feedback_fn_rewrites_lose_safety_guards.md` (B14).
+
+**Returns:** JSONB `{ signalId, resolvedAt, resolvedBy }` (BE adds optional `resolutionKind` + `idempotent` echo fields not in the workspace types.ts shape — Doc-Drift Nit deferred).
+**Error conditions:**
+- P0002 `'Signal not found'` → 404
+- 22023 `'Signal is not an internal signal'` → 400
+- 22023 `'Invalid resolution kind'` → 400
+- 42501 `'Permission denied for signal_type=<type>'` → 403
+
+### `fn_internal_signal_kind_list(p_actor_id BIGINT) RETURNS JSONB`
+
+**Type:** Read. **Security:** SECURITY INVOKER STABLE. `REVOKE EXECUTE FROM PUBLIC` + `GRANT EXECUTE TO neondb_owner`.
+**Purpose.** Returns the 8 active internal-signal kinds catalogue rows for the current tenant. **Bare-array** response shape per S2-12 EXCEPTION-PASS (bounded set; M7 `fn_source_health_list` precedent). Tenant-scoped via `internal_signal_kind_tenant_select` RLS. Order: `signal_type ASC` (deterministic for FE / screen-reader iteration).
+**Returns:** JSONB array of `{ id, signalType, displayName, displayNameAr, description, parameterSchema, defaultSeverity, isActive, createdAt, updatedAt }`.
+
+### `fn_internal_signal_list(p_actor_id BIGINT, p_filter JSONB, p_page INTEGER, p_limit INTEGER) RETURNS JSONB`
+
+**Type:** Read. **Security:** SECURITY INVOKER STABLE. `REVOKE EXECUTE FROM PUBLIC` + `GRANT EXECUTE TO neondb_owner`.
+**Purpose.** Paginated list of internal signals (`osint_signal` rows where `kind='internal'`). Does NOT wrap M7 `fn_osint_signal_list` (per collision-report S2-19 finding 2 — different filter set + different permission gate); direct osint_signal scan with `kind='internal'` filter. Tenant-scoped via the M7 `osint_signal_tenant_isolation_select` RLS policy — cross-tenant requests return empty data array (AC-S4-04 / AC-S8-02).
+**Filters (`p_filter` JSONB keys):** `signalType`, `contractId` (filters on `raw_payload->>'contractId'`), `vendorId` (filters on `raw_payload->>'vendorId'`), `since` (ISO-8601 UTC; `fetched_at >= since`), `status` ('open' / 'resolved' — controller strips 'all').
+**Order:** `fetched_at DESC NULLS LAST, id DESC`. **Pagination:** `LEAST(p_limit, 100)` clamp per M7 fn_osint_signal_list precedent.
+**Returns:** JSONB `{ data: InternalSignalRow[], pagination: { total, page, limit, totalPages } }`.
+
+---
+
+## Audit triggers (1 new)
+
+| Trigger | Table | Events | Rationale |
+|---|---|---|---|
+| `audit_internal_signal_kind_changes` | `internal_signal_kind` | INSERT, UPDATE, DELETE | Standard audit on bounded reference catalogue (8 rows per tenant). Volume-safe. |
+
+**Audit triggers deliberately OFF (carry-over from M7):**
+- `osint_signal` — DROPPED in M7 migration 108 for write-volume safety; M8 keeps it OFF. The `pg_notify('osint_signal_inserted')` (M7) + `pg_notify('internal_signal_resolved')` (M8) channels are the canonical write trail.
+
+---
+
+## RLS policies (2 new on the new table + 1 RESTRICTIVE policy extension on osint_signal)
+
+| Table | Policies |
+|---|---|
+| `internal_signal_kind` | `internal_signal_kind_tenant_select` (SELECT WHERE tenant_id = current_setting('app.current_tenant_id')::uuid AND is_active = TRUE), RESTRICTIVE `internal_signal_kind_deny_direct_modify` (catalogue is seed-only in CR-A2; pilot adds CRUD) |
+| `osint_signal` (M7 owns) | M7 `osint_signal_deny_direct_update` RESTRICTIVE policy gains `USING(fn_current_user_has_permission('internal_signal.resolve'))` + matching WITH CHECK clause — permission-gated carve-out for the INVOKER `fn_internal_signal_resolve` write path |
+
+---
+
+## pg_notify channels (1 new — not exposed via HTTP)
+
+| Channel | Emitted by | Payload | Consumer |
+|---|---|---|---|
+| `internal_signal_resolved` | `fn_internal_signal_resolve` (INVOKER) — ONLY on first-resolve (NOT on idempotent re-resolve per AC-S5-03) | `{ signalId, tenantId, signalKindSubtype, resolutionKind, resolvedBy, resolvedAt }` | CR-E rule engine (future module) — LISTENs for downstream re-evaluation |
+
+**M7 F-3 production caveat carries over:** Neon `-pooler` (PgBouncer transaction pooling) drops session-level LISTEN. Worker connections that subscribe to this channel MUST use Neon **direct** endpoint — see ops-runbook M7 section 2.
+
+---
+
+## Permissions seeded (3 net-new — migration 110)
+
+| Permission code | Granted to (roles) | Notes |
+|---|---|---|
+| `internal_signal.ingest` | Super Admin, platform_admin | System-only marker — fn EXECUTE is REVOKE-only on PUBLIC; the permission row enables the JWT debug route. |
+| `internal_signal.read` | Super Admin, platform_admin, legal_counsel, executive | 4 deferred CR-G persona roles (`operations`, `finance_treasury`, `procurement`, `compliance_esg`) via WHERE EXISTS no-op grants — applied as 0 rows in CR-A2; CR-G activation migration backfills. |
+| `internal_signal.resolve` | Super Admin, platform_admin | Per-signal_type role allowlist via Q-DA3 hardcoded CASE in fn body. 4 deferred CR-G persona roles + `legal_counsel` (for certificate_expiry) referenced in CASE but absent from role table in v1. |
+
+**Conditional `WHERE EXISTS` no-op grants:** 8 rows attempted, 0 applied (4 roles × 2 permissions). Identical pattern to M7 100_m7_permissions_seed.sql `compliance_esg` carve-out. CR-G activation migration backfills.
+
+---
+
+## PUBLIC EXECUTE invariant — S2-21 sustained at the M3 set of 5 (eighth consecutive clean module)
+
+M8 contributes **0 net-new PUBLIC EXECUTE grants**. The full allowlist remains exactly 5 (all from M3): `fn_signature_get_by_invitation_token`, `fn_signature_sign`, `fn_signature_decline`, `fn_signer_qa_session_start`, `fn_signer_qa_session_record_message`. All 4 M8 fn_'s end with the explicit `REVOKE FROM PUBLIC` trio per migrations 111 + 113 (the 113 patch round explicitly re-applied the trio after `CREATE OR REPLACE FUNCTION` per `feedback_fn_rewrites_lose_safety_guards.md`).
+
+**Verify post-deploy:**
+
+```sql
+-- Expect exactly 5 rows, all from M3.
+SELECT n.nspname || '.' || p.proname AS fn,
+       pg_catalog.pg_get_userbyid(unnest(p.proacl)::aclitem) AS grantee
+  FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid
+ WHERE n.nspname = 'public' AND p.proname LIKE 'fn_%' AND p.proacl::text LIKE '%PUBLIC%';
+```
+
+---
+
+## Key DB Impl outcomes (M8)
+
+| ID | Severity | Topic | Outcome |
+|---|---|---|---|
+| **Stage 1 catch (Q-DA6)** | DESIGN GAP | osint_signal lacked metadata column despite brief AC-S5-01 implying it | Locked at HITL Gate 2 to ADD column (Implementation A). Migration 109 ALTERs osint_signal ADD COLUMN metadata JSONB AND extends the M7 RESTRICTIVE deny-direct-update policy with permission-gated USING clause. |
+| **M8-DBI-001** | BLOCKING (design defect; Agent 4 + QA Stage 2 missed) | Migration 112(c) used `WHERE title ILIKE '%EPC%'` — contract table has no `title` column (actual: `title_en`) | Resolved via Route B in-place edit of migration 112 — pre-seeds a deterministic EPC counterparty + EPC contract via idempotent SELECT-then-INSERT-with-ON-CONFLICT, then PERFORMs ingest with the literal v_contract_id BIGINT. |
+| **M8-DBI-002** | BLOCKING (design defect; companion to 001) | Migration 112(c) used `WHERE party_type = 'counterparty'` — party table CHECK restricts party_type to ('individual','company') | Same Route B edit — pre-seeds an EPC company party (party_type='company', is_seed=TRUE, trade_license_number='EPC-CRA2-DEMO-001'). |
+| **M8-DBI-003** | CRITICAL (design defect; Agent 4 + QA Stage 2 + Agent 6 + Smoke caught at HTTP smoke time) | fn_internal_signal_resolve referenced a non-existent `user_role` junction table — Musanad schema is single-role-per-user via `"user".role_id` | Migration 113 surgical `CREATE OR REPLACE FUNCTION` with the broken join swapped for `FROM "user" u JOIN role r ON r.id = u.role_id WHERE u.id = p_actor_id AND u.is_active = TRUE`. Q-DA3 per-signal_type role-name CASE/fallback list preserved verbatim. Standard tail block re-applied per B14. **Codification candidate S2-22c — extend column-existence check to include FROM/JOIN-target TABLE-existence verification across every fn body.** |
+| **M8-DBI-INFO-1** | INFO | S2-21 sustained at 5 | Eighth-consecutive-clean module. PUBLIC EXECUTE grants verified live on both branches via `pg_proc.proacl` enumeration. |
+| **M8-DBI-INFO-2** | INFO | EPC SLA hero invariant | `count_in_180_days >= 3` holds at exactly 4 on both branches per probe 3 of the 12 runtime probes. Q-DA5 RELATIVE seed back-dating means the invariant TRUE forever — every redeploy regenerates the 4 milestone_slippage rows on `now() - interval '30/60/120/170 days'` against the deterministic EPC contract `CRA2-EPC-2026-001`. |
+| **F-flag (FE-E1 carry-over)** | LOW (project-level FE) | 3 of 5 M8 E2E specs flagged-for-human due to Zustand-persist auth-hydration race | Same flakiness affects M7 specs. Functional coverage NOT gapped — 21/21 BE integration suite asserts the API response shape that the viewer renders. |
+
+---
+
+*Generated 2026-05-10 by Documentation Generator from M8 db-design.md (Stage 2 PASS first-run; 0 design-time patches), db-implementation-summary.json (5 migrations applied 109..113; 1 patch round 113; PUBLIC count baseline-5 preserved; 12 runtime probes PASS on both branches), be-implementation-summary.json (8 new files + 1 modified), fe-implementation-summary.json (4 new files + 3 modified; 0/3 hardened, 3/3 regenerated; 31 i18n keys per locale; tsc clean at 1024MB), integration-verifier-report.md (PASS round 1; 4/4 endpoints), module-M8-test-report.md (1024/1024/1/0; 40 net-new tests; 3 E2E specs flagged-for-human), and qa-stage4-report.md (51/52 + F4 WARN; PASS-WITH-WARNINGS). No Codex review for M8 (Dexian decision 2026-05-04; **eighth consecutive validated**).*

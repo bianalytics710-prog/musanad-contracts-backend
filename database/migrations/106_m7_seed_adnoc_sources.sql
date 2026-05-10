@@ -52,24 +52,31 @@ INSERT INTO osint_source (
  'demo'),
 
 -- 6 RSS sub-feeds (15-min cadence)
-('00000000-0000-0000-0000-000000000001','rss_reuters_energy','Reuters Energy RSS','تغذية رويترز للطاقة','news',
- 'https://www.reuters.com/business/energy/rss','rss',900,0.95,TRUE,
+-- Original ADNOC pack URLs (Reuters / Platts / Argus / Khaleej-with-querystring /
+-- Gulf-rss-business) all 401/403/404'd against unauthenticated GETs as of
+-- 2026-05-09 — Reuters retired public RSS, Platts/Argus moved behind paid
+-- tiers, Khaleej + Gulf changed paths. Replaced with working free public
+-- feeds keyed off the same demo theme. Lloyd's URL kept (200 from origin
+-- with proper UA header). source_id columns NOT renamed — they are stable
+-- catalog identifiers and renaming would break prior signals + history.
+('00000000-0000-0000-0000-000000000001','rss_reuters_energy','BBC Business RSS','تغذية أخبار الأعمال — بي بي سي','news',
+ 'https://feeds.bbci.co.uk/news/business/rss.xml','rss',900,0.95,TRUE,
  '{"callsPerMinute":60,"burst":10,"minIntervalMs":1000,"respectRetryAfter":true}'::jsonb,
  '{"rules":[{"titleContains":"sanctions","severity":"high"},{"titleContains":"force majeure","severity":"high"},{"titleContains":"port closure","severity":"medium"},{"default":"informational"}]}'::jsonb,
  NULL,'Headline + summary syndication only — no full-text scrape.',
  '{"adapterClass":"RssAdapter"}'::jsonb,
  'demo'),
 
-('00000000-0000-0000-0000-000000000001','rss_sp_platts','S&P Global Platts Oil RSS','تغذية بلاتس النفطية','news',
- 'https://www.spglobal.com/commodity-insights/en/rss-feed/oil','rss',900,0.95,TRUE,
+('00000000-0000-0000-0000-000000000001','rss_sp_platts','OilPrice.com Energy News','أويل برايس — أخبار الطاقة','news',
+ 'https://oilprice.com/rss/main','rss',900,0.95,TRUE,
  '{"callsPerMinute":60,"burst":10,"minIntervalMs":1000,"respectRetryAfter":true}'::jsonb,
  '{"rules":[{"titleContains":"sanctions","severity":"high"},{"titleContains":"force majeure","severity":"high"},{"titleContains":"port closure","severity":"medium"},{"default":"informational"}]}'::jsonb,
  NULL,'Headline + summary syndication only.',
  '{"adapterClass":"RssAdapter"}'::jsonb,
  'demo'),
 
-('00000000-0000-0000-0000-000000000001','rss_argus_oil','Argus Media Oil RSS','تغذية أرغوس النفطية','news',
- 'https://www.argusmedia.com/en/rss/oil','rss',900,0.95,TRUE,
+('00000000-0000-0000-0000-000000000001','rss_argus_oil','Guardian Business RSS','الغارديان — الأعمال','news',
+ 'https://www.theguardian.com/uk/business/rss','rss',900,0.95,TRUE,
  '{"callsPerMinute":60,"burst":10,"minIntervalMs":1000,"respectRetryAfter":true}'::jsonb,
  '{"rules":[{"titleContains":"sanctions","severity":"high"},{"titleContains":"force majeure","severity":"high"},{"titleContains":"port closure","severity":"medium"},{"default":"informational"}]}'::jsonb,
  NULL,'Headline + summary syndication only.',
@@ -85,7 +92,7 @@ INSERT INTO osint_source (
  'demo'),
 
 ('00000000-0000-0000-0000-000000000001','rss_khaleej_business','Khaleej Times Business RSS','تغذية الخليج تايمز للأعمال','news',
- 'https://www.khaleejtimes.com/rss?section=business','rss',900,0.80,TRUE,
+ 'https://www.khaleejtimes.com/rss/business','rss',900,0.80,TRUE,
  '{"callsPerMinute":60,"burst":10,"minIntervalMs":1000,"respectRetryAfter":true}'::jsonb,
  '{"rules":[{"titleContains":"sanctions","severity":"high"},{"titleContains":"force majeure","severity":"high"},{"titleContains":"port closure","severity":"medium"},{"default":"informational"}]}'::jsonb,
  NULL,'Headline + summary syndication only.',
@@ -93,7 +100,7 @@ INSERT INTO osint_source (
  'demo'),
 
 ('00000000-0000-0000-0000-000000000001','rss_gulf_business','Gulf News Business RSS','تغذية جلف نيوز للأعمال','news',
- 'https://gulfnews.com/rss/business','rss',900,0.80,TRUE,
+ 'https://gulfnews.com/feed','rss',900,0.80,TRUE,
  '{"callsPerMinute":60,"burst":10,"minIntervalMs":1000,"respectRetryAfter":true}'::jsonb,
  '{"rules":[{"titleContains":"sanctions","severity":"high"},{"titleContains":"force majeure","severity":"high"},{"titleContains":"port closure","severity":"medium"},{"default":"informational"}]}'::jsonb,
  NULL,'Headline + summary syndication only.',
