@@ -59,6 +59,7 @@ async function processSignal(signalId: number): Promise<void> {
       : RULE_EVAL_TIMEOUT_MS;
 
     try {
+      // DB signature: fn_rule_evaluate(p_signal_id, p_evaluation_payload, p_actor_id) — 3 args
       // fn_rule_evaluate handles the full evaluation pipeline per DB design:
       // - Parses matchYaml/produceYaml from the DB (always fresh from DB not cache)
       // - Evaluates signal + all active contracts
@@ -66,7 +67,7 @@ async function processSignal(signalId: number): Promise<void> {
       // - Writes correlation_evaluation_error on timeout (OD-2)
       const evalPromise = db.callFunction<{ evaluated: boolean; correlationsCreated: number; errorWritten: boolean }>(
         'fn_rule_evaluate',
-        [signalId, rule.id, ruleTimeoutMs, SYSTEM_ACTOR_ID, ADNOC_TENANT_ID],
+        [signalId, { ruleId: rule.ruleId, ruleTimeoutMs }, SYSTEM_ACTOR_ID],
         { actorId: SYSTEM_ACTOR_ID, tenantId: ADNOC_TENANT_ID },
       );
 

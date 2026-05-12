@@ -105,17 +105,17 @@ export const clauseExtractionController = {
     try {
       const query = req.query as unknown as ClauseReviewQueueQueryInput;
 
+      // DB signature: fn_clause_review_queue_list(p_page, p_limit, p_contract_id, p_family, p_confidence_band, p_search, p_actor_id) — 7 args
       const result = await db.callFunction<{ data: unknown[]; pagination: unknown }>(
         'fn_clause_review_queue_list',
         [
           query.page,
           query.limit,
           query.contractId ?? null,
-          query.clauseType ?? null,   // mapped to p_family in fn_ — fn_ accepts family filter
-          query.reviewStatus ?? null, // mapped to p_confidence_band in fn_ — NOTE: fn_ uses confidence_band not reviewStatus; this param will be ignored by fn_ if it doesn't match 'low'|'medium'
-          query.confidenceBelow ?? null, // mapped to p_search in fn_ — WARN: fn_ signature mismatch; see integration-verifier-report
+          query.clauseType ?? null,      // p_family
+          query.reviewStatus ?? null,    // p_confidence_band
+          query.confidenceBelow ?? null, // p_search
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -149,6 +149,7 @@ export const clauseExtractionController = {
       // SENSITIVE: parametersCorrection and textExcerptsCorrection not logged
       const body = req.body as ClauseReviewBodyInput;
 
+      // DB signature: fn_clause_review_resolve(p_clause_id, p_action, p_parameters_correction, p_text_excerpts_correction, p_actor_id) — 5 args
       const result = await db.callFunction<{
         clauseId: number;
         newReviewStatus: string;
@@ -161,7 +162,6 @@ export const clauseExtractionController = {
           body.parametersCorrection ?? null,
           body.textExcerptsCorrection ?? null,
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -187,22 +187,41 @@ export const clauseExtractionController = {
     try {
       const query = req.query as unknown as ClauseTaxonomyQueryInput;
 
+      // DB signature: fn_clause_taxonomy_list(p_actor_id) — 1 arg only.
+      // family/search/isActive filters applied client-side (50 rows, fine in-memory).
       const result = await db.callFunction<{ data: unknown[]; groupedByFamily: unknown }>(
         'fn_clause_taxonomy_list',
-        [
-          query.family ?? null,
-          query.search ?? null,
-          query.isActive,
-          req.user!.id,
-          ADNOC_TENANT_ID,
-        ],
+        [req.user!.id],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
+
+      // Client-side filters (DB fn already enforces is_active=TRUE + is_deprecated=FALSE).
+      // Row fields per fn body: displayNameEn / displayNameAr / family / isDeprecated.
+      let items = ((result as Record<string, unknown> | null)?.['data'] ?? []) as Array<Record<string, unknown>>;
+      if (query.family) {
+        items = items.filter((row) => row['family'] === query.family);
+      }
+      if (query.search) {
+        const searchLower = query.search.toLowerCase();
+        items = items.filter(
+          (row) =>
+            String(row['displayNameEn'] ?? '').toLowerCase().includes(searchLower) ||
+            String(row['displayNameAr'] ?? '').toLowerCase().includes(searchLower),
+        );
+      }
+
+      // Rebuild groupedByFamily from the filtered items
+      const groupedByFamily = items.reduce<Record<string, unknown[]>>((acc, row) => {
+        const family = String(row['family'] ?? 'unknown');
+        if (!acc[family]) acc[family] = [];
+        acc[family].push(row);
+        return acc;
+      }, {});
 
       // BLOCKER-4 fix: fn_clause_taxonomy_list returns { data: [], groupedByFamily: {} }.
       // Contract and FE types expect { items: [], groupedByFamily: {} }. Remap here.
       const responseData = result
-        ? { items: (result as Record<string, unknown>)['data'] ?? [], groupedByFamily: (result as Record<string, unknown>)['groupedByFamily'] ?? {} }
+        ? { items, groupedByFamily }
         : { items: [], groupedByFamily: {} };
 
       req.logger.info({ action: 'fn_clause_taxonomy_list', userId: req.user?.id, duration: Date.now() - startTime, statusCode: 200 });
@@ -239,6 +258,7 @@ export const clauseExtractionController = {
         throw err;
       }
 
+      // DB signature: fn_clause_semantic_search(p_query_embedding, p_contract_id, p_limit, p_similarity_min, p_actor_id) — 5 args
       const result = await db.callFunction<{ data: unknown[]; count: number }>(
         'fn_clause_semantic_search',
         [
@@ -247,7 +267,6 @@ export const clauseExtractionController = {
           body.limit,
           body.similarityMin,
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );

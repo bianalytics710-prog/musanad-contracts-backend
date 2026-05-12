@@ -86,8 +86,11 @@ v1Router.use('/dashboards', dashboardsRouter);
 // permission gating in fn_ body (contract.read.department OR contract.edit).
 v1Router.use('/parties', partiesRouter);
 v1Router.use('/templates', templatesRouter);
-v1Router.use('/clauses', clausesRouter);
 v1Router.use('/obligations', obligationsRouter);
+// NOTE: clausesRouter is mounted at /clauses AFTER clauseReviewRouter below.
+// clausesRouter has a `/:id` route that would otherwise capture
+// `/review-queue`, `/search`, etc. as the :id param and fail Zod validation.
+// Mount clauseReviewRouter (with literal /review-queue, /search) first.
 
 // R-LC7 — Impact Watch (multi-source intelligence).
 v1Router.use('/impact-signals', impactSignalsRouter);
@@ -127,11 +130,12 @@ v1Router.use('/internal-signals', internalSignalsRouter);
 v1Router.use('/contracts', extractClausesRouter);
 
 // M12 (CR-D) — Clause review-queue + semantic search + review action.
-// Mounted under /clauses alongside the existing m_parity library-clauses
-// router. Literal-path sub-routes (/review-queue, /search) are declared
-// before the /:id wildcard route in clauseReviewRouter — Express matches in
-// declaration order within the same prefix.
+// MUST be mounted BEFORE clausesRouter (also at /clauses) because clausesRouter
+// has a `/:id` route that would capture `/review-queue` and `/search` as the
+// :id param. Express matches routers in mount order; literal-path routes here
+// short-circuit before the wildcard.
 v1Router.use('/clauses', clauseReviewRouter);
+v1Router.use('/clauses', clausesRouter);
 
 // M13 (CR-E) — Correlations list + dismiss.
 // /admin/rules is mounted separately in admin/index.ts.

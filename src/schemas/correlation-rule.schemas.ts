@@ -74,7 +74,9 @@ export type UpdateRuleBodyInput = z.infer<typeof UpdateRuleBodySchema>;
 // ============================================================
 
 export const TestRuleBodySchema = z.object({
-  fixtureId: z.string().optional(),
+  // FE sends fixture PK as the HTML <select> option value (string).
+  // Accept either string or number; controller coerces to bigint.
+  fixtureId: z.union([z.string(), z.number()]).optional(),
 });
 
 export type TestRuleBodyInput = z.infer<typeof TestRuleBodySchema>;

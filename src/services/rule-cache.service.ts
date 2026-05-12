@@ -54,15 +54,18 @@ async function loadRules(): Promise<void> {
   _isLoading = true;
   const startMs = Date.now();
   try {
+    // DB signature: fn_rule_list(p_page, p_limit, p_scenario, p_enabled, p_search, p_actor_id) — 6 args
     // Use fn_rule_list with a high limit to load all enabled rules
+    const SYSTEM_ACTOR_ID_LOCAL = 1;
     const result = await db.callFunction<{ data: CachedRule[]; pagination: { total: number } }>(
       'fn_rule_list',
       [
-        1,    // page
-        1000, // limit — sufficient for all rules in one page
-        true, // enabled = true only
-        null, // scenario = null (all)
-        null, // search = null (all)
+        1,    // p_page
+        1000, // p_limit — sufficient for all rules in one page
+        null, // p_scenario = null (all)
+        true, // p_enabled = true only
+        null, // p_search = null (all)
+        SYSTEM_ACTOR_ID_LOCAL, // p_actor_id
       ],
     );
 

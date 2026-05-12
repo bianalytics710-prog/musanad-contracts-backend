@@ -36,16 +36,16 @@ export const correlationRuleController = {
     try {
       const query = req.query as unknown as RuleListQueryInput;
 
+      // DB signature: fn_rule_list(p_page, p_limit, p_scenario, p_enabled, p_search, p_actor_id) — 6 args
       const result = await db.callFunction<{ data: unknown[]; pagination: unknown }>(
         'fn_rule_list',
         [
           query.page,
           query.limit,
-          query.enabled ?? null,
           query.scenario ?? null,
+          query.enabled ?? null,
           query.search ?? null,
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -76,10 +76,11 @@ export const correlationRuleController = {
       const ruleId = parseInt(req.params['id'] as string, 10);
       if (isNaN(ruleId)) throw new ApiError(400, 'VALIDATION_ERROR', 'Invalid rule ID format');
 
+      // DB signature: fn_rule_get_by_id(p_rule_pk, p_actor_id) — 2 args
       // SENSITIVE: matchYaml, produceYaml not logged
       const result = await db.callFunction<unknown>(
         'fn_rule_get_by_id',
-        [ruleId, req.user!.id, ADNOC_TENANT_ID],
+        [ruleId, req.user!.id],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
 
@@ -112,19 +113,21 @@ export const correlationRuleController = {
         throw new ApiError(422, 'RULE_YAML_INVALID', `Rule YAML validation failed: ${messages}`);
       }
 
+      // DB signature: fn_rule_create(p_data jsonb, p_actor_id bigint) — 2 args; all fields packed into p_data
       const result = await db.callFunction<{ ruleId: string; id: number }>(
         'fn_rule_create',
         [
-          body.ruleId,
-          body.name,
-          body.nameAr,
-          body.scenario ?? null,
-          body.enabled ?? true,
-          body.matchYaml,
-          body.produceYaml,
-          JSON.stringify(body.meta ?? {}),
+          {
+            ruleId: body.ruleId,
+            name: body.name,
+            nameAr: body.nameAr,
+            scenario: body.scenario ?? null,
+            enabled: body.enabled ?? true,
+            matchYaml: body.matchYaml,
+            produceYaml: body.produceYaml,
+            meta: body.meta ?? {},
+          },
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -168,19 +171,21 @@ export const correlationRuleController = {
         }
       }
 
+      // DB signature: fn_rule_update(p_rule_pk, p_data jsonb, p_actor_id) — 3 args; patch fields packed into p_data
       const result = await db.callFunction<unknown>(
         'fn_rule_update',
         [
           ruleId,
-          body.name ?? null,
-          body.nameAr ?? null,
-          body.scenario ?? null,
-          body.enabled ?? null,
-          body.matchYaml ?? null,
-          body.produceYaml ?? null,
-          body.meta ? JSON.stringify(body.meta) : null,
+          {
+            ...(body.name !== undefined && { name: body.name }),
+            ...(body.nameAr !== undefined && { nameAr: body.nameAr }),
+            ...(body.scenario !== undefined && { scenario: body.scenario }),
+            ...(body.enabled !== undefined && { enabled: body.enabled }),
+            ...(body.matchYaml !== undefined && { matchYaml: body.matchYaml }),
+            ...(body.produceYaml !== undefined && { produceYaml: body.produceYaml }),
+            ...(body.meta !== undefined && { meta: body.meta }),
+          },
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -210,9 +215,10 @@ export const correlationRuleController = {
       const ruleId = parseInt(req.params['id'] as string, 10);
       if (isNaN(ruleId)) throw new ApiError(400, 'VALIDATION_ERROR', 'Invalid rule ID format');
 
+      // DB signature: fn_rule_delete(p_rule_pk, p_actor_id) — 2 args
       const result = await db.callFunction<{ deleted: boolean }>(
         'fn_rule_delete',
-        [ruleId, req.user!.id, ADNOC_TENANT_ID],
+        [ruleId, req.user!.id],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
 
@@ -241,7 +247,17 @@ export const correlationRuleController = {
       const ruleId = parseInt(req.params['id'] as string, 10);
       if (isNaN(ruleId)) throw new ApiError(400, 'VALIDATION_ERROR', 'Invalid rule ID format');
 
-      const body = req.body as { fixtureId?: string };
+      const body = req.body as { fixtureId?: string | number };
+
+      // DB signature: fn_rule_test_against_fixture(p_rule_pk, p_fixture_pk, p_evaluation_payload, p_actor_id) — 4 args
+      // FE sends the fixture's numeric PK as a string (HTML select option value).
+      // Coerce to integer before passing to a BIGINT param.
+      let fixturePk: number | null = null;
+      if (body.fixtureId !== undefined && body.fixtureId !== null && body.fixtureId !== '') {
+        const n = typeof body.fixtureId === 'number' ? body.fixtureId : parseInt(String(body.fixtureId), 10);
+        if (Number.isNaN(n)) throw new ApiError(400, 'VALIDATION_ERROR', 'fixtureId must be numeric');
+        fixturePk = n;
+      }
 
       const result = await db.callFunction<{
         ruleId: string;
@@ -255,7 +271,7 @@ export const correlationRuleController = {
         durationMs?: number;
       }>(
         'fn_rule_test_against_fixture',
-        [ruleId, body.fixtureId ?? null, req.user!.id, ADNOC_TENANT_ID],
+        [ruleId, fixturePk, null, req.user!.id],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
 
@@ -280,6 +296,7 @@ export const correlationRuleController = {
     try {
       const query = req.query as unknown as CorrelationListQueryInput;
 
+      // DB signature: fn_correlation_list(p_page, p_limit, p_contract_id, p_rule_id, p_signal_id, p_status, p_scenario, p_since, p_actor_id) — 9 args
       // SENSITIVE: matchEvidence and matchEntities in results — covered by Pino redact
       const result = await db.callFunction<{ data: unknown[]; pagination: unknown }>(
         'fn_correlation_list',
@@ -287,12 +304,12 @@ export const correlationRuleController = {
           query.page,
           query.limit,
           query.contractId ?? null,
-          query.status ?? null,
           query.ruleId ?? null,
-          query.fromDate ?? null,
-          query.toDate ?? null,
+          null,                   // p_signal_id — not exposed in query schema
+          query.status ?? null,
+          null,                   // p_scenario — not exposed in query schema
+          query.fromDate ?? null, // p_since (use fromDate; toDate is client-side post-filter if needed)
           req.user!.id,
-          ADNOC_TENANT_ID,
         ],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
@@ -326,9 +343,10 @@ export const correlationRuleController = {
 
       const body = req.body as CorrelationDismissBodyInput;
 
+      // DB signature: fn_correlation_dismiss(p_correlation_pk, p_reason, p_actor_id) — 3 args
       const result = await db.callFunction<{ correlationId: number; newStatus: string }>(
         'fn_correlation_dismiss',
-        [correlationId, body.reason, req.user!.id, ADNOC_TENANT_ID],
+        [correlationId, body.reason, req.user!.id],
         { actorId: req.user!.id, tenantId: ADNOC_TENANT_ID },
       );
 

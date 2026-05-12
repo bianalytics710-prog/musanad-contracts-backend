@@ -406,7 +406,9 @@ export async function extractClausesForVersion(
       // Generate embedding for the clause summary
       const embedding = await generateEmbedding(result.summaryEn, contractVersionId, actorId);
 
-      // Call fn_clause_upsert
+      // DB signature: fn_clause_upsert(p_contract_version_id, p_clause_type_v2, p_parameters, p_text_excerpts,
+      //   p_page_no, p_source_offset_start, p_source_offset_end, p_confidence, p_extraction_model_version,
+      //   p_extraction_prompt_hash, p_embedding, p_summary_en, p_summary_ar, p_actor_id) — 14 args
       const upsertResult = await db.callFunction<{
         clauseId: number;
         reviewStatus: string;
@@ -424,12 +426,11 @@ export async function extractClausesForVersion(
           region.offsetStart,
           region.offsetEnd,
           result.confidence,
+          'gpt-4o',                              // p_extraction_model_version
+          null,                                  // p_extraction_prompt_hash — deferred per M11 pattern
+          embedding ? `[${embedding.join(',')}]` : null, // p_embedding
           result.summaryEn,
           result.summaryAr,
-          embedding ? `[${embedding.join(',')}]` : null,
-          'gpt-4o',
-          null, // extractionPromptHash — deferred per M11 pattern
-          ADNOC_TENANT_ID,
           actorId,
         ],
         { actorId, tenantId: ADNOC_TENANT_ID },
@@ -489,13 +490,15 @@ export async function triggerExtractionRequest(
   forceReprocess: boolean,
   actorId: number,
 ): Promise<{ queued: boolean; extractionRunId: number | null; reason?: string }> {
+  // DB signature: fn_clause_extraction_request(p_contract_version_id, p_actor_id) — 2 args.
+  // contractId + versionId resolution happens inside fn_; forceReprocess not a DB param.
   const result = await db.callFunction<{
     queued: boolean;
     extractionRunId: number | null;
     reason?: string;
   }>(
     'fn_clause_extraction_request',
-    [contractId, versionId, forceReprocess, actorId, ADNOC_TENANT_ID],
+    [versionId ?? contractId, actorId],
     { actorId, tenantId: ADNOC_TENANT_ID },
   );
 
