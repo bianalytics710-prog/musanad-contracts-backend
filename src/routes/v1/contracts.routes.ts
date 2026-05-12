@@ -73,6 +73,8 @@ import {
   CreateCommentSchema,
   SetContractWatchSchema,
 } from '../../schemas/contract-comment.schemas';
+// M11 — Document Ingestion sub-router (CR-D0)
+import documentIngestionRouter from './contracts/document-ingestion.routes';
 
 const router = Router();
 
@@ -455,5 +457,11 @@ router.put(
   validate(SetContractWatchSchema, 'body'),
   approvalController.setWatch,
 );
+
+// ============================================================
+// M11 (CR-D0) — Document Ingestion sub-routes
+// Mounted at /:id/versions/:vId (mergeParams: true in sub-router)
+// ============================================================
+router.use('/:id/versions/:vId', documentIngestionRouter);
 
 export default router;

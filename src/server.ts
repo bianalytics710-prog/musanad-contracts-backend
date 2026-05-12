@@ -67,6 +67,11 @@ import {
   startSourceHealthWorker,
   stopSourceHealthWorker,
 } from './workers/source-health.worker';
+// M11 (CR-D0) — Document Ingestion worker
+import {
+  startIngestionWorker,
+  stopIngestionWorker,
+} from './workers/ingestion.worker';
 
 const app = express();
 
@@ -167,6 +172,11 @@ const server = app.listen(port, () => {
   // WORKER_ENABLED=true (default false in CR-A so dev boots stay quiet).
   startSourceFetchWorker();
   startSourceHealthWorker();
+
+  // M11 (CR-D0) — Document Ingestion worker. No-op in NODE_ENV=test AND
+  // requires INGESTION_WORKER_ENABLED=true (default off so dev boots stay
+  // quiet). Runs every 30s, processes up to 2 concurrent jobs per tick.
+  startIngestionWorker();
 });
 
 // --- Graceful shutdown ---
@@ -183,6 +193,8 @@ const shutdown = async (signal: string): Promise<void> => {
     // M7 — stop OSINT source-fetch + source-health workers.
     stopSourceFetchWorker();
     stopSourceHealthWorker();
+    // M11 (CR-D0) — stop ingestion worker.
+    stopIngestionWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

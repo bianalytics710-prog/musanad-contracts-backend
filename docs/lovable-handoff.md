@@ -1250,3 +1250,104 @@ The Roles editor page (`/app/admin/roles`) was previously read-only (R-PA0 — u
 ---
 
 *CR-C section generated 2026-05-10 by Documentation Generator from api-contracts.json + fe-implementation-summary.json + qa-stage4-report.md + module-M10-test-report.md. Mode: REGENERATE (no Lovable components hardened in this CR — all surfaces are net-new admin cockpit pages).*
+
+---
+
+## CR-D0 — Document Ingestion Pipeline (M11)
+
+*Generated 2026-05-12. Mode: REGENERATE (3 new components + 1 extended route — all net-new, no Lovable originals to harden).*
+
+### BE↔FE Envelope Unwrap Contract (BR1-equivalent FIX-1 pattern)
+
+The Musanad BE wraps all single-resource responses as `{ success: true, data: T, requestId: string }`. List endpoints that call fn_ functions returning `{ data: [...], pagination: {...} }` directly spread the pagination envelope without the wrapper (bare return pattern).
+
+CR-D0 services exposed a critical defect during FE integration (BR1-equivalent): services used naked `return data` without unwrapping, so the FE received `{ success, data: {...}, requestId }` as the typed entity — polling never stopped because `response.ingestionStatus` was `undefined`.
+
+**Fix pattern** (applied to 4 of 5 CR-D0 service methods):
+```typescript
+import { unwrap } from '../lib/api-client';
+// ...
+const response = await apiClient.get<ApiEnvelope<IngestionStatus>>(url);
+return unwrap<IngestionStatus>(response.data);  // unwrap strips { success, data, requestId }
+```
+
+**Exception** — the admin ingestion-queue list endpoint correctly uses bare `return data` because the BE controller spreads the pagination envelope directly (not wrapped in a `data` key). The FE admin service reads `response.data` and `response.pagination` directly.
+
+**Rule**: any endpoint whose BE controller calls `return res.json({ success: true, data: result })` requires `unwrap<T>()` in the FE service. Any endpoint that spreads fn_ pagination output directly does not.
+
+### Document Ingestion Service Pipeline
+
+File: `src/services/document-ingestion.service.ts`
+
+The service implements a three-engine extraction cascade:
+
+1. **MIME type detection** — `file-type` package detects whether the buffer is PDF or DOCX (MIME-based, not extension-based — prevents extension spoofing).
+
+2. **PDF path**:
+   - `pdf-parse` extracts the text layer from the raw PDF buffer. If `text.trim().length > 50` characters and no Arabic-heavy heuristic triggers, the document is classified as `digital_pdf` and extraction is complete.
+   - If the text layer is sparse (scanned PDF), `tesseract.js` processes each page with `eng+ara` traineddata. Per-page confidence is recorded.
+   - Pages where `confidence < ocr.confidence_threshold` (from system_setting, default 0.75) AND the daily Vision cap (`ai.daily_vision_cap_pages`) has not been reached are passed to gpt-4o Vision via AIProvider.
+   - Pages over the daily cap are recorded in `ingestion_review_queue` with `review_status = 'pending_human'` (no Vision call made).
+
+3. **DOCX path** — `mammoth` extracts paragraphs with structure preserved (headings, bold, lists). `extraction_engine = 'mammoth_docx'`. `ocr_used = FALSE`.
+
+4. **`pdfjs-dist` DROP** — pdfjs-dist v5 is ESM-only and requires Node 22+. The import inside the service blew up at first call. `pdfjs-dist` was removed from BE runtime deps entirely. Page count and text-layer data come from `pdf-parse` (already a dependency). Tesseract.js processes the raw PDF buffer directly. This deviates from §4.11 SOT (which mentioned pdfjs-dist explicitly) and is documented as a CR-D0 deviation.
+
+### Worker Pattern
+
+File: `src/workers/ingestion.worker.ts`
+
+The ingestion worker uses **node-cron** (same scheduler as M2 escalation and M7 source-health) with a configurable cron expression (`INGESTION_WORKER_CRON_EXPR`). Each tick:
+
+1. Queries for up to `N` contract_version rows with `ingestion_status IN ('pending', 'failed')` via `SELECT FOR UPDATE SKIP LOCKED` (S2-17 concurrency primitive — prevents double-pickup across concurrent worker instances).
+
+2. Runs extractions in parallel with **p-limit** concurrency 2 (N22 lock — same `pLimit(N)` pattern as M7 puppeteer-pool.service.ts; not Puppeteer-specific).
+
+3. Before each `fn_ingestion_review_queue_record` INSERT, executes `SET LOCAL app.current_tenant_id = '<adnoc-uuid>'` (N18 — worker resolves tenant via singleton ADNOC tenant UUID for v1 single-tenant demo, matching M7 source_health pattern).
+
+4. On success: calls `fn_contract_version_ingestion_complete`. On failure: calls `fn_contract_version_ingestion_fail`. On `attemptCount >= 2` (Q5): marks terminal failure and notifies admin.
+
+### Supabase Storage Path Convention
+
+Extracted text is stored in Supabase Storage at:
+```
+<tenantId>/<contractId>/v<n>/<uuid>.txt
+```
+
+Where `<uuid>` is a freshly generated UUID per extraction run (N12 — NAMING-CONFLICT-2). This prevents same-version retry overwrites from clobbering the original artifact, preserving the audit trail even when re-extraction is triggered via the manual ingest endpoint.
+
+The `supabase-storage.service.ts` `signDownloadUrl` method is called with `expiresIn: 60` (seconds) for all extracted-text signed URL requests. The FE caches the signed URL response with `staleTime: 50_000` ms (10 s margin before TTL expiry).
+
+### ai_request_log Scalar Mapping per Vision Call
+
+Each gpt-4o Vision page call writes one row to `ai_request_log` via the existing M4 helper:
+
+| Column | Value |
+|---|---|
+| entity_type | `'contract_version'` |
+| entity_id | contract_version.id |
+| mode | `'vision_extract'` |
+| prompt_id | `'ai-document-ingestion-vision'` (seeded in migration 136) |
+| provider | `'openai'` |
+| model_used | `'gpt-4o'` |
+| latency_ms | wall-clock extraction time for the page |
+| cost_usd_estimate | estimated cost per Vision call |
+| status | `'success'` or `'error'` |
+
+`prompt_hash` and `page_no` are not stored (no `metadata JSONB` column on ai_request_log today). This is deferred per OPEN-DECISION N16/N17.
+
+### Signed URL TTL (60 s)
+
+All signed URLs for extracted-text artifacts have a **60-second TTL** (enforced in `supabase-storage.service.ts`). The FE service uses `staleTime: 50_000` in the React Query config so it will refetch before the URL expires. The `extractedTextUri` column on `contract_version` is never exposed directly to the client — the BE controller strips it from the `fn_contract_version_ingestion_status` response. Only the `/extracted-text` endpoint returns a signed URL.
+
+### IngestionReviewPanel Design Notes
+
+Component: `src/components/contracts/IngestionReviewPanel.tsx`
+
+- `useFocusTrap` wired (consistent with all destructive/review modals in the app — same pattern as M3 SignatureDialog, CR-C DemoPurgePanel).
+- `tesseract_text` and `gpt4o_text` are **excluded from the list endpoint response** (`fn_ingestion_review_queue_list` does not return these fields). Only the review panel UI triggers a separate fetch for the full row content when the reviewer opens a specific page — sensitivity-controlled exposure.
+- Admin ingestion queue page (`/app/admin/ingestion-queue`) uses 5 filter chips (All / Pending auto / Pending human / Resolved / Rejected) mapping to `reviewStatus` query param values.
+
+---
+
+*CR-D0 section generated 2026-05-12 by Documentation Generator from migrations 132..140, after-state.md, module-M11-test-report.md, decisions/M11.json.*

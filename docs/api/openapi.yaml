@@ -465,7 +465,27 @@ info:
     notification.template.manage, demo.purge). Migrations 123..131 applied.
     **Version bumped 1.0.2 → 1.0.3** — feature-additive; all prior routes
     unchanged.
-  version: 1.0.3
+
+    **M11 (CR-D0 — Document Ingestion Pipeline)** — Automated extraction of
+    text from uploaded contract documents (PDF, DOCX) using a three-engine
+    pipeline: pdf-parse for digital PDFs, Tesseract.js for scanned PDFs
+    (EN+AR bilingual, `eng+ara` traineddata), and gpt-4o Vision for pages
+    where Tesseract confidence falls below the configurable threshold
+    (system_setting `ocr.confidence_threshold`, Q1 default 0.75). A daily
+    Vision page cap (`ai.daily_vision_cap_pages`, Q2 default 500) routes
+    over-budget pages to human review. DOCX files use mammoth for structured
+    paragraph extraction. pdfjs-dist was dropped (ESM-only v5; replaced by
+    pdf-parse for page count + digital text). Extracted text is stored in
+    Supabase Storage at `<tenantId>/<contractId>/v<n>/<uuid>.txt`; the
+    `extracted_text_uri` column on `contract_version` holds the path; all
+    signed-URL delivery goes through the BE (60 s TTL, never logged). 5
+    net-new HTTP endpoints across two namespaces. 3 net-new permissions
+    (`document.ingest`, `document.review`, `ingestion_queue.read`). 9
+    migrations applied (132..140; 138 skipped as design defect + 140 patches
+    the `updated_at` column-existence defect in 137). Twelfth consecutive
+    S2-21 clean module (zero net-new PUBLIC EXECUTE). **Version bumped
+    1.0.3 → 1.0.4** — feature-additive; all prior routes unchanged.
+  version: 1.0.4
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -13916,3 +13936,362 @@ x-paths-root:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  # ============================================================
+  # M11 — Document Ingestion Pipeline (CR-D0)
+  # ============================================================
+
+  /contracts/{contractId}/versions/{versionId}/ingest:
+    post:
+      summary: Manually trigger document ingestion (re-extraction)
+      description: >
+        Flips the contract_version ingestion_status from `pending`, `failed`,
+        or `partial` to `extracting` and enqueues re-extraction via the
+        ingestion worker (node-cron + p-limit concurrency 2). Returns
+        `alreadyInProgress: true` when the version is already `extracting` or
+        `complete` — idempotent. Permission: `document.ingest` (Super Admin
+        break-glass only per OPEN-DECISION-L Path A; normal upload flow
+        triggers extraction automatically via the upload controller callback).
+        Implements ep_ingest_manual_trigger.
+      operationId: documentIngestionManualTrigger
+      tags: ["M11 — Document Ingestion Pipeline"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin"]
+      x-required-permission: document.ingest
+      parameters:
+        - in: path
+          name: contractId
+          required: true
+          schema: { type: integer }
+          description: Contract ID.
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: integer }
+          description: Contract version ID to re-extract.
+      responses:
+        "201":
+          description: Ingestion queued (status advanced to `extracting`).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      contractVersionId: { type: integer }
+                      ingestionStatus: { type: string, enum: [extracting] }
+                      queuedAt: { type: string, format: date-time }
+                      alreadyInProgress: { type: boolean }
+        "400":
+          description: Invalid path parameters.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks `document.ingest`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Contract version not found.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /contracts/{contractId}/versions/{versionId}/extracted-text:
+    get:
+      summary: Get a signed URL for the extracted text artifact
+      description: >
+        Returns a short-lived Supabase Storage signed URL (60 s TTL) for
+        downloading the extracted plain-text artifact (`<uuid>.txt`). The
+        `extracted_text_uri` column is never returned directly — only the
+        signed URL is exposed so the raw Storage path is not logged or cached
+        by clients. FE caches the signed-URL response with
+        `staleTime: 50_000` (10 s margin before TTL expiry). Returns 409
+        when the version is not yet `complete`. Implements
+        ep_extracted_text_signed_url.
+      operationId: documentIngestionExtractedTextSignedUrl
+      tags: ["M11 — Document Ingestion Pipeline"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [drafter, approver, legal_counsel, recipient, executive, platform_admin, "Super Admin"]
+      x-required-permission: contract.read.* (any)
+      parameters:
+        - in: path
+          name: contractId
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Signed URL returned. TTL 60 s.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      signedUrl: { type: string, format: uri, description: Supabase Storage signed URL. TTL 60 s. }
+                      expiresAt: { type: string, format: date-time }
+                      extractionEngine: { type: string, enum: [digital_pdf, tesseract, gpt4o_vision, mammoth_docx, mixed] }
+                      pageCount: { type: integer }
+                      ocrConfidenceAvg: { type: number, format: float, nullable: true }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks any contract.read.* permission.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Contract version not found or RLS-invisible.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Version not yet `complete` — ingestion still in progress or failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /contracts/{contractId}/versions/{versionId}/ingestion-status:
+    get:
+      summary: Poll ingestion status for a contract version
+      description: >
+        Returns the current ingestion lifecycle status for a contract_version
+        row. FE Document tab polls this endpoint every 3 s while
+        `ingestionStatus` is `pending` or `extracting` and stops on
+        `complete`, `failed`, or `partial`. Also returns `lowConfidencePageCount`
+        — the number of `ingestion_review_queue` rows still awaiting human
+        review — so the Document tab can surface a "N pages need review" badge.
+        Returns 404 when the version is not visible to the caller (RLS). The
+        `extractedTextUri` field is present in the DB response but stripped
+        by the controller before sending — use the `/extracted-text` endpoint
+        for signed-URL delivery. Implements ep_ingestion_status_poll.
+      operationId: documentIngestionStatusPoll
+      tags: ["M11 — Document Ingestion Pipeline"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [drafter, approver, legal_counsel, recipient, executive, platform_admin, "Super Admin"]
+      x-required-permission: contract.read.* (any)
+      parameters:
+        - in: path
+          name: contractId
+          required: true
+          schema: { type: integer }
+        - in: path
+          name: versionId
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Ingestion status returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      contractVersionId: { type: integer }
+                      ingestionStatus:
+                        type: string
+                        enum: [pending, extracting, complete, failed, partial]
+                      pageCount: { type: integer, nullable: true }
+                      ocrUsed: { type: boolean }
+                      ocrConfidenceAvg: { type: number, nullable: true }
+                      extractionEngine:
+                        type: string
+                        nullable: true
+                        enum: [digital_pdf, tesseract, gpt4o_vision, mammoth_docx, mixed]
+                      extractedAt: { type: string, format: date-time, nullable: true }
+                      lowConfidencePageCount: { type: integer, description: Pages still pending human review in ingestion_review_queue. }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks any contract.read.* permission.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Contract version not found or RLS-invisible.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/ingestion-queue:
+    get:
+      summary: List the admin ingestion review queue
+      description: >
+        Returns a paginated list of `ingestion_review_queue` rows for the
+        caller's tenant — all pages where Tesseract confidence was below
+        the threshold OR where the daily Vision cap routed the page to human
+        review. Response does NOT include `tesseract_text` or `gpt4o_text`
+        (sensitive fields excluded from the list endpoint; use the resolve
+        endpoint for full context). Filter by `reviewStatus`, `contractVersionId`,
+        or `gpt4oUsed`. Default sort: `pending_auto > pending_human > resolved >
+        rejected`, then `created_at DESC`. Implements ep_admin_ingestion_queue_list.
+      operationId: adminIngestionQueueList
+      tags: ["M11 — Document Ingestion Pipeline"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [legal_counsel, platform_admin, "Super Admin"]
+      x-required-permission: document.review OR ingestion_queue.read
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 100 }
+        - in: query
+          name: reviewStatus
+          schema:
+            type: string
+            enum: [pending_auto, pending_human, resolved, rejected]
+          required: false
+        - in: query
+          name: contractVersionId
+          schema: { type: integer }
+          required: false
+        - in: query
+          name: gpt4oUsed
+          schema: { type: boolean }
+          required: false
+      responses:
+        "200":
+          description: Paginated queue list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer }
+                        contractVersionId: { type: integer }
+                        contractTitleEn: { type: string }
+                        contractTitleAr: { type: string }
+                        pageNo: { type: integer }
+                        tesseractConfidence: { type: number, nullable: true }
+                        gpt4oUsed: { type: boolean }
+                        reviewStatus:
+                          type: string
+                          enum: [pending_auto, pending_human, resolved, rejected]
+                        reviewedByName: { type: string, nullable: true }
+                        reviewedAt: { type: string, format: date-time, nullable: true }
+                        createdAt: { type: string, format: date-time }
+                        dataClassification: { type: string }
+                        tenantId: { type: string, format: uuid }
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks `document.review` or `ingestion_queue.read`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/ingestion-queue/{id}/resolve:
+    post:
+      summary: Resolve a low-confidence ingestion page
+      description: >
+        Allows a reviewer (legal_counsel or platform_admin) to confirm, correct,
+        or reject a low-confidence OCR page in the ingestion_review_queue.
+        **confirm** — accepts the best available text (gpt4o_text if present,
+        otherwise tesseract_text) as `final_text` and marks the row `resolved`.
+        **correct** — accepts caller-provided `correctedText` as `final_text`
+        and marks `resolved`. **reject** — marks `rejected` with `final_text = NULL`.
+        Already-resolved/rejected rows return 409. RLS ensures reviewers can only
+        see rows belonging to their tenant. Implements ep_admin_ingestion_queue_resolve.
+      operationId: adminIngestionQueueResolve
+      tags: ["M11 — Document Ingestion Pipeline"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: [legal_counsel, platform_admin, "Super Admin"]
+      x-required-permission: document.review
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+          description: ingestion_review_queue row ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [confirm, correct, reject]
+                correctedText:
+                  type: string
+                  description: Required when action = correct.
+      responses:
+        "200":
+          description: Page resolved.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data, requestId]
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  requestId: { type: string, format: uuid }
+                  data:
+                    type: object
+                    properties:
+                      queueId: { type: integer }
+                      reviewStatus: { type: string, enum: [resolved, rejected] }
+                      finalText: { type: string, nullable: true }
+                      reviewedAt: { type: string, format: date-time }
+        "400":
+          description: Invalid action or missing correctedText for `correct` action.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403":
+          description: Caller lacks `document.review`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "404":
+          description: Queue item not found or RLS-invisible (tenant isolation).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "409":
+          description: Queue item already resolved or rejected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "500": { $ref: "#/components/responses/ServerError" }

@@ -8,6 +8,13 @@
  *
  * Bytes flow through the BE → Supabase Storage using the service-role key
  * (BE-mediated upload). FE never sees Supabase credentials.
+ *
+ * M11 (CR-D0): After a successful upload, the upload handler auto-queues
+ * the contract_version for text extraction via fn_contract_version_ingest
+ * (OPEN-DECISION-N Path B). The ingestion call is best-effort — a failure
+ * here logs a warning but does NOT roll back the upload or attachment row.
+ * The manual trigger endpoint (POST /versions/:vId/ingest) is the break-glass
+ * retry path for platform admins.
  */
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../database/client';
@@ -137,6 +144,46 @@ export const contractAttachmentController = {
           sizeBytes: file.size,
           mimeType: file.mimetype,
         },
+      });
+
+      // M11 (CR-D0) — auto-ingest trigger (OPEN-DECISION-N Path B).
+      // Fire best-effort AFTER the HTTP response is sent so the client
+      // receives 201 immediately. fn_contract_version_ingest sets
+      // ingestion_status='extracting' on the contract's current_version.
+      // The ingestion worker picks it up on the next poll tick.
+      // Bootstrap actor (id=1) + ADNOC singleton tenant for system-context.
+      const ADNOC_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+      const SYSTEM_ACTOR_ID = 1;
+      // Lookup the current contract_version id for this contract
+      setImmediate(() => {
+        db.callFunction<{ currentVersionId: number } | null>(
+          'fn_contract_get_by_id',
+          [contractId, userId, (req.user as { role?: string })?.role ?? 'contract_drafter'],
+          { actorId: userId },
+        ).then((contract) => {
+          const currentVersionId = (contract as { currentVersionId?: number } | null)?.currentVersionId;
+          if (!currentVersionId) return;
+          return db.callFunction(
+            'fn_contract_version_ingest',
+            [currentVersionId],
+            { actorId: SYSTEM_ACTOR_ID, tenantId: ADNOC_TENANT_ID },
+          );
+        }).then(() => {
+          req.logger.info(
+            { action: 'contractAttachment.auto_ingest_queued', contractId },
+            'Auto-ingest queued after attachment upload',
+          );
+        }).catch((err: unknown) => {
+          // Non-fatal — manual trigger endpoint is the break-glass retry path
+          req.logger.warn(
+            {
+              action: 'contractAttachment.auto_ingest_failed',
+              contractId,
+              errorType: err instanceof Error ? err.name : 'UNKNOWN',
+            },
+            'Auto-ingest trigger failed (non-fatal — use manual trigger endpoint to retry)',
+          );
+        });
       });
     } catch (err) {
       next(err);

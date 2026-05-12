@@ -79,4 +79,10 @@ router.use('/email-config', emailConfigRouter);
 // S11 — branding asset upload + color / footer edit.
 router.use('/branding', brandingRouter);
 
+// ============================================================
+// M11 (CR-D0) — Admin Ingestion Queue monitor + resolve.
+// ============================================================
+import ingestionQueueRouter from './ingestion-queue.routes';
+router.use('/ingestion-queue', ingestionQueueRouter);
+
 export default router;
