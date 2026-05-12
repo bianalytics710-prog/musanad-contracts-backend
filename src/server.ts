@@ -72,6 +72,20 @@ import {
   startIngestionWorker,
   stopIngestionWorker,
 } from './workers/ingestion.worker';
+// M12 (CR-D) — Clause Extraction worker
+import {
+  startClauseExtractionWorker,
+  stopClauseExtractionWorker,
+} from './workers/clause-extraction.worker';
+// M13 (CR-E) — Correlation Evaluator worker + Rule Cache listener
+import {
+  startCorrelationEvaluatorWorker,
+  stopCorrelationEvaluatorWorker,
+} from './workers/correlation-evaluator.worker';
+import {
+  startRuleCacheListener,
+  stopRuleCacheListener,
+} from './services/rule-cache.service';
 
 const app = express();
 
@@ -177,6 +191,20 @@ const server = app.listen(port, () => {
   // requires INGESTION_WORKER_ENABLED=true (default off so dev boots stay
   // quiet). Runs every 30s, processes up to 2 concurrent jobs per tick.
   startIngestionWorker();
+
+  // M12 (CR-D) — Clause Extraction worker. No-op in NODE_ENV=test AND
+  // requires CLAUSE_EXTRACTION_WORKER_ENABLED=true (default off in dev).
+  // Runs every 30s, p-limit(2) concurrency.
+  startClauseExtractionWorker();
+
+  // M13 (CR-E) — Rule Cache listener + Correlation Evaluator worker.
+  // Rule cache: startRuleCacheListener() is async — fire and forget on startup.
+  //   Registers LISTEN correlation_rule_changed + performs initial rule load.
+  //   No-op guard: test mode / missing env var handled inside the service.
+  // Correlation evaluator: LISTEN osint_signal_inserted. No-op in test AND
+  //   requires CORRELATION_EVALUATOR_WORKER_ENABLED=true (default off in dev).
+  void startRuleCacheListener();
+  void startCorrelationEvaluatorWorker();
 });
 
 // --- Graceful shutdown ---
@@ -195,6 +223,11 @@ const shutdown = async (signal: string): Promise<void> => {
     stopSourceHealthWorker();
     // M11 (CR-D0) — stop ingestion worker.
     stopIngestionWorker();
+    // M12 (CR-D) — stop clause extraction worker.
+    stopClauseExtractionWorker();
+    // M13 (CR-E) — stop correlation evaluator worker + rule cache listener.
+    stopCorrelationEvaluatorWorker();
+    await stopRuleCacheListener();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

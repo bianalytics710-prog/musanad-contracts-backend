@@ -22,3 +22,6 @@ Thumbs.db
 tmp/
 temp/
 .cache/
+
+# Tesseract.js language traineddata — auto-downloaded by tesseract.js at runtime
+*.traineddata

@@ -14295,3 +14295,850 @@ x-paths-root:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "500": { $ref: "#/components/responses/ServerError" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # M12 — Clause Taxonomy + Two-Stage Extractor + pgvector + Auto-Obligations
+  # Migrations 141–149, 157 (cross-cutting), 159 (backfill)
+  # Permissions: clause.extract, clause.review, clause.taxonomy.read, clause.search
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /contracts/{id}/extract-clauses:
+    post:
+      summary: Trigger clause extraction on the latest version of a contract
+      description: |
+        Queues clause extraction on the most recent contract_version. Idempotent
+        on (contract_version_id) — returns queued=false if extraction is already
+        in progress. Use forceReprocess=true to override. Automatically triggered
+        by the system on contract.ingested PG NOTIFY (M11); this endpoint supports
+        manual admin triggers.
+      operationId: extractClausesLatest
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Contract ID (BIGINT)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                forceReprocess:
+                  type: boolean
+                  description: If true, re-run extraction even if clauses already exist for this version
+      responses:
+        "202":
+          description: Extraction job accepted and queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      queued: { type: boolean }
+                      extractionRunId: { type: integer, nullable: true }
+                      reason: { type: string, nullable: true }
+        "400": { description: Invalid request body, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.extract permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found or not in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Extraction already running (use forceReprocess=true to override), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /contracts/{id}/versions/{vId}/extract-clauses:
+    post:
+      summary: Trigger clause extraction on a specific contract version
+      description: Queues clause extraction for the specified contract_version. Idempotent per (contract_version_id).
+      operationId: extractClausesForVersion
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Contract ID (BIGINT)
+        - name: vId
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Contract version ID (BIGINT)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                forceReprocess: { type: boolean }
+      responses:
+        "202":
+          description: Extraction job accepted and queued for specific version
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      queued: { type: boolean }
+                      extractionRunId: { type: integer, nullable: true }
+                      reason: { type: string, nullable: true }
+        "400": { description: Invalid request body, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.extract permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract or version not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Extraction already running for this version, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /clauses/review-queue:
+    get:
+      summary: Paginated list of extracted clause records pending legal review
+      description: |
+        Returns contract_clause_extracted rows with review_status='pending_review'
+        (confidence below 0.70 per HITL Q1). Filters: contractId, clauseType, reviewStatus,
+        confidenceBelow. RLS-scoped to current tenant.
+      operationId: listClauseReviewQueue
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["legal_counsel", "platform_admin"]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: contractId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: clauseType
+          in: query
+          schema: { type: string }
+          description: Filter by ClauseTypeV2 enum value (e.g. force_majeure)
+        - name: reviewStatus
+          in: query
+          schema:
+            type: string
+            enum: [auto, pending_review, reviewed, rejected, pending_extraction]
+        - name: confidenceBelow
+          in: query
+          schema: { type: number, minimum: 0, maximum: 1 }
+      responses:
+        "200":
+          description: Paginated clause review queue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            contractId: { type: integer }
+                            contractTitleEn: { type: string }
+                            contractTitleAr: { type: string }
+                            clauseTypeV2: { type: string }
+                            family: { type: string }
+                            displayNameEn: { type: string }
+                            displayNameAr: { type: string }
+                            parametersPreview: { type: object }
+                            confidence: { type: number, nullable: true }
+                            pageNo: { type: integer, nullable: true }
+                            reviewStatus: { type: string }
+                            createdAt: { type: string, format: date-time }
+                      pagination: { $ref: "#/components/schemas/PaginationMeta" }
+        "400": { description: Invalid query parameters, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.review permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /clauses/{id}/review:
+    post:
+      summary: Confirm, correct, or reject an extracted clause record
+      description: |
+        Resolves a pending_review contract_clause_extracted row. action must be
+        confirm / correct / reject. correct requires parametersCorrection and
+        textExcerptsCorrection with matching keys (Annex A.1.2 discipline).
+        On confirm/correct for obligation-deriving clause types, fn_obligations_derive_from_clause
+        re-runs idempotently. Double-resolve returns 409.
+      operationId: reviewClause
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["legal_counsel", "platform_admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: contract_clause_extracted ID (BIGINT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [confirm, correct, reject]
+                parametersCorrection:
+                  type: object
+                  description: Required when action=correct. snake_case keys per Annex A parameter spec.
+                textExcerptsCorrection:
+                  type: object
+                  description: Required when action=correct. Every key in parametersCorrection must have a match here.
+      responses:
+        "200":
+          description: Clause resolved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      clauseId: { type: integer }
+                      newReviewStatus: { type: string, enum: [reviewed, rejected] }
+                      obligationsRecomputed: { type: boolean }
+        "400": { description: Invalid action or missing parametersCorrection when action=correct, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.review permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Clause record not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Clause already resolved (already_resolved), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/clause-taxonomy:
+    get:
+      summary: Retrieve the full clause taxonomy catalogue
+      description: |
+        Returns all 50 non-deprecated clause_taxonomy rows for the current tenant
+        with parameter schemas, identification cues, and EN+AR display labels.
+        Response includes both a flat items array and a groupedByFamily map.
+        Used by the admin viewer and Stage 2 LLM prompt builder.
+      operationId: listClauseTaxonomy
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin", "platform_admin", "legal_counsel", "contract_drafter", "contract_approver", "contract_approver_2", "contract_recipient", "executive"]
+      parameters:
+        - name: family
+          in: query
+          schema:
+            type: string
+            enum: [force_majeure, termination, pricing, performance, indemnity, compliance, governance, operational]
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 200 }
+        - name: isActive
+          in: query
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: Clause taxonomy catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            clauseTypeId: { type: string }
+                            family: { type: string }
+                            displayNameEn: { type: string }
+                            displayNameAr: { type: string }
+                            definitionEn: { type: string }
+                            definitionAr: { type: string }
+                            identificationCuesEn: { type: string }
+                            identificationCuesAr: { type: string }
+                            parameterSchema: { type: object }
+                            version: { type: integer }
+                            isDeprecated: { type: boolean }
+                            dataClassification: { type: string }
+                            createdAt: { type: string, format: date-time }
+                            updatedAt: { type: string, format: date-time }
+                            createdBy: { type: integer, nullable: true }
+                            updatedBy: { type: integer, nullable: true }
+                            isActive: { type: boolean }
+                      groupedByFamily:
+                        type: object
+                        additionalProperties:
+                          type: array
+                          items: { type: object }
+        "400": { description: Invalid query parameters, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.taxonomy.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /clauses/search:
+    post:
+      summary: Semantic search across extracted clause records using pgvector embeddings
+      description: |
+        Server embeds queryText via text-embedding-3-small (logged to ai_request_log),
+        then queries the ivfflat index on contract_clause_extracted.embedding using
+        cosine similarity. Returns top-N results ordered by similarity descending.
+        queryText is sensitive — not logged (pinoRedactPaths). Optionally restricted
+        to one contract via contractId.
+      operationId: searchClauses
+      tags: ["M12 — Clause Taxonomy + Extraction"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["Super Admin", "platform_admin", "legal_counsel", "contract_drafter", "contract_approver", "contract_approver_2", "contract_recipient", "executive"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [queryText]
+              properties:
+                queryText: { type: string, minLength: 3, maxLength: 1000 }
+                contractId: { type: integer, minimum: 1, nullable: true }
+                limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+                similarityMin: { type: number, minimum: 0, maximum: 1, default: 0.0 }
+      responses:
+        "200":
+          description: Semantic search results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            clauseId: { type: integer }
+                            contractId: { type: integer }
+                            clauseTypeV2: { type: string }
+                            family: { type: string }
+                            similarity: { type: number }
+                            summaryEn: { type: string, nullable: true }
+                            summaryAr: { type: string, nullable: true }
+                            pageNo: { type: integer, nullable: true }
+                      count: { type: integer }
+                      queryEmbeddingLogId: { type: integer }
+        "400": { description: queryText missing or too short/long, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks clause.search permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "422": { description: OpenAI embedding call failed; caller should retry, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # M13 — Correlation Rule Engine + DSL
+  # Migrations 150–158
+  # Permissions: rule.read, rule.manage, correlation.read, correlation.dismiss
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  /admin/rules:
+    get:
+      summary: List all correlation rules for the tenant
+      description: |
+        Paginated correlation_rule rows with optional filtering by enabled state,
+        scenario tag, and name search. RLS-scoped to current tenant. Returns
+        list-view projection including versionHashShort (8 chars).
+      operationId: listCorrelationRules
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin", "legal_counsel"]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: enabled
+          in: query
+          schema: { type: boolean }
+        - name: scenario
+          in: query
+          schema: { type: string, maxLength: 100 }
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 200 }
+      responses:
+        "200":
+          description: Paginated correlation rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            ruleId: { type: string }
+                            name: { type: string }
+                            nameAr: { type: string }
+                            scenario: { type: string, nullable: true }
+                            enabled: { type: boolean }
+                            lastReviewedAt: { type: string, format: date-time, nullable: true }
+                            versionHashShort: { type: string }
+                            versionHash: { type: string }
+                            updatedAt: { type: string, format: date-time }
+                      pagination: { $ref: "#/components/schemas/PaginationMeta" }
+        "400": { description: Invalid query parameters, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    post:
+      summary: Create a new correlation rule with DSL match and produce YAML bodies
+      description: |
+        BE parser validates matchYaml and produceYaml against Annex C grammar before
+        calling fn_rule_create. fn_rule_create computes SHA-256 version_hash and emits
+        PG NOTIFY 'correlation_rule_changed' for cache invalidation (HITL Q3).
+        rule_id must be unique per tenant.
+      operationId: createCorrelationRule
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ruleId, name, nameAr, matchYaml, produceYaml]
+              properties:
+                ruleId: { type: string, maxLength: 200, description: "e.g. rule.sanctions.direct_counterparty" }
+                name: { type: string, maxLength: 200 }
+                nameAr: { type: string, maxLength: 200 }
+                scenario: { type: string, maxLength: 100, nullable: true }
+                enabled: { type: boolean, default: true }
+                matchYaml: { type: string, description: DSL match block per Annex C grammar }
+                produceYaml: { type: string, description: DSL produce block per Annex C.5 }
+                meta: { type: object, description: Optional CorrelationRuleMeta }
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      tenantId: { type: string, format: uuid }
+                      ruleId: { type: string }
+                      name: { type: string }
+                      nameAr: { type: string }
+                      scenario: { type: string, nullable: true }
+                      enabled: { type: boolean }
+                      meta: { type: object }
+                      matchYaml: { type: string }
+                      produceYaml: { type: string }
+                      versionHash: { type: string }
+                      lastReviewedBy: { type: integer, nullable: true }
+                      lastReviewedByName: { type: string, nullable: true }
+                      lastReviewedAt: { type: string, format: date-time, nullable: true }
+                      dataClassification: { type: string }
+                      createdAt: { type: string, format: date-time }
+                      updatedAt: { type: string, format: date-time }
+                      createdBy: { type: integer, nullable: true }
+                      updatedBy: { type: integer, nullable: true }
+                      isActive: { type: boolean }
+        "400": { description: Required field missing or invalid, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: A rule with this ruleId already exists in the tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "422": { description: matchYaml or produceYaml is not valid YAML per Annex C grammar, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/rules/{id}:
+    get:
+      summary: Fetch a single correlation rule by ID with fixture summary
+      description: |
+        Full rule detail including matchYaml, produceYaml, meta, versionHash, and
+        a fixtures array (id, fixtureId, description, expectedMatch per fixture).
+        Used by the admin rule detail page and test-against-fixture panel.
+      operationId: getCorrelationRule
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin", "legal_counsel"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Full rule detail with fixture summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      ruleId: { type: string }
+                      name: { type: string }
+                      nameAr: { type: string }
+                      scenario: { type: string, nullable: true }
+                      enabled: { type: boolean }
+                      meta: { type: object }
+                      matchYaml: { type: string }
+                      produceYaml: { type: string }
+                      versionHash: { type: string }
+                      lastReviewedBy: { type: integer, nullable: true }
+                      lastReviewedByName: { type: string, nullable: true }
+                      lastReviewedAt: { type: string, format: date-time, nullable: true }
+                      dataClassification: { type: string }
+                      createdAt: { type: string, format: date-time }
+                      updatedAt: { type: string, format: date-time }
+                      createdBy: { type: integer, nullable: true }
+                      updatedBy: { type: integer, nullable: true }
+                      isActive: { type: boolean }
+                      fixtures:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            fixtureId: { type: string }
+                            description: { type: string, nullable: true }
+                            expectedMatch: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Rule not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    patch:
+      summary: Update an existing correlation rule; recomputes versionHash on YAML change
+      description: |
+        Partial update — all fields optional; at least one required. Recomputes
+        version_hash when matchYaml or produceYaml changes. Emits PG NOTIFY
+        'correlation_rule_changed' for cache invalidation. Both YAML bodies are
+        validated by the BE parser before persist.
+      operationId: updateCorrelationRule
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, maxLength: 200 }
+                nameAr: { type: string, maxLength: 200 }
+                scenario: { type: string, maxLength: 100, nullable: true }
+                enabled: { type: boolean }
+                matchYaml: { type: string }
+                produceYaml: { type: string }
+                meta: { type: object }
+      responses:
+        "200":
+          description: Rule updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    description: Full updated rule shape (same as POST 201 data)
+        "400": { description: Invalid field values or empty request body, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Rule not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "422": { description: matchYaml or produceYaml is not valid YAML, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+    delete:
+      summary: Soft-delete a correlation rule (sets is_active=false)
+      description: |
+        Soft-deletes the rule row (is_active=false). Fixture rows are retained
+        for audit. Already-inactive rules return 409 (already deleted).
+        Hard DELETE is blocked by RESTRICTIVE deny-direct-delete RLS policy.
+      operationId: deleteCorrelationRule
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      responses:
+        "200":
+          description: Rule soft-deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      id: { type: integer }
+                      isActive: { type: boolean, enum: [false] }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Rule not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Rule already inactive (already deleted), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/rules/{id}/test:
+    post:
+      summary: Run a correlation rule against its registered fixtures (pure simulation)
+      description: |
+        Evaluates the rule against one or all registered fixtures. Does NOT persist
+        any correlation rows. Returns passed=true when actualMatch == expectedMatch.
+        If fixtureId is omitted, all fixtures are run and results are aggregated.
+      operationId: testCorrelationRuleAgainstFixture
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fixtureId:
+                  type: string
+                  description: Optional single fixture; if omitted all fixtures are run
+      responses:
+        "200":
+          description: Test result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      ruleId: { type: string }
+                      fixtureId: { type: string }
+                      expectedMatch: { type: boolean }
+                      actualMatch: { type: boolean }
+                      matchEvidence: { type: object }
+                      matchReason: { type: string, nullable: true }
+                      diffNotes:
+                        type: array
+                        items: { type: string }
+                      passed: { type: boolean }
+                      durationMs: { type: integer, nullable: true }
+        "400": { description: Invalid fixtureId, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks rule.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Rule not found or no fixtures registered, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /correlations:
+    get:
+      summary: Paginated list of active correlations for contracts visible to the actor
+      description: |
+        Returns correlation rows for the current tenant filtered by contract, status
+        (active/dismissed/expired), rule_id string, and date range. Includes
+        contractTitleEn/Ar and ruleName/ruleScenario via JOINs. RLS-scoped.
+        match_evidence and match_entities are included in response but never logged.
+      operationId: listCorrelations
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin", "legal_counsel"]
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: contractId
+          in: query
+          schema: { type: integer, minimum: 1 }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, dismissed, expired]
+        - name: ruleId
+          in: query
+          schema: { type: string }
+          description: "Filter by rule_id string e.g. rule.sanctions.direct_counterparty"
+        - name: fromDate
+          in: query
+          schema: { type: string, format: date }
+        - name: toDate
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Paginated correlations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            tenantId: { type: string, format: uuid }
+                            signalId: { type: integer }
+                            contractId: { type: integer }
+                            contractTitleEn: { type: string, nullable: true }
+                            contractTitleAr: { type: string, nullable: true }
+                            ruleId: { type: string }
+                            ruleName: { type: string, nullable: true }
+                            ruleScenario: { type: string, nullable: true }
+                            ruleVersionHash: { type: string }
+                            confidence: { type: number }
+                            matchReason: { type: string }
+                            matchEvidence: { type: object }
+                            matchGeographies:
+                              type: array
+                              items: { type: string }
+                            matchEntities:
+                              type: array
+                              items: { type: object }
+                            status: { type: string, enum: [active, dismissed, expired] }
+                            dismissedBy: { type: integer, nullable: true }
+                            dismissedAt: { type: string, format: date-time, nullable: true }
+                            dismissedReason: { type: string, nullable: true }
+                            expiresAt: { type: string, format: date-time, nullable: true }
+                            dataClassification: { type: string }
+                            createdAt: { type: string, format: date-time }
+                            updatedAt: { type: string, format: date-time }
+                            createdBy: { type: integer, nullable: true }
+                            updatedBy: { type: integer, nullable: true }
+                            isActive: { type: boolean }
+                      pagination: { $ref: "#/components/schemas/PaginationMeta" }
+        "400": { description: Invalid query parameters, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks correlation.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /correlations/{id}/dismiss:
+    post:
+      summary: Dismiss an active correlation with a mandatory reason
+      description: |
+        Sets correlation.status='dismissed'. reason is mandatory (min 10 / max 2000 chars),
+        stored in dismissed_reason, and written to the audit log. Soft-delete only —
+        RESTRICTIVE deny-direct-delete policy blocks hard DELETE. Double-dismiss returns 409.
+      operationId: dismissCorrelation
+      tags: ["M13 — Correlation Rule Engine"]
+      security:
+        - BearerAuth: []
+      x-authorised-roles: ["platform_admin", "legal_counsel"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Correlation ID (BIGINT)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 2000
+                  description: Mandatory business justification recorded in audit log
+      responses:
+        "200":
+          description: Correlation dismissed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data:
+                    type: object
+                    properties:
+                      correlationId: { type: integer }
+                      newStatus: { type: string, enum: [dismissed] }
+        "400": { description: Reason missing or too short/long, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks correlation.dismiss permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Correlation not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Correlation already dismissed (already_dismissed), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }

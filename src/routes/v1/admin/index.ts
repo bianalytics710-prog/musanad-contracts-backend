@@ -85,4 +85,18 @@ router.use('/branding', brandingRouter);
 import ingestionQueueRouter from './ingestion-queue.routes';
 router.use('/ingestion-queue', ingestionQueueRouter);
 
+// ============================================================
+// M12 (CR-D) — Clause Taxonomy catalogue (read-only reference data).
+// CR-D-005: GET /admin/clause-taxonomy
+// ============================================================
+import clauseTaxonomyRouter from './clause-taxonomy.routes';
+router.use('/clause-taxonomy', clauseTaxonomyRouter);
+
+// ============================================================
+// M13 (CR-E) — Correlation Rule CRUD + DSL test harness.
+// CR-E-001..004, CR-E-007, CR-E-008: /admin/rules
+// ============================================================
+import { adminRulesRouter } from '../correlation-rule.routes';
+router.use('/rules', adminRulesRouter);
+
 export default router;

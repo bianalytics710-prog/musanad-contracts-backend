@@ -35,6 +35,10 @@ import {
   adminInternalSignalKindsRouter,
 } from './admin-internal-signals.routes';
 import internalSignalsRouter from './internal-signals.routes';
+// M12 (CR-D) — Clause Extraction + Review + Semantic Search
+import { extractClausesRouter, clauseReviewRouter } from './clause-extraction.routes';
+// M13 (CR-E) — Correlation Rule Engine + DSL + Correlations list/dismiss
+import { correlationsRouter } from './correlation-rule.routes';
 
 const v1Router = Router();
 
@@ -115,5 +119,22 @@ v1Router.use('/signals', signalsRouter);
 v1Router.use('/admin/internal-signals', adminInternalSignalsRouter);
 v1Router.use('/admin/internal-signal-kinds', adminInternalSignalKindsRouter);
 v1Router.use('/internal-signals', internalSignalsRouter);
+
+// M12 (CR-D) — Clause Extraction pipeline trigger (mounted under /contracts
+// so CR-D-001 POST /contracts/:id/extract-clauses and CR-D-002
+// POST /contracts/:id/versions/:vId/extract-clauses resolve cleanly alongside
+// the existing /contracts/:id sub-routes).
+v1Router.use('/contracts', extractClausesRouter);
+
+// M12 (CR-D) — Clause review-queue + semantic search + review action.
+// Mounted under /clauses alongside the existing m_parity library-clauses
+// router. Literal-path sub-routes (/review-queue, /search) are declared
+// before the /:id wildcard route in clauseReviewRouter — Express matches in
+// declaration order within the same prefix.
+v1Router.use('/clauses', clauseReviewRouter);
+
+// M13 (CR-E) — Correlations list + dismiss.
+// /admin/rules is mounted separately in admin/index.ts.
+v1Router.use('/correlations', correlationsRouter);
 
 export default v1Router;
