@@ -26,7 +26,7 @@
  * Query validation: dashboardWindowDays30Schema (ops/ft/csg) / dashboardWindowDays90Schema (proc).
  */
 import { Router } from 'express';
-import { authenticate, authorise } from '../../middleware/auth.middleware';
+import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import { authedReadRateLimiter } from '../../middleware/rate-limit.middleware';
 import { getOperationsDashboard } from '../../controllers/dashboards/operations.controller';
@@ -50,7 +50,7 @@ dashboardsCrgRouter.use(authenticate);
 dashboardsCrgRouter.get(
   '/operations',
   authedReadRateLimiter,
-  authorise(['insights.operations']),
+  authoriseAnyOf(['insights.operations', 'insights.executive']),
   validate(dashboardWindowDays30Schema, 'query'),
   getOperationsDashboard,
 );
@@ -62,7 +62,7 @@ dashboardsCrgRouter.get(
 dashboardsCrgRouter.get(
   '/finance-treasury',
   authedReadRateLimiter,
-  authorise(['insights.finance_treasury']),
+  authoriseAnyOf(['insights.finance_treasury', 'insights.executive']),
   validate(dashboardWindowDays30Schema, 'query'),
   getFinanceTreasuryDashboard,
 );
@@ -74,7 +74,7 @@ dashboardsCrgRouter.get(
 dashboardsCrgRouter.get(
   '/compliance-esg',
   authedReadRateLimiter,
-  authorise(['insights.compliance_esg']),
+  authoriseAnyOf(['insights.compliance_esg', 'insights.executive']),
   validate(dashboardWindowDays30Schema, 'query'),
   getComplianceEsgDashboard,
 );
@@ -87,7 +87,7 @@ dashboardsCrgRouter.get(
 dashboardsCrgRouter.get(
   '/procurement',
   authedReadRateLimiter,
-  authorise(['insights.procurement_supplier_risk']),
+  authoriseAnyOf(['insights.procurement_supplier_risk', 'insights.executive']),
   validate(dashboardWindowDays90Schema, 'query'),
   getProcurementDashboard,
 );
