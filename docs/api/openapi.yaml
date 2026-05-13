@@ -485,7 +485,39 @@ info:
     the `updated_at` column-existence defect in 137). Twelfth consecutive
     S2-21 clean module (zero net-new PUBLIC EXECUTE). **Version bumped
     1.0.3 → 1.0.4** — feature-additive; all prior routes unchanged.
-  version: 1.0.4
+
+    **M14 / CR-F (5-Dim Risk Scoring + MaR + AVaR)** — Risk scoring engine
+    for the CRIP Wave 2 Intelligence Engine & Decision Surface. Ships a
+    snapshot table (`risk_score` — append-only, FORCE RLS, audit-triggered),
+    the project's first materialized view (`latest_risk_score` — DISTINCT ON
+    tenant_id + contract_id), 8 net-new fn_'s spanning compute / explain /
+    history / AVaR-aggregate / recompute paths, and a score-recompute worker
+    (PG LISTEN `correlation_inserted` + daily 00:30 UTC cron). **6 new
+    endpoints**: GET risk-score explain + history, GET AVaR aggregate,
+    GET/PATCH/POST admin scoring-weights. Permission gates: `score.read`
+    (explain/history/avar), `score.weights.manage` (admin weights surface).
+    POST recompute-all is heavy-rate-limited (5/min/user). The materialized
+    view `latest_risk_score` is NOT covered by PostgreSQL RLS — every query
+    site MUST supply `WHERE tenant_id = current_setting(...)` explicitly
+    (documented in MV COMMENT and data-dictionary). **Thirteenth consecutive
+    S2-21 clean module** — zero net-new PUBLIC EXECUTE. **Version bumped
+    1.0.4 → 1.0.5**.
+
+    **M15 / CR-G (Executive Evolution + 4 Persona Dashboards + AI Risk
+    Assistant)** — Decision surface layer atop M14 risk engine. Executive
+    dashboard gains 3 new sections (whatChangedToday / recommendedActions /
+    clausesTriggered) via additive fn_dashboard_executive extension. 4
+    net-new persona dashboards: Operations, Finance & Treasury, Compliance &
+    ESG, Procurement Supplier Risk — all DEFINER VOLATILE, tenant-scoped,
+    permission-gated. AI Risk Assistant floating panel offers per-persona
+    SSE-streaming Q&A with ACL pre-filter per Annex D §15.3 — 6 ai_prompt
+    rows (one per persona). 3 new ADNOC roles (operations / finance_treasury /
+    compliance_esg) seeded. ai_request_log extended with scope_hash +
+    acl_filtered_count for AI audit trail. **5 new endpoints**: 4 persona
+    dashboard GET + 1 AI Risk Assistant POST (SSE + `?stream=false` fallback).
+    **Fourteenth consecutive S2-21 clean module** — zero net-new PUBLIC
+    EXECUTE. **Version bumped 1.0.5 → 1.0.6**.
+  version: 1.0.6
   contact:
     name: Musanad Technologies FZ-LLC
 servers:
@@ -1016,6 +1048,94 @@ tags:
       (future module). The M7 F-3 ops note applies — production worker
       connections that LISTEN MUST use the Neon **direct** endpoint, not
       `-pooler`.
+
+  - name: M14 — Risk Scoring (CR-F)
+    description: |
+      5-Dimension Risk Scoring + MaR + AVaR (M14 / CR-F). 6 endpoints:
+      GET contract risk-score explain, GET risk-score history, GET AVaR
+      aggregate, GET/PATCH admin scoring-weights, POST recompute-all.
+
+      Permission gates: `score.read` (explain / history / avar),
+      `score.weights.manage` (admin weights — Super Admin + platform_admin
+      only). POST recompute-all uses `heavyExportRateLimiter` (5/min/user).
+
+      Risk score architecture: `fn_risk_score_compute` is SECURITY DEFINER
+      (called by the score-recompute.worker.ts PG LISTEN consumer and
+      bootstrap migration). `fn_risk_score_explain` + `fn_risk_score_history`
+      + `fn_avar_aggregate` + `fn_scoring_weights_get/set` are SECURITY
+      INVOKER (permission-gated via `fn_current_user_has_permission`).
+
+      `latest_risk_score` is a MATERIALIZED VIEW (DISTINCT ON tenant_id,
+      contract_id ORDER BY calculated_at DESC). **PostgreSQL RLS does NOT
+      apply to materialized views.** All fn_'s that read `latest_risk_score`
+      MUST include `WHERE tenant_id = current_setting('app.current_tenant_id',
+      true)::uuid` — this invariant is documented in the MV COMMENT and
+      enforced by QA Stage 2 S2-22. Zero PUBLIC EXECUTE — 13th consecutive
+      clean module.
+
+      Sensitive fields: `contributingCorrelations`, `explanation`, `marValue`,
+      all 5 `dim_*` fields, `weightsApplied` are Pino-redacted at 62 paths
+      in logger.util.ts.
+
+  - name: M15 — Persona Dashboards (CR-G)
+    description: |
+      4 Net-New Persona Dashboards (M15 / CR-G). 4 GET endpoints:
+      GET /dashboards/operations, GET /dashboards/finance-treasury,
+      GET /dashboards/compliance-esg, GET /dashboards/procurement.
+
+      All 4 are JWT-authenticated, DEFINER VOLATILE fn_'s with tenant GUC
+      scoping. Each accepts a `?windowDays` query parameter (default 30,
+      max 180) and returns a standard envelope `{ windowDays, asOf, kpi,
+      kpiPrev?, [...sections] }`.
+
+      Permission gates: `insights.operations`, `insights.finance_treasury`,
+      `insights.compliance_esg`, `insights.procurement_supplier_risk`.
+
+      The 3 new ADNOC roles seeded by migration 181 (operations /
+      finance_treasury / compliance_esg) receive their native grants in
+      migration 181 + pre-emptive backfill grants for M7/M8/M9/M12/M13/M14
+      conditional in migration 182.
+
+      fn_dashboard_executive extended (migration 180 + 189) with 3 additive
+      top-level keys: `whatChangedToday`, `recommendedActions`,
+      `clausesTriggered` — AvarDashboardSection from M14 is NOT duplicated
+      (decision A1 / CR-G HITL Q locked).
+
+  - name: M15 — AI Risk Assistant (CR-G)
+    description: |
+      AI Risk Assistant (M15 / CR-G). 1 endpoint:
+      POST /api/v1/ai/risk-assistant/ask.
+
+      Supports two response modes: SSE streaming (Content-Type:
+      text/event-stream, default) and non-streaming JSON
+      (`?stream=false`). Both paths go through the same
+      `riskAssistantService.ask()` backend service.
+
+      Permission gate: `ai.invoke.risk_assistant` (seeded by migration 178;
+      9 role grants across dashboard-capable roles).
+
+      SSE events emitted: `token` (partial LLM response chunk), `citation`
+      (inline clause/correlation/signal/contract chip), `done` (with
+      requestLogId for audit traceability), `error` (structured
+      `code + message`).
+
+      ACL pre-filter: `fn_contract_list` narrows the context document set to
+      contracts the caller can see before the prompt is assembled. Scope hash
+      + acl_filtered_count are written to ai_request_log (migration 179 adds
+      these 2 columns). Per-persona prompt resolution via
+      `fn_ai_prompt_get(prompt_id = 'risk_assistant.qa_<persona>')` — 6
+      rows seeded by migration 187.
+
+      Rate limit: 30 req/min/user.
+
+      Sensitive fields: `query`, `filters`, `contextText`, `token` —
+      Pino-redacted (+4 paths).
+
+      DEFECT-CR-G-7 (known open): LLM stream silent in test environment.
+      Infrastructure works (SSE chunked header + 200 returned); root cause
+      is upstream AIProvider configuration. Non-blocking for dashboard UX
+      (panel closes gracefully on `error` event). Fix tracked for post-ship
+      sprint.
 
 components:
   securitySchemes:
@@ -6668,6 +6788,620 @@ components:
         metadata:
           type: object
           additionalProperties: true
+
+    # ---------------------------------------------------------------
+    # M14 / CR-F — Risk Scoring schemas
+    # ---------------------------------------------------------------
+
+    RiskScoreDimensionBreakdown:
+      type: object
+      description: Breakdown for one risk dimension (legal / financial / operational / reputational / compliance).
+      properties:
+        score: { type: integer, minimum: 0, maximum: 100 }
+        probability: { type: number, minimum: 0, maximum: 1 }
+        impact: { type: number, minimum: 0, maximum: 1 }
+        reasons:
+          type: array
+          items: { type: string }
+
+    WeightsAtCalculation:
+      type: object
+      description: Snapshot of scoring weights in effect at compute time.
+      properties:
+        legal: { type: number }
+        financial: { type: number }
+        operational: { type: number }
+        reputational: { type: number }
+        compliance: { type: number }
+
+    MarFormulaBreakdown:
+      type: object
+      description: MaR formula audit trail stored inside explanation JSONB.
+      properties:
+        contractValue: { type: string, nullable: true, description: "AED string or null for SOWs (HITL Q5)." }
+        exposureFraction: { type: number }
+        probability: { type: number, nullable: true }
+        impactMultiplier: { type: number, nullable: true }
+        marValue: { type: string, nullable: true }
+
+    HydratedContributingCorrelation:
+      type: object
+      description: Correlation with hydrated signal + rule + matched-clause details.
+      properties:
+        correlationId: { type: string, description: "BIGINT as string." }
+        ruleId: { type: string }
+        probability: { type: number }
+        impactMultiplier: { type: number }
+        marContribution: { type: string, nullable: true }
+        dimensionsAffected: { type: array, items: { type: string } }
+        ruleVersionHash: { type: string, nullable: true }
+        confidence: { type: number }
+        matchReason: { type: string, nullable: true }
+        status: { type: string }
+        sourceReliability: { type: number }
+        signal:
+          type: object
+          properties:
+            id: { type: string }
+            titleEn: { type: string, nullable: true }
+            titleAr: { type: string, nullable: true }
+            signalKind: { type: string, nullable: true }
+            occurredAt: { type: string, format: date-time, nullable: true }
+        matchedClause:
+          type: object
+          nullable: true
+          properties:
+            id: { type: string }
+            clauseTypeV2: { type: string, nullable: true }
+            snippet: { type: string, nullable: true }
+
+    RiskScoreExplainResponse:
+      type: object
+      description: |
+        Full risk score explain response from fn_risk_score_explain.
+        SENSITIVE — contributingCorrelations, explanation fields are
+        Pino-redacted on egress. Powers GET /api/v1/contracts/:id/risk-score.
+      properties:
+        riskScoreId: { type: string, description: "BIGINT as string." }
+        contractId: { type: string, description: "BIGINT as string." }
+        healthScore: { type: integer, minimum: 0, maximum: 100 }
+        dimensions:
+          type: object
+          properties:
+            legal: { $ref: "#/components/schemas/RiskScoreDimensionBreakdown" }
+            financial: { $ref: "#/components/schemas/RiskScoreDimensionBreakdown" }
+            operational: { $ref: "#/components/schemas/RiskScoreDimensionBreakdown" }
+            reputational: { $ref: "#/components/schemas/RiskScoreDimensionBreakdown" }
+            compliance: { $ref: "#/components/schemas/RiskScoreDimensionBreakdown" }
+        marFormula: { $ref: "#/components/schemas/MarFormulaBreakdown" }
+        marValue: { type: string, nullable: true, description: "AED amount as string; null for SOWs." }
+        marCurrency: { type: string, enum: [AED] }
+        weightsVersion: { type: string }
+        weightsAtCalculation: { $ref: "#/components/schemas/WeightsAtCalculation" }
+        contributingCorrelations:
+          type: array
+          items: { $ref: "#/components/schemas/HydratedContributingCorrelation" }
+          description: "SENSITIVE — Pino-redacted."
+        calculatedAt: { type: string, format: date-time }
+        triggeredBy:
+          type: string
+          enum: [signal, clause_change, weight_change, scheduled, manual, bootstrap]
+
+    RiskScoreHistorySnapshot:
+      type: object
+      description: Single snapshot row from fn_risk_score_history.
+      properties:
+        riskScoreId: { type: string }
+        calculatedAt: { type: string, format: date-time }
+        healthScore: { type: integer, minimum: 0, maximum: 100 }
+        dimLegal: { type: integer, minimum: 0, maximum: 100 }
+        dimFinancial: { type: integer, minimum: 0, maximum: 100 }
+        dimOperational: { type: integer, minimum: 0, maximum: 100 }
+        dimReputational: { type: integer, minimum: 0, maximum: 100 }
+        dimCompliance: { type: integer, minimum: 0, maximum: 100 }
+        marValue: { type: string, nullable: true }
+        marCurrency: { type: string, enum: [AED] }
+        triggeredBy: { type: string }
+        weightsVersion: { type: string }
+
+    RiskScoreHistoryResponse:
+      type: object
+      description: Paginated history of risk score snapshots for a contract.
+      properties:
+        contractId: { type: string }
+        windowDays: { type: integer, enum: [30, 90, 180] }
+        snapshots:
+          type: array
+          items: { $ref: "#/components/schemas/RiskScoreHistorySnapshot" }
+        count: { type: integer }
+
+    AvarBreakdownBucket:
+      type: object
+      description: Single group-by bucket in AVaR aggregation result.
+      properties:
+        key: { type: string }
+        label: { type: string }
+        avar: { type: string, nullable: true, description: "AED NUMERIC as string; null when no mar_value contracts." }
+        contractCount: { type: integer }
+        pctOfTotal: { type: number, nullable: true }
+
+    AvarDeltaVsPriorWindow:
+      type: object
+      description: Delta comparison vs the equivalent prior window.
+      properties:
+        priorAvar: { type: string }
+        deltaAed: { type: string }
+        deltaPct: { type: number, nullable: true }
+
+    AvarAggregateResponse:
+      type: object
+      description: AVaR aggregate response from fn_avar_aggregate. S2-24 split-CTE pattern.
+      properties:
+        totalAvar: { type: string, description: "Total AED NUMERIC as string." }
+        currency: { type: string, enum: [AED] }
+        contractCount: { type: integer }
+        windowDays: { type: integer }
+        groupBy:
+          type: string
+          enum: [business_unit, counterparty_id, counterparty_chain, geography, risk_kind]
+        noValueCount: { type: integer, description: "Contracts excluded because contract_value IS NULL." }
+        breakdown:
+          type: array
+          items: { $ref: "#/components/schemas/AvarBreakdownBucket" }
+        deltaVsPriorWindow: { $ref: "#/components/schemas/AvarDeltaVsPriorWindow" }
+
+    ScoringWeightsCurrent:
+      type: object
+      properties:
+        legal: { type: number }
+        financial: { type: number }
+        operational: { type: number }
+        reputational: { type: number }
+        compliance: { type: number }
+        version: { type: string }
+        updatedAt: { type: string, format: date-time, nullable: true }
+        updatedBy: { type: string, nullable: true }
+
+    ScoringWeightsGetResponse:
+      type: object
+      description: Current scoring weights + history + ADNOC default pack.
+      properties:
+        current: { $ref: "#/components/schemas/ScoringWeightsCurrent" }
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              version: { type: string }
+              changedAt: { type: string, format: date-time }
+              changedById: { type: string, nullable: true }
+        exposureFractionDefaults:
+          type: object
+          additionalProperties: { type: number }
+          description: "Per contract-type exposure fraction (supply/charter/epc/om_monthly/default)."
+        impactMultipliers:
+          type: object
+          additionalProperties: { type: number }
+          description: "Cascading-effect multipliers per flag (single_source_dependency / critical_path_impact / etc.)."
+
+    ScoringWeightsUpdateRequest:
+      type: object
+      description: "All 5 dimensions required. Sum must equal 1.0 ± 0.001 (auto-normalised by fn_scoring_weights_set)."
+      required: [legal, financial, operational, reputational, compliance]
+      properties:
+        legal: { type: number, minimum: 0, maximum: 1 }
+        financial: { type: number, minimum: 0, maximum: 1 }
+        operational: { type: number, minimum: 0, maximum: 1 }
+        reputational: { type: number, minimum: 0, maximum: 1 }
+        compliance: { type: number, minimum: 0, maximum: 1 }
+
+    ScoringWeightsSetResponse:
+      type: object
+      properties:
+        newVersion: { type: string }
+        weightsApplied: { $ref: "#/components/schemas/ScoringWeightsCurrent" }
+        totalSum: { type: number, description: "Sum of all 5 weights after application (should be ≈ 1.0)." }
+
+    RecomputeAllResponse:
+      type: object
+      description: Bulk recompute result from fn_score_recompute_for_weight_change.
+      properties:
+        weightsVersion: { type: string }
+        totalContractsTargeted: { type: integer }
+        recomputedCount: { type: integer }
+        failedContractIds:
+          type: array
+          items: { type: string }
+          description: "BIGINT contract ids as strings where recompute failed."
+        elapsedMs: { type: integer }
+
+    # ---------------------------------------------------------------
+    # M15 / CR-G — Persona Dashboards schemas
+    # ---------------------------------------------------------------
+
+    OperationsKpi:
+      type: object
+      properties:
+        openSlaBreaches: { type: integer }
+        openSlaBreachesMarAed: { type: string }
+        deliveryDelaysCount: { type: integer }
+        contractPenaltyExposureAed: { type: string }
+        vendorsWithBreaches: { type: integer }
+
+    OperationsDashboardResponse:
+      type: object
+      description: Operations persona dashboard response from fn_dashboard_operations.
+      properties:
+        windowDays: { type: integer }
+        asOf: { type: string, format: date-time }
+        kpi: { $ref: "#/components/schemas/OperationsKpi" }
+        kpiPrev: { $ref: "#/components/schemas/OperationsKpi" }
+        slaBreachesList:
+          type: array
+          items:
+            type: object
+            properties:
+              contractId: { type: string }
+              contractNumber: { type: string }
+              contractTitle: { type: string }
+              counterpartyName: { type: string }
+              breachKind: { type: string }
+              signalId: { type: string }
+              occurredAt: { type: string, format: date-time }
+              severity: { type: string }
+              marAed: { type: string }
+        deliveryDelayTracker:
+          type: array
+          items:
+            type: object
+            properties:
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyName: { type: string }
+              lastDelayedMilestone: { type: string, nullable: true }
+              delayDays: { type: integer, nullable: true }
+              signalCount180d: { type: integer }
+              severity: { type: string }
+        penaltyExposureByContract:
+          type: array
+          items:
+            type: object
+            properties:
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyName: { type: string }
+              penaltyClauseSummary: { type: string }
+              exposureAed: { type: string }
+        opsEventsFeed:
+          type: array
+          items:
+            type: object
+            properties:
+              eventType: { type: string }
+              contractId: { type: string }
+              counterpartyName: { type: string }
+              headline: { type: string }
+              occurredAt: { type: string, format: date-time }
+              severity: { type: string }
+              sourceRef: { type: string, nullable: true }
+        vendorScorecards:
+          type: array
+          items:
+            type: object
+            properties:
+              counterpartyId: { type: string }
+              counterpartyName: { type: string }
+              slaBreachCount180d: { type: integer }
+              deliveryDelayCount180d: { type: integer }
+              riskScore: { type: integer }
+              performanceTier: { type: string, enum: [high, medium, low] }
+
+    FinanceTreasuryKpi:
+      type: object
+      properties:
+        totalExposureAed: { type: string }
+        fxExposureNonAedAed: { type: string }
+        priceReviewTriggeredCount: { type: integer }
+        paymentDelaysCount: { type: integer }
+        paymentDelaysAed: { type: string }
+
+    FinanceTreasuryDashboardResponse:
+      type: object
+      description: Finance & Treasury persona dashboard response from fn_dashboard_finance_treasury.
+      properties:
+        windowDays: { type: integer }
+        asOf: { type: string, format: date-time }
+        kpi: { $ref: "#/components/schemas/FinanceTreasuryKpi" }
+        kpiPrev: { $ref: "#/components/schemas/FinanceTreasuryKpi" }
+        fxVolatilityTile:
+          type: object
+          properties:
+            aedPegStatus: { type: string, enum: [stable, deviation] }
+            pegDeviationBps: { type: integer, nullable: true }
+            lastCheckedAt: { type: string, format: date-time }
+            nonAedContractCount: { type: integer }
+            nonAedContractValueAed: { type: string }
+        priceReviewTriggerQueue:
+          type: array
+          items:
+            type: object
+            properties:
+              correlationId: { type: string }
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyName: { type: string }
+              triggerHeadline: { type: string }
+              indexName: { type: string, nullable: true }
+              indexMoveBps: { type: integer, nullable: true }
+              marAed: { type: string }
+              recommendedAction: { type: string, nullable: true }
+              occurredAt: { type: string, format: date-time }
+        paymentDelayRegister:
+          type: array
+          items:
+            type: object
+            properties:
+              correlationId: { type: string }
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyName: { type: string }
+              signalId: { type: string }
+              invoiceRef: { type: string, nullable: true }
+              daysOverdue: { type: integer, nullable: true }
+              amountAed: { type: string }
+              severity: { type: string }
+        currencyExposureBreakdown:
+          type: array
+          items:
+            type: object
+            properties:
+              currency: { type: string }
+              contractCount: { type: integer }
+              aggregateValueOriginal: { type: string }
+              aggregateValueAed: { type: string }
+              percentOfTotal: { type: number }
+
+    ComplianceEsgKpi:
+      type: object
+      properties:
+        sanctionsExposureDirectCount: { type: integer }
+        sanctionsExposureChainCount: { type: integer }
+        auditRightsExpiringCount: { type: integer }
+        openRegulatoryUpdatesCount: { type: integer }
+        openEsgCorrelationsCount: { type: integer }
+
+    ComplianceEsgDashboardResponse:
+      type: object
+      description: Compliance & ESG persona dashboard response from fn_dashboard_compliance_esg.
+      properties:
+        windowDays: { type: integer }
+        asOf: { type: string, format: date-time }
+        kpi: { $ref: "#/components/schemas/ComplianceEsgKpi" }
+        kpiPrev: { $ref: "#/components/schemas/ComplianceEsgKpi" }
+        sanctionsExposureList:
+          type: array
+          items:
+            type: object
+            properties:
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyId: { type: string }
+              counterpartyName: { type: string }
+              sanctionsStatus: { type: string }
+              exposureKind: { type: string, enum: [direct, chain] }
+              chainPath: { type: array, items: { type: string }, nullable: true }
+              chainTruncated: { type: boolean }
+              marAed: { type: string }
+        auditRightsTracker:
+          type: array
+          items:
+            type: object
+            properties:
+              contractId: { type: string }
+              contractNumber: { type: string }
+              counterpartyName: { type: string }
+              auditClauseType: { type: string }
+              expiresOnIso: { type: string, format: date }
+              daysToExpiry: { type: integer }
+              severity: { type: string, enum: [high, medium, low] }
+        subContractorChainView:
+          type: array
+          items:
+            type: object
+            properties:
+              chainRootCounterpartyId: { type: string }
+              chainRootName: { type: string }
+              depthReached: { type: integer }
+              sanctionedNodesCount: { type: integer }
+              affectedContractsCount: { type: integer }
+              chainTruncated: { type: boolean }
+        regulatoryUpdatesMonitor:
+          type: array
+          items:
+            type: object
+            properties:
+              regulatoryUpdateId: { type: string }
+              regulatorName: { type: string }
+              headline: { type: string }
+              severity: { type: string }
+              occurredAt: { type: string, format: date-time }
+              affectedContractsCount: { type: integer }
+        esgCorrelations:
+          type: array
+          items:
+            type: object
+            properties:
+              correlationId: { type: string }
+              headline: { type: string }
+              contractId: { type: string }
+              counterpartyName: { type: string }
+              marAed: { type: string }
+              occurredAt: { type: string, format: date-time }
+              severity: { type: string }
+
+    ProcurementKpi:
+      type: object
+      properties:
+        totalSupplierCount: { type: integer }
+        supplierBreachesCount: { type: integer }
+        icvNonCompliantCount: { type: integer }
+        supplierFinancialDistressCount: { type: integer }
+        avgSupplierRiskScore: { type: number, nullable: true }
+
+    ProcurementSupplierRiskDashboardResponse:
+      type: object
+      description: Procurement Supplier Risk persona dashboard response from fn_dashboard_procurement_supplier_risk.
+      properties:
+        windowDays: { type: integer }
+        asOf: { type: string, format: date-time }
+        kpi: { $ref: "#/components/schemas/ProcurementKpi" }
+        kpiPrev: { $ref: "#/components/schemas/ProcurementKpi" }
+        supplierRiskScorecard:
+          type: array
+          items:
+            type: object
+            description: "dim_* fields use camelCase (QA W1)."
+            properties:
+              counterpartyId: { type: string }
+              counterpartyName: { type: string }
+              partyType: { type: string }
+              compositeRiskScore: { type: integer, nullable: true }
+              dimLegal: { type: integer, nullable: true }
+              dimFinancial: { type: integer, nullable: true }
+              dimOperational: { type: integer, nullable: true }
+              dimReputational: { type: integer, nullable: true }
+              dimCompliance: { type: integer, nullable: true }
+              slaBreachCount180d: { type: integer }
+              activeContractCount: { type: integer }
+              totalContractValueAed: { type: string }
+              riskTier: { type: string, enum: [high, medium, low] }
+        icvComplianceTracker:
+          type: array
+          items:
+            type: object
+            properties:
+              counterpartyId: { type: string }
+              counterpartyName: { type: string }
+              icvStatus: { type: string, nullable: true }
+              icvPct: { type: number, nullable: true }
+              icvLastChecked: { type: string, format: date-time, nullable: true }
+              activeContractCount: { type: integer }
+              contractValueAed: { type: string }
+        backupSupplierSuggestions:
+          type: array
+          items:
+            type: object
+            properties:
+              primaryCounterpartyId: { type: string }
+              primaryName: { type: string }
+              primaryRiskScore: { type: integer, nullable: true }
+              category: { type: string, description: "Pivot on party.party_type (A4b decision)." }
+              suggestedAlternatives:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    counterpartyId: { type: string }
+                    counterpartyName: { type: string }
+                    riskScore: { type: integer, nullable: true }
+                    cleanStatus: { type: string }
+        vendorFinancialHealthSummary:
+          type: array
+          description: "kind='news' AND signal_kind_subtype IN ('financial_distress','downgrade','default') (QA W2)."
+          items:
+            type: object
+            properties:
+              counterpartyId: { type: string }
+              counterpartyName: { type: string }
+              signalKind: { type: string }
+              signalHeadline: { type: string }
+              occurredAt: { type: string, format: date-time }
+              severity: { type: string }
+              sourceRef: { type: string, nullable: true }
+
+    # ---------------------------------------------------------------
+    # M15 / CR-G — AI Risk Assistant schemas
+    # ---------------------------------------------------------------
+
+    RiskAssistantCitation:
+      type: object
+      description: Inline citation chip returned in SSE 'citation' event and non-streaming response.
+      properties:
+        type:
+          type: string
+          enum: [clause, correlation, signal, contract]
+        id: { type: string, description: "BIGINT-as-string." }
+        label: { type: string }
+        href: { type: string, description: "FE navigation path." }
+        excerpt: { type: string, description: "SENSITIVE — never logged." }
+
+    RiskAssistantSSEEvent:
+      type: object
+      description: |
+        Single SSE event from POST /api/v1/ai/risk-assistant/ask (streaming mode).
+        Emitted as: `event: <type>\ndata: <json>\n\n`.
+        Event types: token | citation | done | error.
+      properties:
+        event:
+          type: string
+          enum: [token, citation, done, error]
+        data:
+          type: object
+          properties:
+            token: { type: string, description: "SENSITIVE — partial LLM response chunk. Present on 'token' events." }
+            citation: { $ref: "#/components/schemas/RiskAssistantCitation" }
+            error: { type: string, nullable: true }
+            code: { type: string, nullable: true }
+            message: { type: string, nullable: true }
+            requestLogId: { type: string, description: "UUID. Present on 'done' event for audit traceability." }
+
+    RiskAssistantNonStreamingResponse:
+      type: object
+      description: Response body when ?stream=false. Full answer + collected citations.
+      properties:
+        answer: { type: string }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/RiskAssistantCitation" }
+
+    # ---------------------------------------------------------------
+    # M15 / CR-G — Executive extension schemas
+    # ---------------------------------------------------------------
+
+    WhatChangedTodayRow:
+      type: object
+      description: One entry in fn_dashboard_executive.whatChangedToday array (M15 extension).
+      properties:
+        correlationId: { type: string }
+        contractId: { type: string }
+        ruleId: { type: string }
+        headline: { type: string }
+        scenario: { type: string, nullable: true }
+        marAed: { type: string }
+        severity: { type: string, enum: [low, medium, high, critical] }
+        occurredAt: { type: string, format: date-time }
+
+    RecommendedActionRow:
+      type: object
+      description: One entry in fn_dashboard_executive.recommendedActions array (M15 extension).
+      properties:
+        correlationId: { type: string }
+        contractId: { type: string }
+        ruleId: { type: string }
+        action: { type: string, nullable: true }
+        assignedRoles: { type: array, items: { type: string }, description: "PLURAL array (M13-projection lock)." }
+        slaHours: { type: integer, nullable: true }
+        marAed: { type: string }
+
+    ClausesTriggeredRow:
+      type: object
+      description: One entry in fn_dashboard_executive.clausesTriggered.last7d or .last30d.
+      properties:
+        clauseFamily: { type: string }
+        clauseType: { type: string }
+        count: { type: integer }
+        contractsAffected: { type: integer }
+        totalMarAed: { type: string }
 
   responses:
     Unauthenticated:
@@ -15141,4 +15875,479 @@ x-paths-root:
         "403": { description: Actor lacks correlation.dismiss permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
         "404": { description: Correlation not found in actor's tenant, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
         "409": { description: Correlation already dismissed (already_dismissed), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  # ================================================================
+  # M14 / CR-F — 5-Dim Risk Scoring + MaR + AVaR
+  # ================================================================
+
+  /contracts/{id}/risk-score:
+    get:
+      summary: Get latest risk score and full explanation for a contract
+      description: |
+        Returns the most-recent risk score snapshot from `latest_risk_score` MV
+        hydrated with correlation details via `fn_risk_score_explain`.
+        SENSITIVE — contributingCorrelations and explanation fields are
+        Pino-redacted on egress. Hidden for contract_recipient role
+        (fn_-level row-aware filter).
+      operationId: getRiskScoreExplain
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, executive, legal_counsel, contract_drafter, contract_approver]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Contract ID (BIGINT)
+      responses:
+        "200":
+          description: Current risk score for the contract
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RiskScoreExplainResponse" }
+        "400": { description: Invalid contract ID, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found or no risk score yet, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /contracts/{id}/risk-score/history:
+    get:
+      summary: Get risk score history snapshots for a contract
+      description: |
+        Returns time-series of risk score snapshots over a configurable window
+        via `fn_risk_score_history`. Powers the Recharts LineChart with 30/90/180-day toggle.
+      operationId: getRiskScoreHistory
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, executive, legal_counsel, contract_drafter, contract_approver]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1 }
+          description: Contract ID (BIGINT)
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, enum: [30, 90, 180], default: 30 }
+          description: History window in days. Validated by DB ERRCODE 22023.
+      responses:
+        "200":
+          description: Risk score history for the contract
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RiskScoreHistoryResponse" }
+        "400": { description: Invalid contract ID or windowDays not in [30,90,180], content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /risk/avar:
+    get:
+      summary: Get AVaR (Aggregate Value at Risk) across the portfolio
+      description: |
+        Portfolio-level Money at Risk aggregation via `fn_avar_aggregate`.
+        Returns total AVaR + breakdown by groupBy dimension. Uses S2-24
+        split-aggregate CTE pattern (inner per_bucket CTE with SUM; outer
+        jsonb_agg — never nested aggregate). Powers AvarDashboardSection on
+        the executive dashboard.
+      operationId: getAvarAggregate
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, executive, legal_counsel, contract_drafter, contract_approver]
+      parameters:
+        - name: businessUnit
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by contract_type (business unit proxy).
+        - name: counterpartyId
+          in: query
+          required: false
+          schema: { type: integer }
+          description: Filter by counterparty party_id.
+        - name: counterpartyChain
+          in: query
+          required: false
+          schema: { type: boolean }
+          description: If true, includes chain members of the counterparty via fn_party_chain_traverse_down.
+        - name: geography
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by emirate (geography proxy).
+        - name: riskKind
+          in: query
+          required: false
+          schema: { type: string }
+          description: Filter by correlation rule risk_kind.
+        - name: timeHorizonDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365 }
+          description: Look-forward horizon for MaR contribution window.
+        - name: groupBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [business_unit, counterparty_id, counterparty_chain, geography, risk_kind]
+            default: business_unit
+          description: Dimension to group AVaR breakdown by.
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, default: 30 }
+          description: Time window for AVaR calculation and delta comparison.
+      responses:
+        "200":
+          description: AVaR aggregate result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/AvarAggregateResponse" }
+        "400": { description: Invalid query parameters, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/scoring-weights:
+    get:
+      summary: Get current scoring weights configuration
+      description: |
+        Returns the active ADNOC 5-dim scoring weights, version history, and
+        default exposure-fraction and impact-multiplier lookup tables via
+        `fn_scoring_weights_get`. Admin-only.
+      operationId: getScoringWeights
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin]
+      responses:
+        "200":
+          description: Current scoring weights
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ScoringWeightsGetResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.weights.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+    patch:
+      summary: Update scoring weights (admin)
+      description: |
+        Updates the 5-dim scoring weights via `fn_scoring_weights_set`.
+        All 5 dimensions required; sum must equal 1.0 ± 0.001. Tolerates
+        minor floating-point drift (auto-normalised). Version auto-incremented.
+        Audit trail written via `fn_audit_log_record_v2` hash-chain helper
+        (R-PA7 hash-chain invariant). Does NOT trigger recompute — use
+        POST /admin/scoring-weights/recompute-all separately.
+      operationId: patchScoringWeights
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScoringWeightsUpdateRequest" }
+            example:
+              legal: 0.25
+              financial: 0.25
+              operational: 0.20
+              reputational: 0.15
+              compliance: 0.15
+      responses:
+        "200":
+          description: Weights updated and new version applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ScoringWeightsSetResponse" }
+        "400": { description: Invalid weights — sum constraint or missing field, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.weights.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Concurrent weight update collision, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /admin/scoring-weights/recompute-all:
+    post:
+      summary: Trigger bulk risk-score recompute for all active contracts (admin)
+      description: |
+        Calls `fn_score_recompute_for_weight_change` which iterates all
+        active contracts and calls `fn_risk_score_compute` per contract.
+        Per-contract BEGIN/EXCEPTION/END isolation — failures are captured
+        in `failedContractIds` and do NOT roll back successful recomputes.
+        Heavy-rate-limited: 5 requests / min / user (heavyExportRateLimiter).
+        Requires a destructive-confirm dialog in the FE before submission.
+        Elapsed time is reported for operational monitoring.
+      operationId: recomputeAllRiskScores
+      tags: ["M14 — Risk Scoring (CR-F)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin]
+      x-rate-limit: "5 req/min/user (heavyExportRateLimiter)"
+      responses:
+        "200":
+          description: Bulk recompute complete (partial success possible — check failedContractIds)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RecomputeAllResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks score.weights.manage permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "429": { description: Rate limit exceeded (heavyExportRateLimiter 5/min/user), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  # ================================================================
+  # M15 / CR-G — Persona Dashboards + AI Risk Assistant
+  # ================================================================
+
+  /dashboards/operations:
+    get:
+      summary: Operations persona dashboard
+      description: |
+        Operational risk intelligence dashboard for the Operations persona.
+        Returns SLA breach list, delivery delay tracker, penalty exposure,
+        ops events feed, and vendor scorecards via `fn_dashboard_operations`
+        (SECURITY DEFINER VOLATILE). Auto-refreshes every 60 s on the FE
+        (HITL Q3 lock). Tenant-scoped via app.current_tenant_id GUC.
+      operationId: getDashboardOperations
+      tags: ["M15 — Persona Dashboards (CR-G)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, operations]
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 180, default: 30 }
+          description: Data window for KPIs and section lists.
+      responses:
+        "200":
+          description: Operations dashboard payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/OperationsDashboardResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks insights.operations permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /dashboards/finance-treasury:
+    get:
+      summary: Finance & Treasury persona dashboard
+      description: |
+        Financial risk intelligence dashboard for the Finance & Treasury persona.
+        Returns FX volatility tile, price-review trigger queue, payment delay
+        register, and currency exposure breakdown via `fn_dashboard_finance_treasury`
+        (SECURITY DEFINER VOLATILE). Auto-refreshes every 60 s.
+      operationId: getDashboardFinanceTreasury
+      tags: ["M15 — Persona Dashboards (CR-G)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, finance_treasury]
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 180, default: 30 }
+          description: Data window for KPIs and section lists.
+      responses:
+        "200":
+          description: Finance & Treasury dashboard payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/FinanceTreasuryDashboardResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks insights.finance_treasury permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /dashboards/compliance-esg:
+    get:
+      summary: Compliance & ESG persona dashboard
+      description: |
+        Compliance, sanctions, and ESG risk dashboard for the Compliance & ESG
+        persona. Returns sanctions exposure list (direct + chain), audit rights
+        tracker, sub-contractor chain view (via fn_party_chain_traverse_down),
+        regulatory updates monitor, and ESG correlations via
+        `fn_dashboard_compliance_esg` (SECURITY DEFINER VOLATILE).
+        chainPath is null when chainTruncated=false and chain depth = 1.
+      operationId: getDashboardComplianceEsg
+      tags: ["M15 — Persona Dashboards (CR-G)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, compliance_esg]
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 180, default: 30 }
+          description: Data window for KPIs and section lists.
+      responses:
+        "200":
+          description: Compliance & ESG dashboard payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ComplianceEsgDashboardResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks insights.compliance_esg permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /dashboards/procurement:
+    get:
+      summary: Procurement Supplier Risk persona dashboard
+      description: |
+        Supplier risk intelligence dashboard for the Procurement persona.
+        Returns supplier risk scorecard (AVG health_score from latest_risk_score
+        MV per party per decision A4), ICV compliance tracker, backup-supplier
+        suggestions (category pivot on party.party_type per decision A4b), and
+        vendor financial health summary (kind='news' + distress subtypes per
+        QA W2) via `fn_dashboard_procurement_supplier_risk` (SECURITY DEFINER
+        VOLATILE). List view deferred to R-PROC persona round (HITL Q4 lock).
+      operationId: getDashboardProcurement
+      tags: ["M15 — Persona Dashboards (CR-G)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, procurement]
+      parameters:
+        - name: windowDays
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 180, default: 30 }
+          description: Data window for KPIs and section lists.
+      responses:
+        "200":
+          description: Procurement Supplier Risk dashboard payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/ProcurementSupplierRiskDashboardResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks insights.procurement_supplier_risk permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /ai/risk-assistant/ask:
+    post:
+      summary: Ask the AI Risk Assistant (SSE streaming or JSON)
+      description: |
+        Submits a natural-language question to the per-persona AI Risk Assistant.
+        Default response is Server-Sent Events (Content-Type: text/event-stream).
+        Add `?stream=false` for a non-streaming JSON response.
+
+        ACL pre-filter: fn_contract_list narrows the document context to
+        contracts visible to the caller before the prompt is assembled.
+        scope_hash + acl_filtered_count are written to ai_request_log
+        (migration 179 columns) for Annex D §15.3 audit compliance.
+
+        Persona selection: `persona` field in body maps to
+        `ai_prompt.prompt_id = 'risk_assistant.qa_<persona>'`. If omitted,
+        the BE derives from the caller's JWT role claim.
+
+        SSE event sequence: (token)... (citation)... done
+        On LLM error: (error event with code + message) then stream closes.
+
+        Rate limit: 30 req/min/user.
+
+        NOTE — DEFECT-CR-G-7 (known open): LLM stream silent in test
+        environment. Infrastructure layer verified working. Fix tracked
+        post-ship.
+      operationId: askRiskAssistant
+      tags: ["M15 — AI Risk Assistant (CR-G)"]
+      security:
+        - bearerAuth: []
+      x-authorised-roles: [Super Admin, platform_admin, executive, legal_counsel, compliance_esg, operations, finance_treasury, procurement, contract_drafter, contract_approver]
+      x-rate-limit: "30 req/min/user"
+      parameters:
+        - name: stream
+          in: query
+          required: false
+          schema: { type: boolean, default: true }
+          description: "true = SSE (text/event-stream), false = JSON non-streaming response."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                  maxLength: 2000
+                  description: "Natural-language question. SENSITIVE — Pino-redacted."
+                persona:
+                  type: string
+                  enum: [executive, legal_counsel, compliance_esg, operations, finance_treasury, procurement]
+                  description: "If omitted, derived from JWT role claim."
+                filters:
+                  type: object
+                  description: "Optional ACL-narrowing context. SENSITIVE — Pino-redacted."
+                  properties:
+                    contractIds: { type: array, items: { type: string } }
+                    contractType: { type: string }
+                    emirate: { type: string }
+                    riskKind: { type: string }
+            example:
+              query: "Which contracts have the highest sanctions exposure this quarter?"
+              persona: compliance_esg
+      responses:
+        "200":
+          description: |
+            SSE stream (Content-Type: text/event-stream) if ?stream=true (default).
+            JSON object (Content-Type: application/json) if ?stream=false.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/RiskAssistantSSEEvent" }
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean, enum: [true] }
+                  data: { $ref: "#/components/schemas/RiskAssistantNonStreamingResponse" }
+        "400": { description: Invalid request body or query too long, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks ai.invoke.risk_assistant permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "429": { description: Rate limit exceeded (30 req/min/user), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
         "500": { $ref: "#/components/responses/ServerError" }

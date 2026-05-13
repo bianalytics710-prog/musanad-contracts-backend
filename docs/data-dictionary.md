@@ -2970,4 +2970,188 @@ SELECT n.nspname || '.' || p.proname AS fn,
 
 ---
 
+# M14 / CR-F — 5-Dim Risk Scoring + MaR + AVaR — Data Dictionary
+
+> **Generated:** 2026-05-13 | **Migrations:** 168..177 | **Schema version after M14:** 177
+
+---
+
+## Tables
+
+### `risk_score`
+
+**Purpose:** Append-only risk score snapshots — one row per recompute per contract. No UPDATE or DELETE ever (RESTRICTIVE deny-direct-delete RLS policy).
+**Owned by:** M14. **Used by:** M15 (via latest_risk_score MV joins).
+
+| Column | Type | Constraints | Description |
+|---|---|---|---|
+| id | BIGSERIAL | PRIMARY KEY | Append-only row identifier. |
+| tenant_id | UUID | NOT NULL, FK tenant(id) | Tenant isolation. RLS uses `app.current_tenant_id` GUC. |
+| contract_id | BIGINT | NOT NULL, FK contract(id) ON DELETE RESTRICT | Contract being scored. |
+| health_score | INTEGER | NOT NULL, 0..100 | Weighted composite risk score. 0=healthiest, 100=max risk. |
+| dim_legal | INTEGER | NOT NULL, 0..100 | Legal dimension — sanctions + regulatory rules. |
+| dim_financial | INTEGER | NOT NULL, 0..100 | Financial dimension — market + disruption + counterparty. |
+| dim_operational | INTEGER | NOT NULL, 0..100 | Operational dimension — geopolitical + cyber + disruption. |
+| dim_reputational | INTEGER | NOT NULL, 0..100 | Reputational dimension — geopolitical + counterparty. |
+| dim_compliance | INTEGER | NOT NULL, 0..100 | Compliance dimension — sanctions + regulatory + cyber. |
+| mar_value | NUMERIC(18,2) | NULLABLE, >= 0 | Money at Risk in AED. NULL for SOWs (contract_value IS NULL — HITL Q5). |
+| mar_currency | CHAR(3) | NOT NULL DEFAULT AED | Currency of mar_value. v1 AED-only. |
+| contributing_correlations | JSONB | NOT NULL | SENSITIVE — correlation contribution array. Redacted in audit_log (migration 173). |
+| explanation | JSONB | NOT NULL | SENSITIVE — dimensions breakdown + marFormula + weightsAtCalculation. Redacted in audit_log. |
+| weights_version | TEXT | NOT NULL | Scoring weights version at compute time. |
+| calculated_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | Snapshot timestamp. DISTINCT ON anchor for latest_risk_score MV. |
+| triggered_by | TEXT | NOT NULL, enum-6 | signal / clause_change / weight_change / scheduled / manual / bootstrap. |
+| data_classification | TEXT | NOT NULL DEFAULT demo, enum-3 | demo / pilot / production. |
+| created_at | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | Row creation timestamp. Append-only — no updated_at/updated_by/is_active. |
+| created_by | BIGINT | NULLABLE, FK user(id) ON DELETE SET NULL | NULL when triggered by system actor (p_actor_id=0 coercion per S2-20). |
+
+**Indexes:** idx_risk_score_tenant_contract_calc (primary read), idx_risk_score_tenant_health (AVaR sort), idx_risk_score_tenant_calc (time-series), idx_risk_score_weight_change (partial — weight_change rows only), idx_risk_score_created_by (partial — FK audit).
+
+**RLS:** FORCE RLS. 3 policies: tenant_select (PERMISSIVE), tenant_modify (PERMISSIVE), deny_direct_delete (RESTRICTIVE — USING FALSE).
+
+**Audit trigger:** `audit_risk_score_changes` — AFTER INSERT only. contributing_correlations and explanation redacted to [REDACTED] by fn_audit_trigger (migration 173 extends redact list 41 to 43).
+
+---
+
+## Materialized View
+
+### `latest_risk_score`
+
+**Purpose:** Performance cache of most-recent risk score per (tenant_id, contract_id). Eliminates per-request DISTINCT ON against the append-only table.
+
+**CRITICAL INVARIANT — PostgreSQL RLS does NOT apply to materialized views.** Every query site that reads `latest_risk_score` MUST include an explicit `WHERE tenant_id = current_setting('app.current_tenant_id', true)::uuid` filter. Violation = cross-tenant data exposure. Documented in MV COMMENT + enforced by QA Stage 2 S2-22.
+
+Definition: DISTINCT ON (tenant_id, contract_id) ORDER BY tenant_id, contract_id, calculated_at DESC over all risk_score columns. UNIQUE INDEX on (tenant_id, contract_id) enables future REFRESH MATERIALIZED VIEW CONCURRENTLY. Security: REVOKE ALL FROM PUBLIC + GRANT SELECT TO neondb_owner.
+
+---
+
+## Functions (M14 net-new)
+
+| Function | Security | Type | Purpose |
+|---|---|---|---|
+| fn_risk_score_compute(p_contract_id BIGINT, p_triggered_by TEXT, p_actor_id BIGINT) | DEFINER | VOLATILE | Reads correlations, loads ADNOC weights, computes 5 dims + Health Score + MaR, persists snapshot, refreshes MV. S2-20 actor sentinel. |
+| fn_risk_score_explain(p_contract_id BIGINT, p_actor_id BIGINT) | INVOKER | STABLE | Reads latest_risk_score MV (with mandatory tenant filter) + hydrates correlations with signal/rule/clause. Permission: score.read. |
+| fn_risk_score_history(p_contract_id BIGINT, p_window_days INTEGER, p_actor_id BIGINT) | INVOKER | STABLE | Time-ordered snapshots within window. windowDays validated (ERRCODE 22023 if not in {30,90,180}). |
+| fn_avar_aggregate(p_filters JSONB, p_window_days INTEGER, p_actor_id BIGINT) | INVOKER | STABLE | Portfolio AVaR aggregation. S2-24: inner per_bucket CTE with SUM; outer jsonb_agg. 5 groupBy dims. Includes delta vs prior window. |
+| fn_scoring_weights_get(p_actor_id BIGINT) | INVOKER | STABLE | Returns current weights + version history + exposure_fraction_defaults + impact_multipliers from system_setting. |
+| fn_scoring_weights_set(p_weights JSONB, p_actor_id BIGINT) | INVOKER | VOLATILE | Updates scoring.weights. sum=1.0 +/-0.001 invariant. Version auto-incremented. Audit via fn_audit_log_record_v2(NULL::bigint) — system_setting has TEXT key PK. |
+| fn_score_recompute_for_signal(p_signal_id BIGINT, p_actor_id BIGINT) | DEFINER | VOLATILE | Recomputes risk scores for all contracts linked to the signal. Called by score-recompute worker on LISTEN correlation_inserted. |
+| fn_score_recompute_for_weight_change(p_actor_id BIGINT) | DEFINER | VOLATILE | Bulk recomputes all active contracts. Per-contract isolation. Returns failedContractIds + elapsedMs. |
+
+**Functions extended:**
+
+| Function | Change |
+|---|---|
+| fn_rule_evaluate | +1 line: PERFORM pg_notify('correlation_inserted', json) on successful insert (IF v_inserted > 0). Body otherwise preserved from M13 migration 153. |
+| fn_audit_trigger | v_redact_fields 41 to 43 (adds contributing_correlations + explanation). Body otherwise preserved from M11 migration 157. |
+
+---
+
+## system_setting Rows (M14 — category='scoring')
+
+| Key | Description |
+|---|---|
+| scoring.weights | ADNOC 5-dim weights: legal 0.20, financial 0.30, operational 0.20, reputational 0.10, compliance 0.20. Version "1". Sum = 1.00. |
+| scoring.exposure_fraction_defaults | Per-contract-type exposure fraction: supply 0.20, charter 0.10, epc 0.15, om_monthly 0.05, default 0.10. |
+| scoring.impact_multipliers | Cascading-effect multipliers: single_source_dependency 1.5, critical_path_impact 1.4, regulatory_linkage 1.3, default 1.0. |
+
+---
+
+## Permissions (M14)
+
+| Code | Granted To |
+|---|---|
+| score.read | Super Admin, platform_admin, executive, legal_counsel, contract_drafter, contract_approver |
+| score.weights.manage | Super Admin, platform_admin |
+| risk.acknowledge | Super Admin (placeholder) |
+
+---
+
+## PG NOTIFY Channel (M14)
+
+**correlation_inserted** — emitted by fn_rule_evaluate on successful correlation INSERT. Payload: { tenantId: string, signalId: number, inserted: number }. QA W1: signalId is JSON numeric (acceptable v1 — IDs well below 2^53).
+
+---
+
+*M14 section generated 2026-05-13 by Documentation Generator from migrations 168..177 and M14-summary.md.*
+
+---
+
+# M15 / CR-G — Executive Evolution + 4 Persona Dashboards + AI Risk Assistant — Data Dictionary
+
+> **Generated:** 2026-05-13 | **Migrations:** 178..190 | **Schema version after M15:** 190
+
+---
+
+## Table Extension
+
+### `ai_request_log` — M15 Extension (migration 179)
+
+Two new nullable columns for Annex D §15.3 AI ACL audit (backward-compatible — NULL on all pre-M15 rows):
+
+| Column | Type | Description |
+|---|---|---|
+| scope_hash | TEXT | SHA-256 of the ACL-filtered contract ID set presented to the LLM. Enables auditors to verify the exact data scope. |
+| acl_filtered_count | INTEGER | Count of contracts visible to caller after fn_contract_list ACL filter. |
+
+---
+
+## Functions (M15 net-new)
+
+| Function | Security | Purpose |
+|---|---|---|
+| fn_dashboard_operations(p_window_days INTEGER, p_actor_id BIGINT) | DEFINER VOLATILE | Operations dashboard — SLA breaches, delivery delays, penalty exposure, ops events feed, vendor scorecards. |
+| fn_dashboard_finance_treasury(p_window_days INTEGER, p_actor_id BIGINT) | DEFINER VOLATILE | Finance & Treasury dashboard — FX volatility tile, price-review queue (YAML CASE fix migration 190), payment delays, currency exposure breakdown. |
+| fn_dashboard_compliance_esg(p_window_days INTEGER, p_actor_id BIGINT) | DEFINER VOLATILE | Compliance & ESG dashboard — sanctions exposure (direct + chain via fn_party_chain_traverse_down), audit rights tracker, sub-contractor chain view, regulatory updates, ESG correlations. YAML cast fix migration 190 (3×). |
+| fn_dashboard_procurement_supplier_risk(p_window_days INTEGER, p_actor_id BIGINT) | DEFINER VOLATILE | Procurement dashboard — supplier scorecard (AVG health_score from latest_risk_score MV per party; mandatory tenant filter applied per MV invariant), ICV compliance, backup-supplier suggestions (party.party_type pivot per A4b), vendor financial health (kind=news + distress subtypes per QA W2). |
+
+**Function extended:**
+
+`fn_dashboard_executive` — +3 additive top-level keys via migration 180 + 189 patch. Body preserved from R-EX per fn-rewrite safety protocol. Keys: whatChangedToday (array), recommendedActions (array; assignedRoles is PLURAL ARRAY per M13-projection lock), clausesTriggered ({ last7d, last30d }). DEFECT-CR-G-2 fix (migration 189): produce_yaml::jsonb cast replaced with rule_id-pattern CASE (column is YAML TEXT).
+
+---
+
+## Roles Seeded (M15 — migration 181)
+
+| Role | Dashboard |
+|---|---|
+| operations | /app/dashboards/operations |
+| finance_treasury | /app/dashboards/finance-treasury |
+| compliance_esg | /app/dashboards/compliance-esg |
+
+Note: `procurement` role NOT seeded in M15 (deferred to R-PROC). insights.procurement_supplier_risk permission is seeded and accessible to Super Admin + platform_admin.
+
+---
+
+## Permissions (M15)
+
+| Code | Primary Grantees |
+|---|---|
+| insights.operations | Super Admin, platform_admin, operations |
+| insights.finance_treasury | Super Admin, platform_admin, finance_treasury |
+| insights.compliance_esg | Super Admin, platform_admin, compliance_esg |
+| insights.procurement_supplier_risk | Super Admin, platform_admin, procurement |
+| ai.invoke.risk_assistant | Super Admin, platform_admin, executive, legal_counsel, compliance_esg, operations, finance_treasury, procurement, contract_drafter, contract_approver |
+
+Total role_permission grants added across migrations 181/182/188/189: ~57 rows.
+
+---
+
+## ai_prompt Seeds (M15 — migration 187)
+
+6 rows for AI Risk Assistant per-persona prompt variants (HITL Q5 lock):
+risk_assistant.qa_executive / qa_legal / qa_compliance / qa_operations / qa_finance_treasury / qa_procurement.
+
+Prompt selection: BE service calls fn_ai_prompt_get with prompt_id = 'risk_assistant.qa_<persona>'. Persona defaults to JWT role claim when not supplied.
+
+---
+
+## Pre-emptive Grant Backfill Pattern (M15 — migration 182)
+
+14 grants activating WHERE-EXISTS no-op placeholders from M7/M8/M9/M12/M13/M14. Pattern: earlier modules write conditional INSERT with WHERE EXISTS (SELECT 1 FROM role WHERE name = 'operations') — inserts nothing until the role exists. Migration 181 creates the role; migration 182 inserts the real grants.
+
+---
+
+*M15 section generated 2026-05-13 by Documentation Generator from migrations 178..190 and M15-summary.md.*
+
 *Generated 2026-05-10 by Documentation Generator from M9 db-design.md (Stage 2 PASS 19/19 first-run; 0 design-time patches), db-implementation-summary.json (8 migrations 114..121 applied + 1 Smoke-caught patch 122 for DEFECT-2 chain dedup; PUBLIC count baseline-5 preserved; 8 runtime probes PASS on both branches), be-implementation-summary.json (6 new files + 3 modified; 8 endpoints; tsc clean at 1024MB; DEFECT-1 caught at smoke + fixed in service layer), fe-implementation-summary.json (9 new files + 4 modified; 0/9 hardened — net-new admin/parties surfaces in regenerate mode; +90 i18n keys per locale; tsc clean at 2048MB), integration-verifier-report.md (PASS round 1), module-M9-test-report.md (1073/1074/1/0 full-suite; +49 net-new tests = 27 DB + 22 BE; 5 E2E = 2 PASS + 3 flagged-for-human FE-E1 carry-over), and qa-stage4-report.md (52/52 PASS first-run; tenth consecutive S2-21 clean; zero regressions vs M8 baseline 1024). No Codex review for M9 (Dexian decision 2026-05-04; **tenth consecutive validated**).*

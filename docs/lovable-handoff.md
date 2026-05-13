@@ -1350,4 +1350,149 @@ Component: `src/components/contracts/IngestionReviewPanel.tsx`
 
 ---
 
+## M14 + M15 (CR-F + CR-G) — Unit 2A + 2B
+
+> **Shipped:** 2026-05-13 (CR-F Unit 2A; CR-G Unit 2B in fresh session)
+> **Schema version:** 177 after M14 → 190 after M15 (both Neon branches)
+> **Modules:** M14 / CR-F (5-Dim Risk Scoring + MaR + AVaR) + M15 / CR-G (Executive Evolution + 4 Persona Dashboards + AI Risk Assistant)
+
+---
+
+### M14 / CR-F — 5-Dim Risk Scoring + MaR + AVaR
+
+**TL;DR:** Ships the CRIP Wave 2 risk scoring engine. 1 append-only table (`risk_score`), 1 materialized view (`latest_risk_score` — project's first MV), 8 net-new fn_'s, 2 EXTEND fn_'s, score-recompute worker, 6 BE routes, full UI surface (Risk tab + AVaR dashboard section + scoring-weights admin page). +96 i18n keys.
+
+**Migrations:** 10 total (168..177; 176 + 177 are in-flight defect-fix patches)
+
+**Net-new vs EXTEND:**
+
+| Type | Count | Names |
+|---|---|---|
+| Tables | 1 | risk_score |
+| Materialized Views | 1 | latest_risk_score |
+| Functions (new) | 8 | fn_risk_score_compute / explain / history / fn_avar_aggregate / fn_score_recompute_for_signal / fn_score_recompute_for_weight_change / fn_scoring_weights_get / fn_scoring_weights_set |
+| Functions (extended) | 2 | fn_rule_evaluate (+pg_notify), fn_audit_trigger (41→43 redact) |
+| Permissions | 3 | score.read / score.weights.manage / risk.acknowledge |
+| system_setting rows | 3 | scoring.weights / scoring.exposure_fraction_defaults / scoring.impact_multipliers |
+| BE routes | 6 | GET risk-score, GET history, GET avar, GET/PATCH/POST admin/scoring-weights |
+| FE routes (new) | 1 | /app/admin/scoring-weights |
+| FE tabs/sections (inject) | 2 | Risk tab on contract detail, AvarDashboardSection on executive dashboard |
+| i18n keys | +96 | risk.score.* / risk.mar.* / risk.avar.* / admin.scoring.* |
+
+**Key architectural decisions:**
+
+#### Q1 — MaR currency conversion timing
+**Locked:** locked-at-correlation. MaR is captured in AED at the moment the correlation is created. Avoids live-FX recalculation on every display request. Audit-consistent; the historical MaR record is immutable.
+
+#### Q2 — Score recompute granularity
+**Locked:** per-correlation v1. Each new correlation triggers an immediate recompute for the affected contract via PG NOTIFY + LISTEN worker. Batched 5-minute window deferred to pilot when AVaR contract count grows beyond ~100.
+
+#### Q3 — Probability calculation method
+**Locked:** weighted-by-source-reliability. Probability = weighted average of correlation confidence scores, weighted by `osint_source.reliability`. Source quality is the dominant variance in a single-tenant AED-base deployment.
+
+#### Q4 — Score history retention
+**Locked:** all snapshots forever (v1). Demo scale: <100 contracts × <30 recomputes/year = <3,000 rows. Tiered retention (90d full + monthly aggregates) deferred to pilot.
+
+#### Q5 — MaR for NULL contract_value (SOWs)
+**Locked:** MaR=NULL + UI placeholder. Preserves data semantics — SOWs contribute 0 AED to portfolio AVaR. FE shows "No monetary value — operational risk only" in the MaR tile.
+
+**Defects caught + fixed in-flight:**
+
+| ID | Stage | Description |
+|---|---|---|
+| DEFECT-3 | Agent 6 | contract.tenant_id column doesn't exist (single-tenant v1) — 4 fn_ body adaptations |
+| DEFECT-CR-F-1 | Smoke + Integration Verifier | S2-22 miss in fn_risk_score_explain (sig.signal_kind → sig.kind; sig.occurred_at → sig.event_date_v2) + BIGINT::text casts on 4 fn_'s |
+| DEFECT-DB-01 | Testing Agent | fn_scoring_weights_set manual audit_log INSERT missing prev_hash/this_hash NOT NULL columns — switched to fn_audit_log_record_v2 helper |
+| DEFECT-DB-02 | Testing Agent | latest_risk_score MV column alias inconsistency between branches — normalized to `id` |
+
+**S2-21 streak:** 13th consecutive clean module. Zero net-new PUBLIC EXECUTE. Live proacl verified at QA Stage 4 for all 10 fn_'s + 1 MV.
+
+**Production-credibility-invariant compliance:**
+
+- Database Objects First: All business logic in 8 net-new + 2 EXTEND fn_'s. Zero ORM. Zero business logic in controllers.
+- Backend thin layer: 6 routes → 2 controllers → db.callFunction() → JSONB response.
+- JWT + permission middleware on all 6 routes.
+- FORCE RLS on risk_score. Explicit tenant-scoping invariant documented on latest_risk_score MV.
+- Pino redact extended: 62 paths covering contributingCorrelations / explanation / marValue / dim_* / weightsApplied.
+- Rollback blocks on all 10 migrations.
+
+---
+
+### M15 / CR-G — Executive Evolution + 4 Persona Dashboards + AI Risk Assistant
+
+**TL;DR:** Ships the decision surface layer atop M14. Executive dashboard gains 3 new sections. 4 net-new persona dashboards (Operations, Finance & Treasury, Compliance & ESG, Procurement). AI Risk Assistant floating drawer with SSE streaming Q&A. 3 new ADNOC roles. +256 i18n keys. Zero net-new tables.
+
+**Migrations:** 13 total (178..190; 189 + 190 are in-flight defect-fix patches)
+
+**Net-new vs EXTEND:**
+
+| Type | Count | Names |
+|---|---|---|
+| Tables (new) | 0 | — |
+| Tables (extended) | 1 | ai_request_log (+scope_hash + acl_filtered_count) |
+| Functions (new) | 4 | fn_dashboard_operations / finance_treasury / compliance_esg / procurement_supplier_risk |
+| Functions (extended) | 1 | fn_dashboard_executive (+3 top-level keys) |
+| Roles | 3 | operations / finance_treasury / compliance_esg |
+| Permissions | 5 | insights.operations/finance_treasury/compliance_esg/procurement_supplier_risk + ai.invoke.risk_assistant |
+| role_permission grants | ~57 | 30 native + 14 pre-emptive backfill + 13 final grants |
+| ai_prompt rows | 6 | risk_assistant.qa_<persona> × 6 personas |
+| BE routes (new) | 5 | 4 persona dashboard GET + 1 AI Risk Assistant POST (SSE) |
+| FE routes (new) | 4 | /app/dashboards/operations|finance-treasury|compliance-esg|procurement |
+| FE components (inject) | 2 | ExecutiveCrgExtension + RiskAssistantPanel (floating AppShell singleton) |
+| i18n keys | +256 | dashboards.operations.* / .fintech.* / .compliance.* / .procurement.* / ai.riskAssistant.* |
+
+**Key architectural decisions:**
+
+#### Q1 — Role seeding strategy
+**Locked:** seed AND demo live-create. Seed rows in migration 181 provide a reliable fallback for any demo environment. Platform Admin live-create flow is also demoable to showcase role management UX.
+
+#### Q2 — AI Risk Assistant transport
+**Locked:** SSE streaming with ?stream=false non-streaming fallback. SSE provides demo wow factor and better first-token latency. Fallback ensures resilience.
+
+#### Q3 — Per-persona dashboard auto-refresh cadence
+**Locked:** 60s polling v1 (React Query refetchInterval). Event-driven WebSocket deferred to pilot at current demo scale.
+
+#### Q4 — Procurement supplier-risk surface scope
+**Locked:** dashboard only in CR-G. List view + filter UI deferred to R-PROC persona round to keep CR-G ship-able and focused.
+
+#### Q5 — Risk Assistant per-persona prompts
+**Locked:** separate prompts per persona (6 ai_prompt rows). Allows per-persona tuning without cross-impact. Matches M4 6-prompt seeding pattern.
+
+**Agent 3 dependency resolutions:**
+
+- **A1 (AVaR coexistence):** `valueAtRisk` key NOT added to fn_dashboard_executive — M14 AvarDashboardSection already consumes /risk/avar. Adding it would create dual sources of truth. AC-S17-03 allows skipping.
+- **A4 (per-party risk):** AVG(latest_risk_score.health_score) per party's active contracts.
+- **A4b (backup-supplier categorization):** party.party_type pivot (industry + partner_role columns do not exist in live DB).
+- **fn-name:** fn_ai_request_log_create (18-arg) — brief said _record; live DB has _create.
+- **M13-projection:** assignedRoles is PLURAL ARRAY (matches correlation_rule.produce_yaml schema).
+
+**Defects caught + fixed in-flight:**
+
+| ID | Stage | Description |
+|---|---|---|
+| DEFECT-CR-G-1 | Post-impl | migration 188 omitted platform_admin's 3 insights perms |
+| DEFECT-CR-G-2 (CRITICAL) | Post-impl | fn_dashboard_executive produce_yaml::jsonb cast on TEXT column → invalid_input_syntax |
+| DEFECT-CR-G-3 | BE testing | executive controller missing tenantId GUC pass-through |
+| DEFECT-CR-G-4 | Post-impl | same YAML cast in fn_dashboard_finance_treasury (1×) + fn_dashboard_compliance_esg (3×) |
+| CRITICAL-2 (Verifier) | Integration Verifier | FE dashboards-crg.service.ts raw return data without envelope unwrap |
+
+**Known open defects (post-ship):** DEFECT-CR-G-5 (fn_clause_semantic_search arg mismatch — degrades citations), DEFECT-CR-G-6 (ai_request_log duplicate request_id), DEFECT-CR-G-7 (CRITICAL — LLM stream silent; blocks AI Q&A demo).
+
+**Deferred:** Agent 12 Testing Agent + QA Stage 4 deferred to post-ship sprint. 6/7 ACs verified via live walks.
+
+**S2-21 streak:** 14th consecutive clean module. Zero net-new PUBLIC EXECUTE. All 5 fn_'s + 1 EXTEND verified.
+
+**Production-credibility-invariant compliance:**
+
+- DEFINER VOLATILE on all 4 dashboard fn_'s — explicit tenantId GUC set in BE controller before every call.
+- ACL pre-filter on AI Risk Assistant: fn_contract_list narrows context + scope_hash computed for Annex D §15.3 audit.
+- ai_request_log EXTEND with scope_hash + acl_filtered_count — audit fields per Annex D §15.3.
+- Pino redact +4 paths: query / filters / contextText / token.
+- Rollback blocks on all 13 migrations.
+- Latest_risk_score MV tenant-scoping invariant correctly propagated to fn_dashboard_procurement_supplier_risk supplier scorecard join.
+
+---
+
+*M14 + M15 (CR-F + CR-G) section generated 2026-05-13 by Documentation Generator from M14-summary.md, M15-summary.md, decisions/M14.json, decisions/M15.json, migrations 168..190, and BE source types.*
+
 *CR-D0 section generated 2026-05-12 by Documentation Generator from migrations 132..140, after-state.md, module-M11-test-report.md, decisions/M11.json.*

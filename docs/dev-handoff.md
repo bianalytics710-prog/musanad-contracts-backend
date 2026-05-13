@@ -1883,3 +1883,51 @@ The `source_credential` table seeds `env:COMMODITY_API_KEY` and `env:FX_API_KEY`
 ---
 
 *Generated 2026-05-09 by Documentation Generator from M7 db-design.md, api-contracts.json, types.ts, seed-data.ts, requirements-analysis.json, be-implementation-summary.json, fe-implementation-summary.json, db-implementation-summary.json (8 migrations applied 100..107; 0 impl-time patches; PUBLIC count baseline-5 preserved), integration-verifier-report.md, module-M7-test-report.md (985/984/1/0; 126 net-new tests), qa-stage4-report.md (PASS first-run), and project-artifacts/decisions/M7.json (22 locked decisions). No Codex review for M7 (Dexian decision 2026-05-04; **seventh consecutive validated**).*
+
+---
+
+## M14 / CR-F — 5-Dim Risk Scoring + MaR + AVaR
+
+> **OpenAPI:** bumped `1.0.4` → `1.0.5`
+> **Migrations:** 168..177 (10 files) | **Schema version:** 177
+> **BE commit:** b2bd8bc | **FE commit:** 9155788
+
+CR-F delivers the CRIP Wave 2 risk scoring engine. 1 append-only table (`risk_score`), 1 materialized view (`latest_risk_score` — first MV in the project), 8 net-new fn_'s, 2 EXTEND fn_'s, a score-recompute worker (PG LISTEN + daily cron), 6 BE routes, and full FE surface.
+
+**Key notes for developers extending this module:**
+
+- `latest_risk_score` is a MATERIALIZED VIEW. **PostgreSQL RLS does NOT apply to MVs.** Every SELECT MUST include `WHERE tenant_id = current_setting('app.current_tenant_id', true)::uuid`.
+- The score-recompute worker (`src/workers/score-recompute.worker.ts`) uses PG LISTEN on `correlation_inserted`. Production LISTEN connections MUST use the Neon direct endpoint (not `-pooler`) — same constraint as M7 F-3.
+- `fn_scoring_weights_set` uses `fn_audit_log_record_v2(NULL::bigint, ...)` because `system_setting` has a TEXT key PK, not a BIGINT id. The NULL sentinel is documented as the canonical pattern for non-BIGINT-id tables.
+- Bootstrap migration 175 calls `fn_risk_score_compute` for every active contract. If you add new contracts and need to populate risk scores, run the same DO block pattern in a new migration.
+- `SCORE_RECOMPUTE_WORKER_ENABLED` env var must be set to `true` in production. Disabled by default in dev to avoid noise.
+
+For data-dictionary detail see [`data-dictionary.md`](data-dictionary.md) M14 section. For OpenAPI wire spec see [`api/openapi.yaml`](api/openapi.yaml). For module docs see [`modules/M14-CR-F.md`](modules/M14-CR-F.md). For FE docs see the frontend repo at `docs/M14-CR-F-frontend.md`.
+
+---
+
+## M15 / CR-G — Executive Evolution + 4 Persona Dashboards + AI Risk Assistant
+
+> **OpenAPI:** bumped `1.0.5` → `1.0.6`
+> **Migrations:** 178..190 (13 files) | **Schema version:** 190
+> **BE commit:** 1fdf57a | **FE commit:** b3e82ce
+
+CR-G ships the decision surface layer atop M14. Zero net-new tables. 4 net-new persona dashboard fn_'s (all DEFINER VOLATILE), 3 new ADNOC roles, 5 new permissions, AI Risk Assistant with SSE streaming Q&A, ai_request_log extended with ACL audit columns, and +256 i18n keys.
+
+**Key notes for developers extending this module:**
+
+- All 4 new dashboard fn_'s are DEFINER VOLATILE. When extending them, always pass tenantId GUC via `SET LOCAL app.current_tenant_id = '...'` in the BE controller before calling `db.callFunction()`. CR-G DEFECT-CR-G-3 was caused by missing GUC pass-through.
+- `fn_dashboard_procurement_supplier_risk` joins `latest_risk_score` MV for the supplier scorecard. The mandatory tenant-filter invariant applies here too.
+- The AI Risk Assistant uses `fn_ai_request_log_create` (18-arg). The brief said `fn_ai_request_log_record` — that function does NOT exist. Always use the live DB name.
+- `produce_yaml` column on `correlation_rule` is YAML TEXT, NOT JSON. Do NOT cast with `::jsonb` — use CASE expressions to extract fields by rule_id pattern (migration 189/190 fix pattern).
+- The pre-emptive grant backfill pattern (migration 182) is the standard way to give new roles access to existing permissions. Earlier modules write WHERE-EXISTS guards; this migration fills them in. Document new conditional grants in the relevant migration.
+- AR i18n keys for CR-G use `[NEEDS TRANSLATION]` placeholders — translation sprint needed.
+- DEFECT-CR-G-7 (AI LLM stream silent) is a known open issue. The SSE infrastructure is working; the AIProvider configuration needs investigation in the post-ship sprint.
+
+**Testing Agent deferred:** Agent 12 (~30 DB tests + AI service tests + Playwright per-persona render) and QA Stage 4 (51-check validation) deferred to post-ship sprint. 6/7 ACs verified via live walks.
+
+For data-dictionary detail see [`data-dictionary.md`](data-dictionary.md) M15 section. For OpenAPI wire spec see [`api/openapi.yaml`](api/openapi.yaml). For module docs see [`modules/M15-CR-G.md`](modules/M15-CR-G.md). For FE docs see the frontend repo at `docs/M15-CR-G-frontend.md`.
+
+---
+
+*M14 + M15 (CR-F + CR-G) sections generated 2026-05-13 by Documentation Generator.*
