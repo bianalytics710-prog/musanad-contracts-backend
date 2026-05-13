@@ -162,4 +162,28 @@ import aiRiskAssistantRouter from './ai-risk-assistant.routes';
 v1Router.use('/dashboards', dashboardsCrgRouter);
 v1Router.use('/ai', aiRiskAssistantRouter);
 
+// Unit-3 (R-OPS + R-FT + R-CES) — Persona action routes.
+//   POST /api/v1/ops/events/:correlationId/acknowledge   — risk.acknowledge
+//   POST /api/v1/ops/events/:correlationId/link-remedy   — risk.acknowledge
+//   POST /api/v1/ops/events/:correlationId/escalate      — risk.acknowledge
+//   POST /api/v1/finance/contracts/:contractId/price-review         — risk.acknowledge + insights.finance_treasury
+//   POST /api/v1/finance/contracts/:contractId/payment-hold         — risk.acknowledge
+//   POST /api/v1/finance/contracts/:contractId/hedge-review         — risk.acknowledge
+//   POST /api/v1/compliance/contracts/:contractId/raise-flag        — risk.acknowledge
+//   POST /api/v1/compliance/contracts/:contractId/supplier-audit    — risk.acknowledge
+//   POST /api/v1/compliance/contracts/:contractId/recommend-hold    — risk.acknowledge
+//   POST /api/v1/compliance/contracts/:contractId/recommend-termination — risk.acknowledge
+//   POST /api/v1/compliance/contracts/:contractId/icv-certificate   — contract.edit (multipart)
+//   GET  /api/v1/contracts/:contractId/audit-rights                 — contract.read.* | insights.*
+import opsActionsRouter from './ops-actions.routes';
+import financeActionsRouter from './finance-actions.routes';
+import complianceActionsRouter from './compliance-actions.routes';
+import auditRightsRouter from './audit-rights.routes';
+v1Router.use('/ops', opsActionsRouter);
+v1Router.use('/finance', financeActionsRouter);
+v1Router.use('/compliance', complianceActionsRouter);
+// audit-rights is a sub-route under /contracts — mount after all existing /contracts
+// routers so the literal /:contractId/audit-rights path doesn't conflict.
+v1Router.use('/contracts', auditRightsRouter);
+
 export default v1Router;
