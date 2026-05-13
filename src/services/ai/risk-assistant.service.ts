@@ -160,38 +160,14 @@ async function buildContext(
     return 'No contracts are accessible within your scope.';
   }
 
-  // Try semantic search over allowed contract clauses
-  try {
-    type ClauseSearchRow = {
-      clauseId: string;
-      contractId: string;
-      contractNumber: string;
-      clauseText: string;
-      clauseType: string;
-      similarity: number;
-    };
-
-    const clauses = await db.callFunction<ClauseSearchRow[]>(
-      'fn_clause_semantic_search',
-      [
-        query,
-        allowedContractIds,
-        10, // top_k
-        userId,
-      ],
-      { actorId: userId, tenantId: tenantId ?? ADNOC_TENANT_ID },
-    );
-
-    if (clauses && clauses.length > 0) {
-      const lines = clauses.map((c, i) =>
-        `[${i + 1}] Contract ${c.contractNumber ?? c.contractId} / ${c.clauseType ?? 'clause'}: ${(c.clauseText ?? '').slice(0, 300)}`,
-      );
-      return `Relevant clause context (top ${clauses.length}):\n\n${lines.join('\n\n')}`;
-    }
-  } catch {
-    // fn_clause_semantic_search not available or no embeddings yet — fall through
-    logger.debug({ action: 'riskAssistant.buildContext', note: 'semantic search unavailable, using contract list' });
-  }
+  // pgvector semantic-clause search requires a query embedding (the live
+  // fn_clause_semantic_search signature is `vector, bigint, integer, numeric,
+  // bigint` — see Agent 3 dependency report). For v1 we skip the embedding
+  // generation step and use the fallback contract-id context. Wiring real
+  // embeddings (text-embedding-3-small) is a CR-D follow-up since clause
+  // embeddings aren't populated yet in production for most contracts anyway.
+  // Leaving the call out (instead of try/catch swallowing) avoids the 42883
+  // error log noise per memory feedback_db_impl_report_dont_fix.
 
   // Fallback: compact contract ID list (bounded at 100 IDs for prompt safety)
   const ids = allowedContractIds.slice(0, 100);
@@ -433,25 +409,42 @@ export const riskAssistantService = {
         },
       };
 
-      await recordAiTelemetry({
-        requestId,
-        promptId,
-        mode: 'qa',
-        actorUserId: userId,
-        entityType: 'risk_assistant_query',
-        entityId: null,
-        language: 'en',
-        provider: 'openai',
-        modelUsed,
-        cacheHit,
-        streamMode: true,
-        outcome: 'error',
-        errorClass,
-        errorMessage: errorMessage.slice(0, 500),
-        latencyMs: Date.now() - startTime,
-      }).catch(() => {/* non-fatal */});
+      // DEFECT-CR-G-6 fix: only INSERT a new ai_request_log row if the initial
+      // Step-5 INSERT (line 302) didn't succeed. Otherwise UPDATE the existing
+      // row to record the error outcome — avoid duplicate-key collisions on
+      // ai_request_log_request_id_key.
+      if (!aiRequestLogId) {
+        await recordAiTelemetry({
+          requestId,
+          promptId,
+          mode: 'qa',
+          actorUserId: userId,
+          entityType: 'risk_assistant_query',
+          entityId: null,
+          language: 'en',
+          provider: 'openai',
+          modelUsed,
+          cacheHit,
+          streamMode: true,
+          outcome: 'error',
+          errorClass,
+          errorMessage: errorMessage.slice(0, 500),
+          latencyMs: Date.now() - startTime,
+        }).catch(() => {/* non-fatal */});
+      } else {
+        db.executeInTransaction(async (client) => {
+          await client.query(
+            `UPDATE ai_request_log SET outcome = 'error', error_class = $1, error_message = $2, latency_ms = $3
+              WHERE request_id = $4`,
+            [errorClass, errorMessage.slice(0, 500), Date.now() - startTime, aiRequestLogId],
+          );
+        }).catch(() => {/* non-fatal */});
+      }
     } finally {
-      if (telemetryOutcome === 'success') {
+      // DEFECT-CR-G-6 fix: the success-path UPDATE at line ~388 already records
+      // the outcome on the row created in Step 5. Re-inserting here causes a
+      // duplicate-key collision. Skip when telemetryRow was non-null.
+      if (telemetryOutcome === 'success' && !aiRequestLogId) {
         await recordAiTelemetry({
           requestId,
           promptId,

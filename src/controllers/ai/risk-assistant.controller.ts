@@ -36,8 +36,11 @@ import type { RiskAssistantSSEEvent } from '../../types/risk-assistant.types';
 
 const PROMPT_ID_PREFIX = 'risk_assistant.qa_';
 
+// SSE frame — FE parser (src/services/api/risk-assistant.service.ts) reads only
+// the `data:` line and expects the event type embedded inside the JSON. Write
+// the full {event, data} envelope on the data line so the FE switch works.
 const sseFrame = (evt: RiskAssistantSSEEvent): string =>
-  `event: ${String(evt.event)}\ndata: ${JSON.stringify(evt.data)}\n\n`;
+  `event: ${String(evt.event)}\ndata: ${JSON.stringify({ event: evt.event, data: evt.data })}\n\n`;
 
 /**
  * POST /api/v1/ai/risk-assistant/ask
@@ -79,7 +82,21 @@ export const riskAssistantController = {
       return roleMap[userRole] ?? 'executive';
     })();
 
-    const promptId = `${PROMPT_ID_PREFIX}${persona}`;
+    // DEFECT-CR-G-8 fix: seed prompt_ids use SHORT names (qa_legal, qa_compliance)
+    // but persona codes use FULL names (legal_counsel, compliance_esg). Normalize
+    // before suffixing — keep this map in sync with migration 187 ai_prompt seeds.
+    const personaToPromptShortName: Record<string, string> = {
+      executive: 'executive',
+      legal_counsel: 'legal',
+      legal: 'legal',
+      compliance_esg: 'compliance',
+      compliance: 'compliance',
+      operations: 'operations',
+      finance_treasury: 'finance_treasury',
+      procurement: 'procurement',
+    };
+    const promptShortName = personaToPromptShortName[persona] ?? 'executive';
+    const promptId = `${PROMPT_ID_PREFIX}${promptShortName}`;
 
     req.logger.info({
       action: 'riskAssistant.ask',
