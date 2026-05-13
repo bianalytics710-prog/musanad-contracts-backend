@@ -153,11 +153,56 @@ export const ComplianceIcvCertificateBodySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Unit-4 / R-PROC — Procurement action bodies + params
+// ---------------------------------------------------------------------------
+
+/** :partyId path param — bigint id of party (vendor) row */
+export const PartyIdParamSchema = z.object({
+  partyId: PositiveIdSchema,
+});
+
+/** POST /api/v1/procurement/vendors/:partyId/activate-alternate */
+export const ProcurementActivateAlternateBodySchema = z.object({
+  /** id of the alternate party to activate (if known); free-form vendor name otherwise. */
+  alternatePartyId: PositiveIdSchema.optional(),
+  alternateVendorName: z.string().trim().max(200).optional(),
+  forContractId: PositiveIdSchema.optional(),
+  note: z.string().trim().max(1000).optional(),
+});
+
+/** POST /api/v1/procurement/vendors/:partyId/escalate */
+export const ProcurementEscalateVendorBodySchema = z.object({
+  reason: z.string().trim().min(1, 'reason is required').max(1000),
+  toRole: z
+    .enum(['legal', 'executive', 'compliance', 'finance_treasury'], {
+      errorMap: () => ({
+        message: 'toRole must be one of: legal, executive, compliance, finance_treasury',
+      }),
+    })
+    .optional(),
+});
+
+/** POST /api/v1/procurement/contracts/:contractId/cure-notice-intent */
+export const ProcurementCureNoticeIntentBodySchema = z.object({
+  breachDescription: z.string().trim().min(1, 'breachDescription is required').max(2000),
+  curePeriodDays: z.number().int().positive().max(365).optional(),
+  note: z.string().trim().max(1000).optional(),
+});
+
+/** POST /api/v1/procurement/contracts/:contractId/icv-remediation */
+export const ProcurementIcvRemediationBodySchema = z.object({
+  shortfallDescription: z.string().trim().min(1, 'shortfallDescription is required').max(1000),
+  proposedRemediationSteps: z.string().trim().max(2000).optional(),
+  forwardToCompliance: z.boolean().optional(),
+});
+
+// ---------------------------------------------------------------------------
 // Inferred types
 // ---------------------------------------------------------------------------
 
 export type CorrelationIdParam = z.infer<typeof CorrelationIdParamSchema>;
 export type ContractIdPersonaParam = z.infer<typeof ContractIdPersonaParamSchema>;
+export type PartyIdParam = z.infer<typeof PartyIdParamSchema>;
 export type OpsAcknowledgeBody = z.infer<typeof OpsAcknowledgeBodySchema>;
 export type OpsLinkRemedyBody = z.infer<typeof OpsLinkRemedyBodySchema>;
 export type OpsEscalateBody = z.infer<typeof OpsEscalateBodySchema>;
@@ -171,3 +216,7 @@ export type ComplianceRecommendTerminationBody = z.infer<
   typeof ComplianceRecommendTerminationBodySchema
 >;
 export type ComplianceIcvCertificateBody = z.infer<typeof ComplianceIcvCertificateBodySchema>;
+export type ProcurementActivateAlternateBody = z.infer<typeof ProcurementActivateAlternateBodySchema>;
+export type ProcurementEscalateVendorBody = z.infer<typeof ProcurementEscalateVendorBodySchema>;
+export type ProcurementCureNoticeIntentBody = z.infer<typeof ProcurementCureNoticeIntentBodySchema>;
+export type ProcurementIcvRemediationBody = z.infer<typeof ProcurementIcvRemediationBodySchema>;

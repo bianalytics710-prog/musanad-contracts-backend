@@ -377,4 +377,106 @@ export const personaActionsService = {
       tenantId,
     );
   },
+
+  // -------------------------------------------------------------------------
+  // Unit-4 / R-PROC — Procurement persona actions
+  // -------------------------------------------------------------------------
+
+  async activateAlternateVendor(
+    actorId: number,
+    partyId: number,
+    body: {
+      alternatePartyId?: number;
+      alternateVendorName?: string;
+      forContractId?: number;
+      note?: string;
+    },
+    tenantId: string,
+  ): Promise<{ partyId: string; activatedAt: string }> {
+    await writeAuditLog(
+      actorId,
+      'party',
+      partyId,
+      'vendor_alternate_activated',
+      {
+        alternatePartyId: body.alternatePartyId ?? null,
+        alternateVendorName: body.alternateVendorName ?? null,
+        forContractId: body.forContractId ?? null,
+        note: body.note ?? null,
+      },
+      tenantId,
+    );
+    return { partyId: String(partyId), activatedAt: new Date().toISOString() };
+  },
+
+  async escalateVendorPerformance(
+    actorId: number,
+    partyId: number,
+    body: { reason: string; toRole?: string },
+    tenantId: string,
+  ): Promise<{ partyId: string; escalatedAt: string; escalatedTo: string | null }> {
+    await writeAuditLog(
+      actorId,
+      'party',
+      partyId,
+      'vendor_performance_escalated',
+      { reason: body.reason, toRole: body.toRole ?? null },
+      tenantId,
+    );
+    return {
+      partyId: String(partyId),
+      escalatedAt: new Date().toISOString(),
+      escalatedTo: body.toRole ?? null,
+    };
+  },
+
+  async recordCureNoticeIntent(
+    actorId: number,
+    contractId: number,
+    body: { breachDescription: string; curePeriodDays?: number; note?: string },
+    tenantId: string,
+  ): Promise<{ contractId: string; recordedAt: string }> {
+    await writeAuditLog(
+      actorId,
+      'contract',
+      contractId,
+      'cure_notice_intent_recorded',
+      {
+        breachDescription: body.breachDescription,
+        curePeriodDays: body.curePeriodDays ?? null,
+        note: body.note ?? null,
+      },
+      tenantId,
+    );
+    return { contractId: String(contractId), recordedAt: new Date().toISOString() };
+  },
+
+  async initiateIcvRemediation(
+    actorId: number,
+    contractId: number,
+    body: {
+      shortfallDescription: string;
+      proposedRemediationSteps?: string;
+      forwardToCompliance?: boolean;
+    },
+    tenantId: string,
+  ): Promise<{ contractId: string; initiatedAt: string; forwardedToCompliance: boolean }> {
+    await writeAuditLog(
+      actorId,
+      'contract',
+      contractId,
+      'icv_remediation_initiated',
+      {
+        shortfallDescription: body.shortfallDescription,
+        proposedRemediationSteps: body.proposedRemediationSteps ?? null,
+        forwardToCompliance: body.forwardToCompliance ?? false,
+      },
+      tenantId,
+    );
+    return {
+      contractId: String(contractId),
+      initiatedAt: new Date().toISOString(),
+      forwardedToCompliance: body.forwardToCompliance ?? false,
+    };
+  },
 };

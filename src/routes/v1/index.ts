@@ -179,9 +179,12 @@ import opsActionsRouter from './ops-actions.routes';
 import financeActionsRouter from './finance-actions.routes';
 import complianceActionsRouter from './compliance-actions.routes';
 import auditRightsRouter from './audit-rights.routes';
+import procurementActionsRouter from './procurement-actions.routes';
 v1Router.use('/ops', opsActionsRouter);
 v1Router.use('/finance', financeActionsRouter);
 v1Router.use('/compliance', complianceActionsRouter);
+// Unit-4 / R-PROC procurement actions (vendor + contract scoped).
+v1Router.use('/procurement', procurementActionsRouter);
 // audit-rights is a sub-route under /contracts — mount after all existing /contracts
 // routers so the literal /:contractId/audit-rights path doesn't conflict.
 v1Router.use('/contracts', auditRightsRouter);
