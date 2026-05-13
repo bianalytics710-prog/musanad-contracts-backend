@@ -86,6 +86,11 @@ import {
   startRuleCacheListener,
   stopRuleCacheListener,
 } from './services/rule-cache.service';
+// M14 (CR-F) — Score Recompute worker (PG LISTEN correlation_inserted + daily cron)
+import {
+  startScoreRecomputeWorker,
+  stopScoreRecomputeWorker,
+} from './workers/score-recompute.worker';
 
 const app = express();
 
@@ -205,6 +210,14 @@ const server = app.listen(port, () => {
   //   requires CORRELATION_EVALUATOR_WORKER_ENABLED=true (default off in dev).
   void startRuleCacheListener();
   void startCorrelationEvaluatorWorker();
+
+  // M14 (CR-F) — Score Recompute worker.
+  // PG LISTEN correlation_inserted: recompute risk scores when new correlations
+  //   are inserted by fn_rule_evaluate. No-op in test AND requires
+  //   SCORE_RECOMPUTE_WORKER_ENABLED=true (default off in dev).
+  // Daily cron at 00:30 UTC: full recompute via fn_score_recompute_for_weight_change
+  //   with SYSTEM_ACTOR_ID=0 sentinel (S2-20).
+  void startScoreRecomputeWorker();
 });
 
 // --- Graceful shutdown ---
@@ -228,6 +241,8 @@ const shutdown = async (signal: string): Promise<void> => {
     // M13 (CR-E) — stop correlation evaluator worker + rule cache listener.
     stopCorrelationEvaluatorWorker();
     await stopRuleCacheListener();
+    // M14 (CR-F) — stop score recompute worker (PG LISTEN + cron).
+    stopScoreRecomputeWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

@@ -141,4 +141,13 @@ v1Router.use('/clauses', clausesRouter);
 // /admin/rules is mounted separately in admin/index.ts.
 v1Router.use('/correlations', correlationsRouter);
 
+// M14 (CR-F) — 5-Dim Risk Scoring + MaR + AVaR.
+//   /api/v1/contracts/:id/risk-score        — GET latest explain (score.read)
+//   /api/v1/contracts/:id/risk-score/history — GET history (score.read)
+//   /api/v1/risk/avar                       — GET AVaR aggregate (score.read)
+// /admin/scoring-weights endpoints are mounted in admin/index.ts.
+import { contractRiskScoreRouter, riskAvarRouter } from './risk-score.routes';
+v1Router.use('/contracts', contractRiskScoreRouter);
+v1Router.use('/risk', riskAvarRouter);
+
 export default v1Router;

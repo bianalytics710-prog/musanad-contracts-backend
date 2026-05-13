@@ -99,4 +99,13 @@ router.use('/clause-taxonomy', clauseTaxonomyRouter);
 import { adminRulesRouter } from '../correlation-rule.routes';
 router.use('/rules', adminRulesRouter);
 
+// ============================================================
+// M14 (CR-F) — Admin Scoring Weights + Bulk Recompute.
+// CR-F-004: GET  /admin/scoring-weights          (score.weights.manage)
+// CR-F-005: PATCH /admin/scoring-weights         (score.weights.manage)
+// CR-F-006: POST /admin/scoring-weights/recompute-all (score.weights.manage)
+// ============================================================
+import scoringWeightsRouter from './scoring-weights.routes';
+router.use('/scoring-weights', scoringWeightsRouter);
+
 export default router;
