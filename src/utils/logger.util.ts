@@ -961,6 +961,29 @@ const SENSITIVE_PATHS: string[] = [
   'req.body.smtp_pass',
   '*.smtp_pass',
   '*.*.smtp_pass',
+
+  // -- CR-G M15 — AI Risk Assistant sensitive fields --
+  //    query: natural language question — NEVER log verbatim (PII risk).
+  //    filters: ACL-narrowing context (contract IDs, emirate, riskKind).
+  //    SSE token/citation data in response chunks — never at INFO level.
+  //    contextText: LLM context built from clause excerpts (contract content).
+  'query',
+  'req.body.query',
+  '*.query',
+  '*.*.query',
+  'filters',
+  'req.body.filters',
+  '*.filters',
+  '*.*.filters',
+  'contextText',
+  'req.body.contextText',
+  '*.contextText',
+  '*.*.contextText',
+  // token — SSE streaming response chunk (contract excerpt risk)
+  'token',
+  'res.body.token',
+  '*.token',
+  '*.*.token',
 ];
 
 const baseConfig = {

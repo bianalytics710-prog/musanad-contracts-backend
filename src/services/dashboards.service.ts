@@ -157,11 +157,12 @@ export const getDashboardRouter = (
 export const getExecutiveDashboard = (
   actorId: number,
   windowDays: number | undefined,
+  tenantId?: string,
 ): Promise<ExecutiveDashboardSnapshot> =>
   db.callFunction<ExecutiveDashboardSnapshot>(
     'fn_dashboard_executive',
     [windowDays ?? null],
-    { actorId },
+    { actorId, tenantId: tenantId ?? '00000000-0000-0000-0000-000000000001' },
   );
 
 /**

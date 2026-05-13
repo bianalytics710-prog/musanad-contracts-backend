@@ -104,14 +104,18 @@ export type AiInsightType =
   | 'executive_anomalies'
   | 'regulatory_impact_explain'
   | 'regulatory_impact_amendment'
-  | 'regulatory_impact_summary';
+  | 'regulatory_impact_summary'
+  // M15 (CR-G) — AI Risk Assistant Q&A response cache
+  | 'qa_response';
 
 export type AiInsightEntityType =
   | 'contract'
   | 'contract_version'
   | 'regulatory_update'
   | 'regulatory_update_summary'
-  | 'executive_dashboard';
+  | 'executive_dashboard'
+  // M15 (CR-G) — AI Risk Assistant per-query scope (keyed by scope_hash derivation)
+  | 'risk_assistant_query';
 
 // ------------------------------------------------------------
 // 7. ai_prompt entity types
@@ -273,6 +277,19 @@ export interface AiRegulatoryImpactSummaryPayload {
   recommendedActions: string[];
 }
 
+/** M15 (CR-G) — AI Risk Assistant Q&A cache payload. */
+export interface AiRiskAssistantQaPayload {
+  insightType: 'qa_response';
+  answer: string;
+  citations: Array<{
+    type: 'clause' | 'correlation' | 'signal' | 'contract';
+    id: string;
+    label: string;
+    href: string;
+    excerpt?: string;
+  }>;
+}
+
 export type AiInsightPayload =
   | AiContractSummaryPayload
   | AiContractKeyTermsPayload
@@ -283,7 +300,9 @@ export type AiInsightPayload =
   | AiExecutiveAnomaliesPayload
   | AiVersionDiffSummaryPayload
   | AiRegulatoryImpactPayload
-  | AiRegulatoryImpactSummaryPayload;
+  | AiRegulatoryImpactSummaryPayload
+  // M15 (CR-G) — AI Risk Assistant
+  | AiRiskAssistantQaPayload;
 
 // ------------------------------------------------------------
 // 9. ai_request_log entity types

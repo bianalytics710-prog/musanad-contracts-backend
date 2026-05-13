@@ -150,4 +150,16 @@ import { contractRiskScoreRouter, riskAvarRouter } from './risk-score.routes';
 v1Router.use('/contracts', contractRiskScoreRouter);
 v1Router.use('/risk', riskAvarRouter);
 
+// M15 (CR-G) — Executive Decision Support Evolution + 4 Persona Dashboards + AI Risk Assistant.
+//   GET /api/v1/dashboards/operations          — Operations & SLA persona (insights.operations)
+//   GET /api/v1/dashboards/finance-treasury    — Finance & Treasury persona (insights.finance_treasury)
+//   GET /api/v1/dashboards/compliance-esg      — Compliance & ESG persona (insights.compliance_esg)
+//   GET /api/v1/dashboards/procurement         — Procurement & Supplier Risk persona (insights.procurement_supplier_risk)
+//   POST /api/v1/ai/risk-assistant/ask         — AI Risk Assistant SSE Q&A (ai.invoke.risk_assistant)
+// NOTE: /dashboards/executive is unchanged — existing dashboardsRouter serves it.
+import dashboardsCrgRouter from './dashboards-crg.routes';
+import aiRiskAssistantRouter from './ai-risk-assistant.routes';
+v1Router.use('/dashboards', dashboardsCrgRouter);
+v1Router.use('/ai', aiRiskAssistantRouter);
+
 export default v1Router;

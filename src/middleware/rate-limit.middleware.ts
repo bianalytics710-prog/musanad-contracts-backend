@@ -63,6 +63,11 @@ const publicSignerLimiter = buildLimiter({ points: 60, durationSeconds: 60 });
 // 50k rows). 5 exports per minute per user is generous enough for power
 // users yet prevents accidental DoS via a hot-reload loop or scripted abuse.
 const heavyExportLimiter = buildLimiter({ points: 5, durationSeconds: 60 });
+// M15 (CR-G) — AI Risk Assistant: 30 req/min/user per api-contracts.json.
+// Stricter than authedWriteRateLimiter (60/min) because each call runs
+// ACL resolution (fn_contract_list ALL pages) + optional pgvector search +
+// streaming GPT-4o — most expensive endpoint in the system.
+const riskAssistantLimiter = buildLimiter({ points: 30, durationSeconds: 60 });
 
 // req.ip honours `app.set('trust proxy', 1)`. We MUST NOT read X-Forwarded-For
 // directly: that bypasses the trust-proxy hop count and lets attackers spoof
@@ -121,3 +126,13 @@ export const publicSignerRateLimiter = consume(publicSignerLimiter, ipKey);
  * for legitimate admin workflows but blocks accidental DoS.
  */
 export const heavyExportRateLimiter = consume(heavyExportLimiter, userKey);
+
+/**
+ * M15 (CR-G) — AI Risk Assistant rate limiter.
+ *
+ * 30 req/min per authenticated user per api-contracts.json ep_ai_risk_assistant_ask.
+ * Enforced at the route layer as a wall-clock guard; the DB-level
+ * fn_ai_request_log_check_rate_limit (1800/h, 14400/d per ai_prompt row)
+ * provides a secondary per-prompt quota enforced inside the controller.
+ */
+export const riskAssistantRateLimiter = consume(riskAssistantLimiter, userKey);

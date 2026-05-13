@@ -371,6 +371,7 @@ export const dashboardsController = {
       const result = await dashboardsService.getExecutiveDashboard(
         req.user!.id,
         q.windowDays,
+        req.tenantId,
       );
       req.logger.info(
         {
