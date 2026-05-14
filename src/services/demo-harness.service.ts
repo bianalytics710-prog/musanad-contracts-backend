@@ -117,14 +117,26 @@ export const timeUnfreeze = (
     { actorId, tenantId },
   );
 
-export const getTimeFreezeCurrentRaw = (
+export const getTimeFreezeCurrentRaw = async (
   actorId: number,
-): Promise<{ demoNow: string }> =>
-  db.callFunction<{ demoNow: string }>(
+  tenantId: string = ADNOC_TENANT_ID,
+): Promise<{ demoNow: string }> => {
+  // fn_demo_now() returns a bare TIMESTAMPTZ. node-postgres maps that to a JS
+  // Date object — not a string and not a wrapper object. MUST pass tenantId so
+  // app.current_tenant_id GUC is set (fn_demo_now reads demo_time_freeze_state
+  // for that tenant).
+  const result = await db.callFunction<Date | string | { demoNow?: string; fnDemoNow?: string }>(
     'fn_demo_now',
     [],
-    { actorId },
+    { actorId, tenantId },
   );
+  if (result instanceof Date) return { demoNow: result.toISOString() };
+  if (typeof result === 'string') return { demoNow: result };
+  if (result && typeof result === 'object') {
+    return { demoNow: result.demoNow ?? result.fnDemoNow ?? new Date().toISOString() };
+  }
+  return { demoNow: new Date().toISOString() };
+};
 
 export const listScenarioRuns = (
   actorId: number,

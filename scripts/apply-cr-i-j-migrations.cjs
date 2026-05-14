@@ -35,9 +35,9 @@ async function applyOne(pool, branchLabel, version, file) {
 }
 
 async function applyAll(pool, branchLabel) {
-  // Find files matching 22[5-9]_ or 24[0-9]_ that aren't yet applied
+  // Find files matching 22[5-9]_ or 2[3-9][0-9]_ (225..299) that aren't yet applied
   const all = fs.readdirSync(MIG_DIR)
-    .filter(f => /^(22[5-9]|2[34][0-9])_.+\.sql$/.test(f))
+    .filter(f => /^2[2-9][0-9]_.+\.sql$/.test(f) && Number(f.split('_')[0]) >= 225)
     .sort();
   // Check which are already applied
   const applied = (await pool.query('SELECT version FROM schema_migrations WHERE version BETWEEN 225 AND 299')).rows.map(r => r.version);
