@@ -15,10 +15,12 @@
  *   - Pino redact list in logger.util.ts covers these fields as safety net.
  */
 import Mustache from 'mustache';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { db } from '../database/client';
 import { logger } from '../utils/logger.util';
 import { getOpenAIClient } from './ai/_shared/openai-client';
+import { loadPrompt, renderPrompt } from './ai/_shared/prompt-loader';
+import { recordAiTelemetry } from './ai/_shared/telemetry-middleware';
 
 // ----------------------------------------------------------------
 // Type definitions
@@ -72,10 +74,11 @@ interface CorrelationContextRow {
   riskCalculatedAt: string | null;
 }
 
-interface AiPromptRow {
-  systemPrompt: string;
-  userPromptTemplate: string;
-  modelVersion: string;
+interface AiPromptConfig {
+  promptId: string;          // composite: advisory_drafter__<draftType>
+  modelVersion: string;      // from fn_ai_prompt_get.defaultModel, default 'gpt-4o'
+  temperature: number;       // from defaultTemperature, default 0.2
+  maxTokens: number;         // from defaultMaxTokens, default 2000
 }
 
 // ----------------------------------------------------------------
@@ -134,30 +137,54 @@ async function fetchTemplate(
 }
 
 /**
- * Fetch the ai_prompt row keyed by composite prompt_id `advisory_drafter__<draftType>`
- * (matches the 3 seed rows in migration 213).
- * Falls back to plain `advisory_drafter` if the specific variant is missing.
+ * Fetch the ai_prompt config (model/temperature/maxTokens) for the composite
+ * prompt_id `advisory_drafter__<draftType>`. The actual system+user prompt
+ * text is loaded from disk via loadPrompt() — M4 G7-compliant pattern shared
+ * with risk-assistant.service.ts and the 6 other openai-* services.
+ *
+ * DEBT-CRH-2 (fixed 2026-05-14): previously this fn expected systemPrompt /
+ * userPromptTemplate columns on fn_ai_prompt_get, which does not return them.
+ * The function returns config metadata only; prompt bodies live at
+ * prompts/<promptId>.txt and are versioned with the codebase.
  */
-async function fetchAiPrompt(
+interface FnAiPromptGetRow {
+  promptId: string;
+  defaultModel: string | null;
+  defaultTemperature: number | string | null;
+  defaultMaxTokens: number | string | null;
+}
+async function fetchAiPromptConfig(
   draftType: string,
   actorId: number,
   tenantId: string,
-): Promise<AiPromptRow | null> {
-  type PromptResult = AiPromptRow | null;
+): Promise<AiPromptConfig | null> {
   const compositeId = `advisory_drafter__${draftType}`;
-  let result = await db.callFunction<PromptResult>(
+  let row = await db.callFunction<FnAiPromptGetRow | null>(
     'fn_ai_prompt_get',
     [compositeId],
     { actorId, tenantId },
   );
-  if (!result) {
-    result = await db.callFunction<PromptResult>(
+  if (!row) {
+    row = await db.callFunction<FnAiPromptGetRow | null>(
       'fn_ai_prompt_get',
       ['advisory_drafter'],
       { actorId, tenantId },
     );
   }
-  return result;
+  if (!row) return null;
+
+  const parseNum = (v: number | string | null, fallback: number): number => {
+    if (v === null || v === undefined) return fallback;
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  return {
+    promptId: row.promptId ?? compositeId,
+    modelVersion: row.defaultModel ?? 'gpt-4o',
+    temperature: parseNum(row.defaultTemperature, 0.2),
+    maxTokens: parseNum(row.defaultMaxTokens, 2000),
+  };
 }
 
 // ----------------------------------------------------------------
@@ -192,43 +219,73 @@ function buildMustacheContext(
 // LLM call via OpenAI (gpt-4o)
 // ----------------------------------------------------------------
 
+interface LlmCallResult {
+  textEn: string;
+  textAr: string;
+  promptHash: string;
+  responseHash: string;
+  tokensInput: number;
+  tokensOutput: number;
+}
+
 async function callLlm(
   systemPrompt: string,
-  userPrompt: string,
-  modelVersion: string,
-): Promise<{ textEn: string; textAr: string; promptHash: string; responseHash: string }> {
+  renderedBodyEn: string,
+  renderedBodyAr: string,
+  cfg: AiPromptConfig,
+): Promise<LlmCallResult> {
   const client = getOpenAIClient();
 
-  const promptHash = createHash('sha256').update(systemPrompt + '\n' + userPrompt).digest('hex');
+  // Hash the canonical prompt inputs (system + both pre-drafted bodies) for ai_request_log lineage.
+  const promptHash = createHash('sha256')
+    .update(systemPrompt + '\n---EN---\n' + renderedBodyEn + '\n---AR---\n' + renderedBodyAr)
+    .digest('hex');
 
-  // EN generation
+  // EN refinement
   const enResponse = await client.chat.completions.create({
-    model: modelVersion || 'gpt-4o',
+    model: cfg.modelVersion,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
+      {
+        role: 'user',
+        content:
+          'Refine the following pre-drafted English notice per the rules above. ' +
+          'Return ONLY the refined notice text.\n\n---\n' +
+          renderedBodyEn,
+      },
     ],
-    temperature: 0.2,
-    max_tokens: 2000,
+    temperature: cfg.temperature,
+    max_tokens: cfg.maxTokens,
   });
-  const textEn = enResponse.choices[0]?.message?.content ?? '';
+  const textEn = enResponse.choices[0]?.message?.content?.trim() || renderedBodyEn;
 
-  // AR generation — append AR instruction
-  const arSystemPrompt = systemPrompt + ' Respond in formal Arabic only.';
+  // AR refinement — same system prompt + Arabic-only instruction
+  const arSystemPrompt = systemPrompt + '\n\nIMPORTANT: Respond in formal Arabic (العربية الفصحى) only. Preserve Arabic placeholders and party names exactly.';
   const arResponse = await client.chat.completions.create({
-    model: modelVersion || 'gpt-4o',
+    model: cfg.modelVersion,
     messages: [
       { role: 'system', content: arSystemPrompt },
-      { role: 'user', content: userPrompt + '\n\nProvide the full text in Arabic.' },
+      {
+        role: 'user',
+        content:
+          'قم بصياغة الإشعار العربي المُسوَّد أدناه وفقاً للقواعد المذكورة. أعد فقط نص الإشعار المُصاغ.\n\n---\n' +
+          renderedBodyAr,
+      },
     ],
-    temperature: 0.2,
-    max_tokens: 2000,
+    temperature: cfg.temperature,
+    max_tokens: cfg.maxTokens,
   });
-  const textAr = arResponse.choices[0]?.message?.content ?? '';
+  const textAr = arResponse.choices[0]?.message?.content?.trim() || renderedBodyAr;
 
   const responseHash = createHash('sha256').update(textEn + '\n' + textAr).digest('hex');
 
-  return { textEn, textAr, promptHash, responseHash };
+  // Sum token usage across both EN and AR calls (single advisory generation = one billable LLM invocation in audit).
+  const tokensInput =
+    (enResponse.usage?.prompt_tokens ?? 0) + (arResponse.usage?.prompt_tokens ?? 0);
+  const tokensOutput =
+    (enResponse.usage?.completion_tokens ?? 0) + (arResponse.usage?.completion_tokens ?? 0);
+
+  return { textEn, textAr, promptHash, responseHash, tokensInput, tokensOutput };
 }
 
 // ----------------------------------------------------------------
@@ -313,40 +370,108 @@ export async function generateAdvisoryDraft(
   const renderedBodyEn = Mustache.render(template.bodyTemplateEn, mustacheCtx);
   const renderedBodyAr = Mustache.render(template.bodyTemplateAr, mustacheCtx);
 
-  // 5. Fetch ai_prompt for system + user prompt
-  let aiPrompt: AiPromptRow | null = null;
+  // 5. Fetch ai_prompt config (model/temperature/maxTokens). Prompt body lives on disk.
+  let aiCfg: AiPromptConfig | null = null;
   try {
-    aiPrompt = await fetchAiPrompt(template.draftType, actorId, tenantId);
-  } catch {
+    aiCfg = await fetchAiPromptConfig(template.draftType, actorId, tenantId);
+  } catch (err) {
     logger.warn(
-      { action: 'advisoryDrafterService.aiPromptFallback', draftType: template.draftType },
-      'fn_ai_prompt_get not available — using rendered template body directly',
+      {
+        action: 'advisoryDrafterService.aiPromptConfigFallback',
+        draftType: template.draftType,
+        errorType: err instanceof Error ? err.name : 'UNKNOWN',
+      },
+      'fn_ai_prompt_get unavailable — using default model config',
     );
   }
+  if (!aiCfg) {
+    aiCfg = {
+      promptId: `advisory_drafter__${template.draftType}`,
+      modelVersion: 'gpt-4o',
+      temperature: 0.2,
+      maxTokens: 2000,
+    };
+  }
 
+  // 6. Load + render system prompt from disk. Missing file → fall back to Mustache-only.
   let generatedTextEn: string;
   let generatedTextAr: string;
   let promptHash: string;
   let responseHash: string;
-  const modelVersion = aiPrompt?.modelVersion ?? 'gpt-4o';
+  const modelVersion = aiCfg.modelVersion;
+  let llmUsed = false;
+  let llmTokensInput = 0;
+  let llmTokensOutput = 0;
+  let llmOutcome: 'success' | 'fallback' = 'fallback';
+  let llmErrorClass: string | null = null;
+  let llmErrorMessage: string | null = null;
+  const llmStartMs = Date.now();
+  try {
+    const promptTemplate = await loadPrompt(aiCfg.promptId);
+    const systemPrompt = renderPrompt(promptTemplate, mustacheCtx);
 
-  if (aiPrompt) {
-    // 6. Render the ai_prompt user template with mustache context
-    const renderedUserPrompt = Mustache.render(aiPrompt.userPromptTemplate, mustacheCtx);
-
-    // 7. Call LLM
-    const llmResult = await callLlm(aiPrompt.systemPrompt, renderedUserPrompt, modelVersion);
+    // 7. Call LLM with the disk-loaded system prompt + the pre-drafted bodies.
+    const llmResult = await callLlm(systemPrompt, renderedBodyEn, renderedBodyAr, aiCfg);
     generatedTextEn = llmResult.textEn;
     generatedTextAr = llmResult.textAr;
     promptHash = llmResult.promptHash;
     responseHash = llmResult.responseHash;
-  } else {
-    // Fallback: use rendered Mustache body directly (no LLM call)
+    llmTokensInput = llmResult.tokensInput;
+    llmTokensOutput = llmResult.tokensOutput;
+    llmUsed = true;
+    llmOutcome = 'success';
+  } catch (err) {
+    llmErrorClass = err instanceof Error ? err.name : 'UNKNOWN';
+    llmErrorMessage = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      {
+        action: 'advisoryDrafterService.llmFallback',
+        promptId: aiCfg.promptId,
+        errorType: llmErrorClass,
+      },
+      'LLM polish unavailable — using Mustache-rendered body directly',
+    );
     generatedTextEn = renderedBodyEn;
     generatedTextAr = renderedBodyAr;
-    promptHash = createHash('sha256').update(renderedBodyEn).digest('hex');
-    responseHash = createHash('sha256').update(generatedTextEn + generatedTextAr).digest('hex');
+    promptHash = createHash('sha256').update(renderedBodyEn + '\n' + renderedBodyAr).digest('hex');
+    responseHash = createHash('sha256').update(generatedTextEn + '\n' + generatedTextAr).digest('hex');
   }
+  const llmLatencyMs = Date.now() - llmStartMs;
+  logger.info(
+    {
+      action: 'advisoryDrafterService.llmPath',
+      promptId: aiCfg.promptId,
+      llmUsed,
+      model: modelVersion,
+      latencyMs: llmLatencyMs,
+    },
+    llmUsed ? 'LLM polish path' : 'Mustache-only path',
+  );
+
+  // 7b. Audit: record ai_request_log via fn_ai_request_log_create (production invariant #6 — no LLM call without audit).
+  //     Best-effort — telemetry-middleware swallows failures so they don't block the user response.
+  void recordAiTelemetry({
+    requestId: randomUUID(),
+    promptId: aiCfg.promptId,
+    mode: 'advisory_drafter',
+    actorUserId: actorId,
+    entityType: 'advisory_draft',
+    entityId: null, // draft id not yet assigned at this point — populated later via UPDATE if needed
+    // Advisory drafts are bilingual (EN+AR) but ai_request_log.language is varchar(8) so 'bilingual' overflows.
+    // Use 'en' as the primary locale tag; the draft itself carries both EN and AR text.
+    language: 'en',
+    provider: 'openai',
+    modelUsed: modelVersion,
+    tokensInput: llmUsed ? llmTokensInput : null,
+    tokensOutput: llmUsed ? llmTokensOutput : null,
+    costUsdMicros: null,
+    latencyMs: llmLatencyMs,
+    cacheHit: false,
+    streamMode: false,
+    outcome: llmOutcome === 'success' ? 'success' : 'error',
+    errorClass: llmErrorClass,
+    errorMessage: llmErrorMessage,
+  });
 
   // 8. Persist via fn_advisory_draft_generate
   //    S2-19: parameter order matches fn_ signature exactly.
