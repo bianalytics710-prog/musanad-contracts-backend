@@ -119,4 +119,13 @@ import notificationDispatchLogRouter from './notification-dispatch-log.routes';
 router.use('/advisory-templates', advisoryTemplatesRouter);
 router.use('/notification-dispatch-log', notificationDispatchLogRouter);
 
+// ============================================================
+// M17+M18 (CR-I + CR-J) — Demo Harness (scenarios, reset, time-freeze,
+// health-check). Mounted AFTER CR-C demo router to cohabit at '/demo';
+// paths are disjoint (/purge, /data-classification-summary vs /scenarios,
+// /reset, /time-freeze, /time-unfreeze, /health-check).
+// ============================================================
+import demoHarnessRouter from './demo-harness.routes';
+router.use('/demo', demoHarnessRouter);
+
 export default router;

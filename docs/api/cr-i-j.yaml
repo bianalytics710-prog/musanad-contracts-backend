@@ -1,0 +1,741 @@
+openapi: 3.0.3
+info:
+  title: Musanad Contracts — Demo Harness API (CR-I + CR-J)
+  description: |
+    9 endpoints added in M17 + M18 (Unit 6 / CR-I + CR-J — Tier 2 Scenarios + Demo Harness).
+    All routes are under `/api/v1/admin/demo/` and require JWT authentication.
+    Access is restricted to `platform_admin` and `Super Admin` roles exclusively.
+
+    ## Security model
+    - JWT required on every request (`Authorization: Bearer <token>`).
+    - All requests must carry `X-Request-ID` header (generated if absent by middleware).
+    - Permission checked at DB-function layer (ERRCODE 42501 → 403).
+    - Sensitive fields: `eventInjectionPayload` and `errorMessage` are redacted from
+      Pino logs and never surface in API error responses.
+
+    ## Demo time-freeze note
+    When the time-freeze GUC `app.demo.time_now` is active, all time-sensitive DB functions
+    (`fn_demo_now()` callers) observe the frozen timestamp. As of M17/M18, newly-created
+    demo-harness functions respect the freeze; the 18-fn legacy refactor is deferred
+    (DEBT-CRIJ-1 — see CR-I-J-handoff.md).
+  version: "1.0.0"
+  contact:
+    name: Musanad Platform — Dexian
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: localhost:3000
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Demo Scenarios
+    description: Scenario listing, detail, and trigger operations
+  - name: Demo Reset
+    description: Cascade-purge and seed-pack reload
+  - name: Demo Time Freeze
+    description: Session-scoped clock manipulation for date-dependent scenario runs
+  - name: Demo Health Check
+    description: Pre-demo subsystem health verification
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    DemoOutcomeBaseline:
+      type: object
+      required: [correlationCount, alertCount, advisoryDraftCount, signalCount]
+      properties:
+        correlationCount:
+          type: integer
+          description: Number of correlation rows produced
+        alertCount:
+          type: integer
+          description: Number of notification dispatch log rows produced
+        advisoryDraftCount:
+          type: integer
+          description: Number of advisory draft rows produced
+        signalCount:
+          type: integer
+          description: Number of osint_signal rows produced or touched
+
+    DemoLastRunSummary:
+      type: object
+      nullable: true
+      properties:
+        triggeredAt:
+          type: string
+          format: date-time
+        success:
+          type: boolean
+        elapsedMs:
+          type: integer
+          nullable: true
+        outcome:
+          $ref: '#/components/schemas/DemoOutcomeBaseline'
+          nullable: true
+
+    DemoScenarioListItem:
+      type: object
+      required: [id, scenarioId, displayNameEn, displayNameAr, tier, seedPackRef, expectedOutcomes, isActive]
+      properties:
+        id:
+          type: integer
+          format: int64
+        scenarioId:
+          type: string
+          enum: [hormuz, ofac_sanctions, brent_review, epc_sla, renewal, cyclone, icv_shortfall, esg_subcontractor]
+        displayNameEn:
+          type: string
+        displayNameAr:
+          type: string
+        description:
+          type: string
+          nullable: true
+        tier:
+          type: integer
+          enum: [1, 2]
+        seedPackRef:
+          type: string
+          description: References demo_seed_pack.pack_id
+        expectedOutcomes:
+          $ref: '#/components/schemas/DemoOutcomeBaseline'
+        isActive:
+          type: boolean
+        lastRun:
+          $ref: '#/components/schemas/DemoLastRunSummary'
+
+    DemoScenario:
+      allOf:
+        - $ref: '#/components/schemas/DemoScenarioListItem'
+        - type: object
+          properties:
+            eventInjectionPayload:
+              type: object
+              additionalProperties: true
+              description: >
+                Contains the seeded event payload (signals, correlations, drafts).
+                Redacted from logs — may contain OFAC/ESG counterparty references.
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+            createdBy:
+              type: integer
+              format: int64
+              nullable: true
+            updatedBy:
+              type: integer
+              format: int64
+              nullable: true
+            recentRuns:
+              type: array
+              items:
+                $ref: '#/components/schemas/DemoScenarioRun'
+
+    DemoScenarioRun:
+      type: object
+      required: [id, tenantId, demoScenarioId, triggeredBy, triggeredAt, success]
+      properties:
+        id:
+          type: integer
+          format: int64
+        tenantId:
+          type: string
+          format: uuid
+        demoScenarioId:
+          type: integer
+          format: int64
+        scenarioId:
+          type: string
+          description: Joined from demo_scenario
+        triggeredBy:
+          type: integer
+          format: int64
+        triggeredByName:
+          type: string
+          nullable: true
+          description: Display name joined from user table
+        triggeredAt:
+          type: string
+          format: date-time
+        outcome:
+          $ref: '#/components/schemas/DemoOutcomeBaseline'
+          nullable: true
+        success:
+          type: boolean
+        elapsedMs:
+          type: integer
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+          description: Redacted from logs; populated only when success=false
+
+    DemoTriggerResult:
+      type: object
+      required: [runId, elapsedMs, success, outcome]
+      properties:
+        runId:
+          type: integer
+          format: int64
+        elapsedMs:
+          type: integer
+        success:
+          type: boolean
+        outcome:
+          $ref: '#/components/schemas/DemoOutcomeBaseline'
+
+    DemoResetResult:
+      type: object
+      required: [elapsedMs, purgeStats, reloadStats, slaWarn]
+      properties:
+        elapsedMs:
+          type: integer
+          description: Total elapsed milliseconds for purge + reload cycle
+        purgeStats:
+          type: object
+          additionalProperties: true
+          description: Per-table deleted row counts from fn_demo_data_purge
+        reloadStats:
+          type: object
+          additionalProperties: true
+          description: Per-dataset inserted row counts from seed reload
+        slaWarn:
+          type: boolean
+          description: True when elapsedMs > 60000; operation still succeeds (HITL CR-J-Q3)
+
+    DemoTimeFreezeResult:
+      type: object
+      required: [frozenAt, actualNow]
+      properties:
+        frozenAt:
+          type: string
+          format: date-time
+          description: Frozen timestamp truncated to minute granularity
+        actualNow:
+          type: string
+          format: date-time
+          description: Real server time at moment of freeze
+
+    DemoTimeUnfreezeResult:
+      type: object
+      required: [unfrozenAt]
+      properties:
+        unfrozenAt:
+          type: string
+          format: date-time
+
+    DemoTimeFreezeCurrentResult:
+      type: object
+      required: [frozenAt, actualNow]
+      properties:
+        frozenAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: null when time is not currently frozen
+        actualNow:
+          type: string
+          format: date-time
+
+    DemoSubsystemHealth:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+          description: Subsystem identifier (db, sources, rules, scoring, advisory, notification, storage, openai, smtp)
+        status:
+          type: string
+          enum: [ok, degraded, down]
+        lastChecked:
+          type: string
+          format: date-time
+          nullable: true
+        remediation:
+          type: string
+          nullable: true
+          description: Human-readable manual remediation hint (auto-remediate deferred — HITL CR-J-Q4)
+
+    DemoHealthCheckResult:
+      type: object
+      required: [subsystems, overallStatus]
+      properties:
+        subsystems:
+          type: array
+          items:
+            $ref: '#/components/schemas/DemoSubsystemHealth'
+        overallStatus:
+          type: string
+          enum: [ok, degraded, down]
+          description: Worst-case rollup across all subsystems
+
+    PaginationMeta:
+      type: object
+      required: [total, page, limit, totalPages]
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
+
+    ResetDemoBody:
+      type: object
+      required: [confirmToken]
+      additionalProperties: false
+      properties:
+        confirmToken:
+          type: string
+          description: >
+            Rolling UUID token issued by the controller on the same request before
+            calling fn_demo_reset. Single-use, session-scoped. FE sends the token
+            displayed in the confirmation dialog (format: RESET_DEMO_<YYYY-MM-DD>).
+
+    TimeFreezeSetBody:
+      type: object
+      required: [targetTimestamp]
+      additionalProperties: false
+      properties:
+        targetTimestamp:
+          type: string
+          format: date-time
+          description: >
+            ISO 8601 datetime. fn_demo_time_freeze_set truncates seconds/microseconds
+            to :00 internally (minute granularity, HITL CR-J-Q1).
+
+    ErrorResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        field:
+          type: string
+          description: Present for 400 validation errors indicating which field failed
+        requestId:
+          type: string
+          description: X-Request-ID echo for correlation
+
+paths:
+  /admin/demo/scenarios:
+    get:
+      tags: [Demo Scenarios]
+      operationId: listDemoScenarios
+      summary: List all demo scenarios with last-run status
+      description: >
+        Returns up to 8 demo_scenario rows for the caller's tenant, each with the
+        last-run-status summary (null if never triggered). Supports optional
+        onlyActive=false to include inactive scenarios.
+        Calls fn_demo_scenario_list via demo-harness.service.ts.
+      parameters:
+        - name: onlyActive
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: true
+          description: When true, returns only is_active=true scenarios
+      responses:
+        '200':
+          description: Scenario list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DemoScenarioListItem'
+        '401':
+          description: Unauthenticated — missing or invalid JWT
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.scenario.trigger or demo.reset permission (ERRCODE 42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/scenarios/runs:
+    get:
+      tags: [Demo Scenarios]
+      operationId: listDemoScenarioRuns
+      summary: Paginated history of scenario trigger events
+      description: >
+        Returns a paginated list of demo_scenario_run rows with optional filters.
+        Rows are ordered by triggered_at DESC.
+        Each row includes triggered-by display name and Hijri+Gregorian timestamps per project convention.
+        Calls fn_demo_scenario_run_list via demo-harness.service.ts.
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: scenarioId
+          in: query
+          schema:
+            type: string
+          description: Filter by scenario business key (e.g. 'cyclone')
+        - name: success
+          in: query
+          schema:
+            type: boolean
+          description: Filter by success flag
+      responses:
+        '200':
+          description: Paginated run history
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, pagination]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DemoScenarioRun'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.scenario.trigger (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/scenarios/{scenarioId}:
+    get:
+      tags: [Demo Scenarios]
+      operationId: getDemoScenario
+      summary: Get demo scenario detail with last 10 runs
+      description: >
+        Returns the full demo_scenario record including event_injection_payload,
+        expected_outcomes, and the last 10 scenario runs.
+        scenarioId is the TEXT business key (e.g. 'cyclone'), not the BIGINT PK.
+        Calls fn_demo_scenario_get_by_id via demo-harness.service.ts (TEXT→BIGINT resolved via list+find in controller).
+      parameters:
+        - name: scenarioId
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [hormuz, ofac_sanctions, brent_review, epc_sla, renewal, cyclone, icv_shortfall, esg_subcontractor]
+          description: Business-key scenario_id — NOT the BIGINT PK
+      responses:
+        '200':
+          description: Scenario detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoScenario'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scenario not found in tenant scope (P0002)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/scenarios/{scenarioId}/trigger:
+    post:
+      tags: [Demo Scenarios]
+      operationId: triggerDemoScenario
+      summary: Trigger a demo scenario
+      description: >
+        Triggers a demo scenario end-to-end: acquires pg_advisory_xact_lock for
+        block-and-queue concurrency (HITL CR-J-Q2), injects events idempotently
+        from event_injection_payload (ON CONFLICT DO NOTHING), drives rule evaluation
+        and score recompute, captures outcome JSONB, and records a demo_scenario_run row.
+
+        **NFR:** End-to-end (event injection + initial rule eval + score recompute +
+        advisory draft) must complete in under 10 seconds (AC-S12-03).
+
+        **Concurrent triggers:** Two simultaneous triggers of the same (tenant, scenario)
+        serialize — the second caller waits, not errors. Deterministic outcomes guaranteed
+        after reset (AC-S16).
+      parameters:
+        - name: scenarioId
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [hormuz, ofac_sanctions, brent_review, epc_sla, renewal, cyclone, icv_shortfall, esg_subcontractor]
+      responses:
+        '200':
+          description: Trigger result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoTriggerResult'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.scenario.trigger (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: scenario_id not found in tenant scope (P0002)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Scenario is inactive (cannot trigger) — or concurrent trigger serialised (caller may retry)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/reset:
+    post:
+      tags: [Demo Reset]
+      operationId: resetDemo
+      summary: Cascade-purge demo data and reload from seed packs
+      description: >
+        Purges all demo data in FK-safe topological order (53-table topology) then
+        reloads from the 8 scenario seed packs. Requires a confirmToken to prevent
+        accidental reset.
+
+        **Token lifecycle (DN-4):** The controller issues a rolling UUID via
+        `set_config('app.demo.reset_token', uuid, false)` on the same DB connection
+        before calling fn_demo_reset. The fn validates the token internally.
+        The FE presents the confirmation token as `RESET_DEMO_<YYYY-MM-DD>` which
+        the Zod schema validates via `.refine()`.
+
+        **SLA:** Operation target < 60 seconds. If exceeded, `slaWarn=true` is set
+        on the response and a `pg_notify('demo.reset.sla_warn')` is emitted for
+        monitoring — the operation still succeeds (HITL CR-J-Q3).
+
+        **statement_timeout:** fn_demo_reset sets `SET LOCAL statement_timeout = '120s'`
+        to handle the 163K demo signal purge on the live DB.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetDemoBody'
+      responses:
+        '200':
+          description: Reset complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoResetResult'
+        '400':
+          description: confirmToken missing or invalid (22023, field confirmToken)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.reset (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Reset already in progress (P0001 demo_reset_in_progress)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/time-freeze:
+    post:
+      tags: [Demo Time Freeze]
+      operationId: setDemoTimeFreeze
+      summary: Freeze demo clock to a specified timestamp
+      description: >
+        Sets the session-scoped GUC `app.demo.time_now` to the supplied timestamp,
+        truncated to minute-level granularity (HITL CR-J-Q1).
+
+        All fn_s that call `fn_demo_now()` will observe the frozen time for this
+        connection session. Audit-stamp `now()` calls (created_at/updated_at) are
+        intentionally NOT affected — they continue using real wall-clock time for
+        forensic integrity.
+
+        **Note (DEBT-CRIJ-1):** As of M17/M18, only newly-created demo-harness fn_s
+        use fn_demo_now(). The 18-fn legacy refactor (dashboards, risk, notifications)
+        is deferred to a follow-up CR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TimeFreezeSetBody'
+      responses:
+        '200':
+          description: Time freeze set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoTimeFreezeResult'
+        '400':
+          description: targetTimestamp missing or not parseable as TIMESTAMPTZ (22023, field targetTimestamp)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.time_freeze.manage (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/time-unfreeze:
+    post:
+      tags: [Demo Time Freeze]
+      operationId: clearDemoTimeFreeze
+      summary: Clear demo clock freeze
+      description: >
+        Clears the `app.demo.time_now` GUC (sets to empty string). Subsequent
+        fn_demo_now() calls return actual server time (coalesce falls back to now()).
+        Emits DEMO_TIME_UNFREEZE audit log entry.
+      responses:
+        '200':
+          description: Time freeze cleared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoTimeUnfreezeResult'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.time_freeze.manage (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/time-freeze/current:
+    get:
+      tags: [Demo Time Freeze]
+      operationId: getDemoTimeFreezeCurrent
+      summary: Get current demo clock state
+      description: >
+        Returns the current frozen time value or null if not frozen.
+        BE-side implementation: SELECT fn_demo_now() vs now(); if they diverge by > 5 seconds,
+        frozenAt is non-null.
+        No dedicated DB fn required — uses fn_demo_now() (DN-5).
+      responses:
+        '200':
+          description: Current time-freeze state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoTimeFreezeCurrentResult'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.time_freeze.manage (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/demo/health-check:
+    get:
+      tags: [Demo Health Check]
+      operationId: getDemoHealthCheck
+      summary: Pre-demo subsystem health check
+      description: >
+        Returns health status for 9 subsystems: db, sources, rules, scoring, advisory,
+        notification (probed DB-side via fn_pre_demo_health_check STABLE CTE), and
+        storage, openai, smtp (probed by BE controller via parallel HTTP probes with
+        3s timeout per probe — merged into the DB result before responding).
+
+        **NFR:** Must complete within 5 seconds end-to-end (AC-S15-03).
+        Parallel CTEs inside fn_pre_demo_health_check satisfy the DB-side NFR.
+        BE controller fans out HTTP probes in parallel (Promise.allSettled).
+
+        Remediation hints are manual-only (HITL CR-J-Q4 — auto-remediate deferred to pilot).
+      responses:
+        '200':
+          description: Health check result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DemoHealthCheckResult'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Caller lacks demo.health_check.read (42501)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
