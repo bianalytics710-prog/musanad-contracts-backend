@@ -91,6 +91,11 @@ import {
   startScoreRecomputeWorker,
   stopScoreRecomputeWorker,
 } from './workers/score-recompute.worker';
+// M16 (CR-H) — Notification Retry worker (node-cron every-minute backoff retry)
+import {
+  startNotificationRetryWorker,
+  stopNotificationRetryWorker,
+} from './workers/notification-retry.worker';
 
 const app = express();
 
@@ -218,6 +223,12 @@ const server = app.listen(port, () => {
   // Daily cron at 00:30 UTC: full recompute via fn_score_recompute_for_weight_change
   //   with SYSTEM_ACTOR_ID=0 sentinel (S2-20).
   void startScoreRecomputeWorker();
+
+  // M16 (CR-H) — Notification Retry worker.
+  // Runs every minute via node-cron. Picks up pending_retry rows from
+  //   notification_dispatch_log where next_retry_at <= now(). No-op in test
+  //   AND requires SMTP_RETRY_WORKER_ENABLED=true (default off in dev).
+  void startNotificationRetryWorker();
 });
 
 // --- Graceful shutdown ---
@@ -243,6 +254,8 @@ const shutdown = async (signal: string): Promise<void> => {
     await stopRuleCacheListener();
     // M14 (CR-F) — stop score recompute worker (PG LISTEN + cron).
     stopScoreRecomputeWorker();
+    // M16 (CR-H) — stop notification retry worker.
+    stopNotificationRetryWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

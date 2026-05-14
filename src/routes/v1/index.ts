@@ -189,4 +189,24 @@ v1Router.use('/procurement', procurementActionsRouter);
 // routers so the literal /:contractId/audit-rights path doesn't conflict.
 v1Router.use('/contracts', auditRightsRouter);
 
+// M16 (CR-H) — Advisory Drafter + Notification Delivery.
+//   POST   /api/v1/advisory-drafts/generate            — LLM + persist (advisory.draft.review)
+//   GET    /api/v1/advisory-drafts                     — list (advisory.draft.review)
+//   GET    /api/v1/advisory-drafts/:id                 — detail (advisory.draft.review)
+//   POST   /api/v1/advisory-drafts/:id/approve         — approve (advisory.draft.review)
+//   POST   /api/v1/advisory-drafts/:id/reject          — reject (advisory.draft.review)
+//   POST   /api/v1/advisory-drafts/:id/modify          — modify text (advisory.draft.review)
+//   POST   /api/v1/advisory-drafts/:id/dispatch        — dispatch (advisory.dispatch)
+//   GET    /api/v1/advisory-drafts/:id/dispatch-log    — dispatch audit (advisory.draft.review|dispatch_log.read)
+//   GET/PATCH /api/v1/users/me/notification-preferences — preferences (notification.preferences.write.self)
+// NOTE: /admin/advisory-templates + /admin/notification-dispatch-log are mounted in admin/index.ts.
+import advisoryDraftsRouter from './advisory-drafts.routes';
+import notificationPreferencesRouter from './users/notification-preferences.routes';
+v1Router.use('/advisory-drafts', advisoryDraftsRouter);
+// Mount /users/me/notification-preferences under /users namespace.
+// The existing userRouter is mounted at '/users' in v1Router above.
+// We mount a separate router for the /me/notification-preferences sub-path
+// so we don't modify the existing user routes.
+v1Router.use('/users', notificationPreferencesRouter);
+
 export default v1Router;

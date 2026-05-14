@@ -984,6 +984,89 @@ const SENSITIVE_PATHS: string[] = [
   'res.body.token',
   '*.token',
   '*.*.token',
+
+  // -- M16 (CR-H) — Advisory Drafter + Notification Delivery sensitive fields --
+  //    Audit trigger redact list extended 43→56 in migration 209.
+  //    Pino paths mirror that extension as defence-in-depth.
+
+  // generatedTextEn / generatedTextAr — LLM-generated advisory text
+  'generatedTextEn',
+  'req.body.generatedTextEn',
+  'req.body.*.generatedTextEn',
+  '*.generatedTextEn',
+  '*.*.generatedTextEn',
+  'generatedTextAr',
+  'req.body.generatedTextAr',
+  'req.body.*.generatedTextAr',
+  '*.generatedTextAr',
+  '*.*.generatedTextAr',
+
+  // finalTextEn / finalTextAr — approved advisory final text
+  'finalTextEn',
+  'req.body.finalTextEn',
+  'req.body.*.finalTextEn',
+  '*.finalTextEn',
+  '*.*.finalTextEn',
+  'finalTextAr',
+  'req.body.finalTextAr',
+  'req.body.*.finalTextAr',
+  '*.finalTextAr',
+  '*.*.finalTextAr',
+
+  // modifiedTextEn / modifiedTextAr — editor-supplied modification
+  'modifiedTextEn',
+  'req.body.modifiedTextEn',
+  'req.body.*.modifiedTextEn',
+  '*.modifiedTextEn',
+  '*.*.modifiedTextEn',
+  'modifiedTextAr',
+  'req.body.modifiedTextAr',
+  'req.body.*.modifiedTextAr',
+  '*.modifiedTextAr',
+  '*.*.modifiedTextAr',
+
+  // templateContext — Mustache context JSONB (may contain clause text, counterparty name)
+  'templateContext',
+  'req.body.templateContext',
+  'req.body.*.templateContext',
+  '*.templateContext',
+  '*.*.templateContext',
+
+  // rejectionReason — free-form rejection rationale (min 10 chars)
+  'rejectionReason',
+  'req.body.rejectionReason',
+  'req.body.*.rejectionReason',
+  '*.rejectionReason',
+  '*.*.rejectionReason',
+
+  // bodyRendered — pre-rendered notification body (may contain advisory text)
+  'bodyRendered',
+  'req.body.bodyRendered',
+  'req.body.*.bodyRendered',
+  '*.bodyRendered',
+  '*.*.bodyRendered',
+  'res.body.bodyRendered',
+  'res.body.data.bodyRendered',
+
+  // dispatchRecipients — array with email addresses + rendered subjects/bodies
+  'dispatchRecipients',
+  'req.body.dispatchRecipients',
+  '*.dispatchRecipients',
+  '*.*.dispatchRecipients',
+
+  // recipientAddress — individual email address in notification_dispatch_log
+  'recipientAddress',
+  'req.body.recipientAddress',
+  '*.recipientAddress',
+  '*.*.recipientAddress',
+  'res.body.recipientAddress',
+
+  // subject — rendered notification email subject line
+  'subject',
+  'req.body.subject',
+  '*.subject',
+  '*.*.subject',
+  'res.body.subject',
 ];
 
 const baseConfig = {

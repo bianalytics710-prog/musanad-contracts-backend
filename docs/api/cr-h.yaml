@@ -1,0 +1,1103 @@
+openapi: 3.0.3
+info:
+  title: Musanad Contracts Hub API — CR-H Advisory Drafter + Notification Delivery
+  description: |
+    CR-H endpoints covering advisory template management, advisory draft lifecycle
+    (generate → review → approve/reject/modify → dispatch), notification dispatch log viewer,
+    and per-user notification preferences.
+  version: CR-H (M16)
+  x-module: M16
+  x-changeRequest: CR-H
+  x-generatedAt: "2026-05-14T00:00:00.000Z"
+
+servers:
+  - url: http://localhost:3001/api/v1
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PaginationMeta:
+      type: object
+      properties:
+        total: { type: integer }
+        page: { type: integer }
+        limit: { type: integer }
+        totalPages: { type: integer }
+
+    ErrorResponse:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            fields:
+              type: array
+              items: { type: string }
+
+    AdvisoryTemplateListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        templateId: { type: string }
+        displayNameEn: { type: string }
+        displayNameAr: { type: string }
+        draftType: { type: string, enum: [fm_invocation, cure_notice, sanctions_hold, price_review, icv_rectification, insurance_renewal, esg_concern, custom] }
+        assignedApproverRole: { type: string }
+        version: { type: integer }
+        dispatchChannels:
+          type: array
+          items: { type: string, enum: [email, teams_capture, slack_capture] }
+        lastModifiedByName: { type: string, nullable: true }
+        isActive: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+
+    AdvisoryTemplate:
+      allOf:
+        - $ref: '#/components/schemas/AdvisoryTemplateListItem'
+        - type: object
+          properties:
+            description: { type: string, nullable: true }
+            bodyTemplateEn: { type: string }
+            bodyTemplateAr: { type: string }
+            parameterSchema: { type: object, additionalProperties: true }
+            dataClassification: { type: string, enum: [demo, pilot, production, sensitive] }
+            createdAt: { type: string, format: date-time }
+            createdBy: { type: integer, nullable: true }
+            updatedBy: { type: integer, nullable: true }
+
+    CreateAdvisoryTemplateDto:
+      type: object
+      required: [templateId, displayNameEn, displayNameAr, draftType, bodyTemplateEn, bodyTemplateAr, assignedApproverRole]
+      additionalProperties: false
+      properties:
+        templateId: { type: string, minLength: 1 }
+        displayNameEn: { type: string, minLength: 1 }
+        displayNameAr: { type: string, minLength: 1 }
+        description: { type: string }
+        draftType: { type: string, enum: [fm_invocation, cure_notice, sanctions_hold, price_review, icv_rectification, insurance_renewal, esg_concern, custom] }
+        bodyTemplateEn: { type: string, minLength: 1 }
+        bodyTemplateAr: { type: string, minLength: 1 }
+        parameterSchema: { type: object, additionalProperties: true }
+        assignedApproverRole: { type: string, minLength: 1 }
+        dispatchChannels:
+          type: array
+          items: { type: string, enum: [email, teams_capture, slack_capture] }
+          minItems: 1
+
+    UpdateAdvisoryTemplateDto:
+      type: object
+      additionalProperties: false
+      description: "Immutable fields: templateId, draftType, tenantId. If any of these are present the request is rejected with 400 immutable_field."
+      properties:
+        displayNameEn: { type: string, minLength: 1 }
+        displayNameAr: { type: string, minLength: 1 }
+        description: { type: string }
+        bodyTemplateEn: { type: string, minLength: 1 }
+        bodyTemplateAr: { type: string, minLength: 1 }
+        parameterSchema: { type: object, additionalProperties: true }
+        assignedApproverRole: { type: string, minLength: 1 }
+        dispatchChannels:
+          type: array
+          items: { type: string, enum: [email, teams_capture, slack_capture] }
+          minItems: 1
+
+    AdvisoryDraftListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        correlationId: { type: integer }
+        contractId: { type: integer }
+        templateId: { type: integer }
+        draftType: { type: string }
+        approvalStatus: { type: string, enum: [unapproved, approved, rejected, modified] }
+        approvedBy: { type: integer, nullable: true }
+        approvedAt: { type: string, format: date-time, nullable: true }
+        dispatchedAt: { type: string, format: date-time, nullable: true }
+        templateVersion: { type: integer }
+        modelVersion: { type: string }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: integer, nullable: true }
+
+    AdvisoryDraft:
+      allOf:
+        - $ref: '#/components/schemas/AdvisoryDraftListItem'
+        - type: object
+          properties:
+            generatedTextEn: { type: string, description: "Redacted in Pino logs" }
+            generatedTextAr: { type: string, description: "Redacted in Pino logs" }
+            finalTextEn: { type: string, nullable: true }
+            finalTextAr: { type: string, nullable: true }
+            rejectionReason: { type: string, nullable: true }
+            templateContext: { type: object, description: "Redacted in Pino logs" }
+            promptHash: { type: string }
+            responseHash: { type: string, nullable: true }
+            dispatchChannel: { type: string, nullable: true }
+            dispatchRecipients: { type: array, items: { type: object } }
+            sourceCorrelation: { type: object, nullable: true, description: "Embedded correlation metadata" }
+            matchedClauses: { type: array, items: { type: object } }
+            matchedSignal: { type: object, nullable: true }
+            riskScoreSummary: { type: object, nullable: true }
+            templateMeta: { type: object, nullable: true }
+
+    GenerateAdvisoryDraftDto:
+      type: object
+      required: [correlationId, templateId]
+      additionalProperties: false
+      properties:
+        correlationId: { type: integer, minimum: 1 }
+        templateId: { type: integer, minimum: 1 }
+        contractId: { type: integer, minimum: 1, description: "Optional — derived from correlation if absent" }
+
+    ApproveAdvisoryDraftDto:
+      type: object
+      additionalProperties: false
+      properties:
+        finalTextEn: { type: string, minLength: 1, description: "Optional — copies generatedTextEn if absent" }
+        finalTextAr: { type: string, minLength: 1, description: "Optional — copies generatedTextAr if absent" }
+
+    RejectAdvisoryDraftDto:
+      type: object
+      required: [rejectionReason]
+      additionalProperties: false
+      properties:
+        rejectionReason: { type: string, minLength: 10 }
+
+    ModifyAdvisoryDraftDto:
+      type: object
+      required: [finalTextEn, finalTextAr]
+      additionalProperties: false
+      properties:
+        finalTextEn: { type: string, minLength: 1 }
+        finalTextAr: { type: string, minLength: 1 }
+
+    DispatchAdvisoryDraftDto:
+      type: object
+      required: [recipients]
+      additionalProperties: false
+      properties:
+        recipients:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [email, name]
+            properties:
+              email: { type: string, format: email }
+              name: { type: string, minLength: 1 }
+              userId: { type: integer, minimum: 1 }
+
+    AdvisoryDispatchResult:
+      type: object
+      properties:
+        draftId: { type: integer }
+        dispatchedAt: { type: string, format: date-time }
+        channels: { type: array, items: { type: string } }
+        advisoryDispatchLogIds: { type: array, items: { type: integer } }
+        notificationDispatchLogIds: { type: array, items: { type: integer } }
+
+    AdvisoryDispatchLogItem:
+      type: object
+      properties:
+        id: { type: integer }
+        advisoryDraftId: { type: integer }
+        channel: { type: string, enum: [email, teams_capture, slack_capture] }
+        recipientAddress: { type: string, nullable: true, description: "Redacted in Pino logs" }
+        status: { type: string, enum: [sent, failed, captured_only, pending_retry, final_failed] }
+        deliveryAttemptedAt: { type: string, format: date-time }
+        deliveryCompletedAt: { type: string, format: date-time, nullable: true }
+        errorMessage: { type: string, nullable: true }
+        retryCount: { type: integer }
+
+    NotificationDispatchLogListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        notificationTemplateId: { type: integer, nullable: true }
+        notificationKind: { type: string, enum: [alert, advisory, approval_request, signature_request, system, risk_case, report] }
+        priority: { type: string, enum: [low, medium, high, critical] }
+        channel: { type: string, enum: [email, in_app, teams_capture, slack_capture] }
+        recipientUserId: { type: integer, nullable: true }
+        recipientAddress: { type: string, nullable: true }
+        subject: { type: string, nullable: true }
+        bodyRendered: { type: string, description: "Truncated to 500 chars in list view; Redacted in Pino logs" }
+        status: { type: string, enum: [sent, failed, captured_only, pending_retry, final_failed, suppressed_by_preference] }
+        deliveryAttemptedAt: { type: string, format: date-time }
+        deliveryCompletedAt: { type: string, format: date-time, nullable: true }
+        errorMessage: { type: string, nullable: true }
+        retryCount: { type: integer }
+        advisoryDraftId: { type: integer, nullable: true }
+
+    NotificationDispatchLog:
+      allOf:
+        - $ref: '#/components/schemas/NotificationDispatchLogListItem'
+        - type: object
+          properties:
+            contextPayload: { type: object, description: "Full Mustache context used to render. Redacted in Pino logs." }
+            linkedAdvisoryDraft: { type: object, nullable: true }
+            linkedContract: { type: object, nullable: true }
+            linkedCorrelation: { type: object, nullable: true }
+
+    NotificationSubscriptionCell:
+      type: object
+      properties:
+        id: { type: integer, nullable: true, description: "null for synthesised defaults (isExplicit=false)" }
+        notificationKind: { type: string, enum: [alert, advisory, approval_request, signature_request, system, risk_case, report] }
+        channel: { type: string, enum: [email, in_app, teams_capture, slack_capture] }
+        priorityMin: { type: string, enum: [low, medium, high, critical] }
+        enabled: { type: boolean }
+        isExplicit: { type: boolean, description: "false for synthesised defaults (no DB row exists)" }
+
+    NotificationSubscription:
+      type: object
+      properties:
+        id: { type: integer }
+        tenantId: { type: string, format: uuid }
+        userId: { type: integer }
+        notificationKind: { type: string }
+        channel: { type: string }
+        priorityMin: { type: string }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SetNotificationPreferenceDto:
+      type: object
+      required: [notificationKind, channel]
+      additionalProperties: false
+      properties:
+        notificationKind: { type: string, enum: [alert, advisory, approval_request, signature_request, system, risk_case, report] }
+        channel: { type: string, enum: [email, in_app, teams_capture, slack_capture] }
+        priorityMin: { type: string, enum: [low, medium, high, critical] }
+        enabled: { type: boolean }
+
+security:
+  - BearerAuth: []
+
+paths:
+
+  # ─── Tag: Admin: Advisory Templates ────────────────────────────────────────
+
+  /admin/advisory-templates:
+    get:
+      tags: [Admin: Advisory Templates]
+      operationId: listAdvisoryTemplates
+      summary: List advisory templates
+      description: "Paginated list of advisory templates for the current tenant. Filters: draft_type, is_active, free-text search. Required permission: advisory.template.manage."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.template.manage
+      x-db-function: fn_advisory_template_list
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: draftType
+          in: query
+          schema: { type: string, enum: [fm_invocation, cure_notice, sanctions_hold, price_review, icv_rectification, insurance_renewal, esg_concern, custom] }
+        - name: isActive
+          in: query
+          schema: { type: boolean, default: true }
+        - name: search
+          in: query
+          description: Partial case-insensitive match against displayNameEn or displayNameAr
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated list of advisory templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdvisoryTemplateListItem' }
+                  pagination: { $ref: '#/components/schemas/PaginationMeta' }
+        '401':
+          description: Missing or invalid JWT
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller lacks advisory.template.manage
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    post:
+      tags: [Admin: Advisory Templates]
+      operationId: createAdvisoryTemplate
+      summary: Create advisory template
+      description: "Creates a new advisory template. EN + AR body templates required. Validates draft_type enum, assigned_approver_role existence, dispatch_channels array. Required permission: advisory.template.manage."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.template.manage
+      x-db-function: fn_advisory_template_create
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAdvisoryTemplateDto' }
+      responses:
+        '201':
+          description: Advisory template created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdvisoryTemplate' }
+        '400':
+          description: "Validation error — missing required fields, invalid enum values, or extra fields (.strict())"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+              example:
+                success: false
+                error: { code: duplicate_template_id, message: "template_id already exists for this tenant", field: templateId }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: "template_id already exists for this tenant"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/advisory-templates/{id}:
+    get:
+      tags: [Admin: Advisory Templates]
+      operationId: getAdvisoryTemplateById
+      summary: Get advisory template by ID
+      description: "Full detail including body templates and parameter schema. Required permission: advisory.template.manage."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.template.manage
+      x-db-function: fn_advisory_template_get_by_id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: advisory_template.id (BIGINT)
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Advisory template detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdvisoryTemplate' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: No template with this id in current tenant
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    patch:
+      tags: [Admin: Advisory Templates]
+      operationId: updateAdvisoryTemplate
+      summary: Update advisory template
+      description: "Partial update. Body or parameterSchema change increments version. Fields templateId, draftType, tenantId are immutable — rejected with 400 if supplied. Required permission: advisory.template.manage."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.template.manage
+      x-db-function: fn_advisory_template_update
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateAdvisoryTemplateDto' }
+      responses:
+        '200':
+          description: Updated advisory template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdvisoryTemplate' }
+        '400':
+          description: "immutable_field: templateId, draftType, or tenantId present in request body"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    delete:
+      tags: [Admin: Advisory Templates]
+      operationId: deleteAdvisoryTemplate
+      summary: Delete advisory template (soft)
+      description: "Soft-deletes advisory template (is_active=false). Rejected with 422 if any active advisory_draft references the template. Required permission: advisory.template.manage."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.template.manage
+      x-db-function: fn_advisory_template_delete
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '204':
+          description: Template soft-deleted (no body)
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Template in use by active advisory drafts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: string, example: template_in_use }
+                  count: { type: integer }
+                  message: { type: string }
+
+  # ─── Tag: Advisory ──────────────────────────────────────────────────────────
+
+  /advisory-drafts/generate:
+    post:
+      tags: [Advisory]
+      operationId: generateAdvisoryDraft
+      summary: Generate advisory draft
+      description: |
+        BE service builds LLM context from correlation/clauses/risk-score, calls AIProvider (gpt-4o),
+        renders Mustache template, calls fn_advisory_draft_generate to persist draft + ai_request_log
+        in a single DB transaction. Returns created draft summary. Required permission: advisory.draft.review.
+        Note: generatedTextEn/Ar are present in response body but redacted from Pino logs.
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_generate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GenerateAdvisoryDraftDto' }
+      responses:
+        '201':
+          description: Advisory draft created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  draftId: { type: integer }
+                  correlationId: { type: integer }
+                  templateId: { type: integer }
+                  contractId: { type: integer }
+                  templateVersion: { type: integer }
+                  approvalStatus: { type: string, example: unapproved }
+                  generatedTextEn: { type: string }
+                  generatedTextAr: { type: string }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: correlationId, templateId, or resolved contractId not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Template inactive or contract/correlation mismatch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts:
+    get:
+      tags: [Advisory]
+      operationId: listAdvisoryDrafts
+      summary: List advisory drafts
+      description: "Paginated list of advisory drafts with optional filters. myQueue=true returns drafts pending actor's approval (SOD-filtered). Required permission: advisory.draft.review."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_list
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: approvalStatus
+          in: query
+          schema: { type: string, enum: [unapproved, approved, rejected, modified] }
+        - name: contractId
+          in: query
+          schema: { type: integer }
+        - name: correlationId
+          in: query
+          schema: { type: integer }
+        - name: draftType
+          in: query
+          schema: { type: string }
+        - name: myQueue
+          in: query
+          description: "When true: returns drafts where actor.role = template.assigned_approver_role AND approval_status='unapproved' AND created_by != actor.id"
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Paginated list of advisory drafts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdvisoryDraftListItem' }
+                  pagination: { $ref: '#/components/schemas/PaginationMeta' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}:
+    get:
+      tags: [Advisory]
+      operationId: getAdvisoryDraftById
+      summary: Get advisory draft by ID
+      description: "Full advisory draft with embedded source lineage: sourceCorrelation, matchedClauses[], matchedSignal, riskScoreSummary, templateMeta. Sensitive text fields (generatedTextEn/Ar, finalTextEn/Ar, templateContext) present in response but redacted from Pino logs. Required permission: advisory.draft.review."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_get_by_id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Advisory draft detail with embedded lineage
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdvisoryDraft' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found (not-found or RLS-filtered)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}/approve:
+    post:
+      tags: [Advisory]
+      operationId: approveAdvisoryDraft
+      summary: Approve advisory draft
+      description: |
+        Approves advisory draft. Enforces separation-of-duties (cannot approve own draft) and
+        role match (actor.role = template.assigned_approver_role). Optional finalTextEn/Ar —
+        copies generatedText verbatim if absent. Emits audit_log row via fn_audit_log_record_v2.
+        Required permission: advisory.draft.review.
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_approve
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApproveAdvisoryDraftDto' }
+      responses:
+        '200':
+          description: Draft approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  approvalStatus: { type: string, example: approved }
+                  approvedAt: { type: string, format: date-time }
+                  approvedByName: { type: string }
+                  finalTextEn: { type: string }
+                  finalTextAr: { type: string }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: "Forbidden — permission_denied, self_approval_denied (SOD), or role_mismatch"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Draft already approved or rejected (invalid_status_transition)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}/reject:
+    post:
+      tags: [Advisory]
+      operationId: rejectAdvisoryDraft
+      summary: Reject advisory draft
+      description: "Rejects advisory draft with mandatory rejectionReason (≥10 chars). Separation-of-duties enforced. Emits audit_log row. Required permission: advisory.draft.review."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_reject
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RejectAdvisoryDraftDto' }
+      responses:
+        '200':
+          description: Draft rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  approvalStatus: { type: string, example: rejected }
+                  approvedAt: { type: string, format: date-time }
+                  approvedByName: { type: string }
+                  rejectionReason: { type: string }
+        '400':
+          description: rejectionReason absent or shorter than 10 characters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden — permission_denied, self_approval_denied, or role_mismatch
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Invalid status transition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}/modify:
+    post:
+      tags: [Advisory]
+      operationId: modifyAdvisoryDraft
+      summary: Modify advisory draft text
+      description: "Edits draft text (both EN + AR required for parity). Sets approval_status='modified'. Approval still required afterward. Cannot modify an already-approved or rejected draft. Required permission: advisory.draft.review."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.draft.review
+      x-db-function: fn_advisory_draft_modify
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModifyAdvisoryDraftDto' }
+      responses:
+        '200':
+          description: Draft modified
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer }
+                  approvalStatus: { type: string, example: modified }
+                  finalTextEn: { type: string }
+                  finalTextAr: { type: string }
+        '400':
+          description: finalTextEn or finalTextAr absent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Cannot modify approved or rejected draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}/dispatch:
+    post:
+      tags: [Advisory]
+      operationId: dispatchAdvisoryDraft
+      summary: Dispatch approved advisory
+      description: |
+        Dispatches an approved advisory to all channels configured on the template.
+        BE service handles SMTP via nodemailer (email channel); Teams and Slack are
+        capture-mode only (payload stored in advisory_dispatch_log + notification_dispatch_log).
+        Idempotent — rejected with 409 if already dispatched.
+        Required permission: advisory.dispatch.
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: advisory.dispatch
+      x-db-function: fn_advisory_dispatch
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DispatchAdvisoryDraftDto' }
+      responses:
+        '200':
+          description: Advisory dispatched
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdvisoryDispatchResult' }
+        '400':
+          description: recipients array is empty or absent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Advisory already dispatched
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Draft not approved — approval_status must be 'approved'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /advisory-drafts/{id}/dispatch-log:
+    get:
+      tags: [Advisory]
+      operationId: getAdvisoryDispatchLog
+      summary: Get advisory dispatch log
+      description: "Returns all advisory_dispatch_log rows for the given advisory draft. Per-channel audit visible to advisory.draft.review or notification.dispatch_log.read holders."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin, legal_counsel]
+      x-required-permission: "advisory.draft.review OR notification.dispatch_log.read"
+      x-db-function: fn_advisory_dispatch_log_list
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: advisory_draft.id
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Advisory dispatch log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdvisoryDispatchLogItem' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ─── Tag: Admin: Notifications ─────────────────────────────────────────────
+
+  /admin/notification-dispatch-log:
+    get:
+      tags: [Admin: Notifications]
+      operationId: listNotificationDispatchLog
+      summary: List notification dispatch log
+      description: "Paginated universal notification dispatch log. bodyRendered truncated to 500 chars. Required permission: notification.dispatch_log.read."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin]
+      x-required-permission: notification.dispatch_log.read
+      x-db-function: fn_notification_dispatch_log_list
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+        - name: channel
+          in: query
+          schema: { type: string, enum: [email, in_app, teams_capture, slack_capture] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [sent, failed, captured_only, pending_retry, final_failed, suppressed_by_preference] }
+        - name: notificationKind
+          in: query
+          schema: { type: string, enum: [alert, advisory, approval_request, signature_request, system, risk_case, report] }
+        - name: priority
+          in: query
+          schema: { type: string, enum: [low, medium, high, critical] }
+        - name: recipientUserId
+          in: query
+          schema: { type: integer }
+        - name: from
+          in: query
+          description: "ISO 8601 UTC — delivery_attempted_at >= from"
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: "ISO 8601 UTC — delivery_attempted_at <= to"
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: Paginated notification dispatch log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/NotificationDispatchLogListItem' }
+                  pagination: { $ref: '#/components/schemas/PaginationMeta' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Caller lacks notification.dispatch_log.read
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/notification-dispatch-log/{id}:
+    get:
+      tags: [Admin: Notifications]
+      operationId: getNotificationDispatchLogById
+      summary: Get notification dispatch log entry
+      description: "Full notification dispatch log row including untruncated body_rendered + full context_payload + channel-specific payload for Teams/Slack capture-mode demo. Required permission: notification.dispatch_log.read (or self — recipient_user_id = actor)."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [Super Admin, platform_admin]
+      x-required-permission: "notification.dispatch_log.read OR self (recipient_user_id = actor)"
+      x-db-function: fn_notification_dispatch_log_get_by_id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Full notification dispatch log entry with linked metadata
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationDispatchLog' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Row not found or actor lacks visibility
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ─── Tag: User: Preferences ────────────────────────────────────────────────
+
+  /users/me/notification-preferences:
+    get:
+      tags: [User: Preferences]
+      operationId: getNotificationPreferences
+      summary: Get my notification preferences
+      description: "Returns the current user's notification subscription grid (28 cells: 7 kinds × 4 channels). Cells with no explicit DB row are synthesised as enabled=true, priorityMin='high' (isExplicit=false). Available to all authenticated users."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [ALL_AUTHENTICATED]
+      x-required-permission: "notification.preferences.write.self (read implied)"
+      x-db-function: fn_notification_subscription_list
+      responses:
+        '200':
+          description: Notification preference grid — 28 rows always returned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/NotificationSubscriptionCell' }
+                    description: "Always 28 rows (7 kinds × 4 channels)"
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    patch:
+      tags: [User: Preferences]
+      operationId: setNotificationPreference
+      summary: Set notification preference
+      description: "Upserts a single notification_subscription row for the current user. user_id is hard-set to actor_id by fn_ — user cannot set preferences for other users. Available to all authenticated users."
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: [ALL_AUTHENTICATED]
+      x-required-permission: notification.preferences.write.self
+      x-db-function: fn_notification_subscription_set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetNotificationPreferenceDto' }
+      responses:
+        '200':
+          description: Upserted notification subscription row
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationSubscription' }
+        '400':
+          description: Invalid notificationKind, channel, or priorityMin enum value
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }

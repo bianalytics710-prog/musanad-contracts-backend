@@ -108,4 +108,15 @@ router.use('/rules', adminRulesRouter);
 import scoringWeightsRouter from './scoring-weights.routes';
 router.use('/scoring-weights', scoringWeightsRouter);
 
+// ============================================================
+// M16 (CR-H) — Advisory Drafter + Notification Delivery.
+// GET/POST/PATCH/DELETE /admin/advisory-templates   (advisory.template.manage)
+// GET /admin/notification-dispatch-log              (notification.dispatch_log.read)
+// GET /admin/notification-dispatch-log/:id          (notification.dispatch_log.read)
+// ============================================================
+import advisoryTemplatesRouter from './advisory-templates.routes';
+import notificationDispatchLogRouter from './notification-dispatch-log.routes';
+router.use('/advisory-templates', advisoryTemplatesRouter);
+router.use('/notification-dispatch-log', notificationDispatchLogRouter);
+
 export default router;
