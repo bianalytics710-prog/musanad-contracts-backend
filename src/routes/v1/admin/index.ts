@@ -128,4 +128,18 @@ router.use('/notification-dispatch-log', notificationDispatchLogRouter);
 import demoHarnessRouter from './demo-harness.routes';
 router.use('/demo', demoHarnessRouter);
 
+// ============================================================
+// M20 (CR-L) — Admin Reports surface.
+//   GET    /admin/reports/runs/pending              (internal worker)
+//   POST   /admin/reports/runs/:id/complete         (internal worker)
+//   GET/POST /admin/reports/data/:slug              (internal worker — 24 data fns)
+//   GET    /admin/reports/templates                 (report.template.manage)
+//   GET    /admin/reports/templates/:id             (report.template.manage)
+//   POST   /admin/reports/templates                 (report.template.manage)
+//   PUT    /admin/reports/templates/:id             (report.template.manage)
+//   DELETE /admin/reports/templates/:id             (report.template.manage)
+// ============================================================
+import adminReportsRouter from './reports.routes';
+router.use('/reports', adminReportsRouter);
+
 export default router;

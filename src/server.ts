@@ -96,6 +96,26 @@ import {
   startNotificationRetryWorker,
   stopNotificationRetryWorker,
 } from './workers/notification-retry.worker';
+// M19 (CR-K) — Risk Case Escalation worker (node-cron every-5-min)
+import {
+  startRiskCaseEscalationWorker,
+  stopRiskCaseEscalationWorker,
+} from './workers/risk-case-escalation.worker';
+// M19 (CR-K) — Risk Case Auto-Create worker (PG LISTEN correlation_inserted)
+import {
+  startRiskCaseAutoCreateWorker,
+  stopRiskCaseAutoCreateWorker,
+} from './workers/risk-case-auto-create.worker';
+// M20 (CR-L) — Report Run worker (node-cron every 10s)
+import {
+  startReportRunWorker,
+  stopReportRunWorker,
+} from './workers/report-run.worker';
+// M20 (CR-L) — Report Scheduler service (refreshes scheduled-template cron tasks)
+import {
+  startReportScheduler,
+  stopReportScheduler,
+} from './services/report-scheduler.service';
 
 const app = express();
 
@@ -229,6 +249,32 @@ const server = app.listen(port, () => {
   //   notification_dispatch_log where next_retry_at <= now(). No-op in test
   //   AND requires SMTP_RETRY_WORKER_ENABLED=true (default off in dev).
   void startNotificationRetryWorker();
+
+  // M19 (CR-K) — Risk Case Escalation worker.
+  // Runs every 5 min via node-cron. fn_risk_case_escalation_check enumerates
+  //   cross-tenant; worker sets per-row tenant GUC before fn_risk_case_escalate.
+  // No-op in test AND requires RISK_CASE_ESCALATION_WORKER_ENABLED=true.
+  startRiskCaseEscalationWorker();
+
+  // M19 (CR-K) — Risk Case Auto-Create worker.
+  // PG LISTEN 'correlation_inserted' (shared channel from CR-F mig 172).
+  // Calls fn_risk_case_auto_create_from_correlation for each new correlation;
+  // fn is DEFINER + idempotent on dedupe_key. No-op in test AND requires
+  // RISK_CASE_AUTO_CREATE_WORKER_ENABLED=true (default off in dev).
+  void startRiskCaseAutoCreateWorker();
+
+  // M20 (CR-L) — Report Run worker.
+  // Runs every 10s via node-cron. fn_report_run_pending_get picks up to 5
+  // pending rows; renders PDF/XLSX via report-renderer; uploads to Supabase;
+  // calls fn_report_run_complete. No-op in test AND requires
+  // REPORT_RUN_WORKER_ENABLED=true (default off in dev).
+  startReportRunWorker();
+
+  // M20 (CR-L) — Report Scheduler.
+  // Refreshes node-cron tasks for is_scheduled templates every 5 min.
+  // Each scheduled task enqueues a report_run with triggered_by='scheduled'.
+  // No-op in test AND requires REPORT_SCHEDULER_ENABLED=true.
+  startReportScheduler();
 });
 
 // --- Graceful shutdown ---
@@ -256,6 +302,12 @@ const shutdown = async (signal: string): Promise<void> => {
     stopScoreRecomputeWorker();
     // M16 (CR-H) — stop notification retry worker.
     stopNotificationRetryWorker();
+    // M19 (CR-K) — stop risk case escalation + auto-create workers.
+    stopRiskCaseEscalationWorker();
+    stopRiskCaseAutoCreateWorker();
+    // M20 (CR-L) — stop report run worker + scheduler.
+    stopReportRunWorker();
+    stopReportScheduler();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));

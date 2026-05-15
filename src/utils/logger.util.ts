@@ -1067,6 +1067,76 @@ const SENSITIVE_PATHS: string[] = [
   '*.subject',
   '*.*.subject',
   'res.body.subject',
+
+  // ============================================================
+  // -- M19 (CR-K) + M20 (CR-L) — Unit 7 sensitive fields --
+  //    Mirrors fn_audit_trigger redact extension in mig 251
+  //    (+4 net-new DB-level: body, file_uri, parameters, output_uri).
+  //    parameters is already redacted above (M12).
+  //    body and file_uri / output_uri are net-new here.
+  // ============================================================
+
+  // body — risk_case.body free-text narrative (M19). Sensitive — never log.
+  // Sub-path scoping: don't redact the top-level Express `req.body` payload
+  // wrapper itself (would blanket-redact every controller's req.body log);
+  // only redact when `body` appears as a nested key.
+  'req.body.body',
+  '*.body',
+  '*.*.body',
+  'res.body.body',
+
+  // fileUri / file_uri — risk_case_attachment.file_uri (Supabase Storage path)
+  'fileUri',
+  'req.body.fileUri',
+  'req.body.*.fileUri',
+  '*.fileUri',
+  '*.*.fileUri',
+  'res.body.fileUri',
+  'file_uri',
+  'req.body.file_uri',
+  'req.body.*.file_uri',
+  '*.file_uri',
+  '*.*.file_uri',
+  'res.body.file_uri',
+
+  // outputUri / output_uri — report_run.output_uri (Supabase Storage path)
+  'outputUri',
+  'req.body.outputUri',
+  'req.body.*.outputUri',
+  '*.outputUri',
+  '*.*.outputUri',
+  'res.body.outputUri',
+  'output_uri',
+  'req.body.output_uri',
+  'req.body.*.output_uri',
+  '*.output_uri',
+  '*.*.output_uri',
+  'res.body.output_uri',
+
+  // errorMessage / error_message — report_run.error_message + every fn_'s
+  // OTHERS-handler SQLSTATE re-raise. Already redacted by audit trigger in
+  // CR-H mig 041; mirror at the Pino layer.
+  'errorMessage',
+  'req.body.errorMessage',
+  '*.errorMessage',
+  '*.*.errorMessage',
+  'res.body.errorMessage',
+
+  // justification — fn_risk_case_accept_risk free-form min-10-char rationale
+  'justification',
+  'req.body.justification',
+  '*.justification',
+  '*.*.justification',
+
+  // decisionNote / closureNote — narrative fields on transition + close fns
+  'decisionNote',
+  'req.body.decisionNote',
+  '*.decisionNote',
+  '*.*.decisionNote',
+  'closureNote',
+  'req.body.closureNote',
+  '*.closureNote',
+  '*.*.closureNote',
 ];
 
 const baseConfig = {

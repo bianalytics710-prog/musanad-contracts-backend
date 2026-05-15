@@ -1,0 +1,1279 @@
+openapi: 3.0.3
+info:
+  title: Musanad Contracts — Risk Cases + Reports & Briefings API (CR-K + CR-L)
+  description: |
+    48 endpoints added in M19 + M20 (Unit 7 / CR-K + CR-L — Risk Cases + Reports & Briefings).
+    FINAL unit of v1.2 scope.
+
+    Two surfaces:
+
+    1. **Risk Cases (CR-K)** — `/api/v1/risk-cases/*` — 14 endpoints. Unified
+       risk-case primitive (alerts + workflow tasks + evidence + escalation
+       lifecycle). 8-state machine: `open → in_review → approved | rejected |
+       escalated | accept_risk | snoozed → closed`. Strict per-case-type
+       permission gates; visibility via `system_setting.risk_case_visibility_map`.
+
+    2. **Reports & Briefings (CR-L)** — `/api/v1/reports/*` + `/api/v1/admin/reports/*` —
+       34 endpoints. Template library + asynchronous run worker + 24 data fns
+       across 7 personas (executive / legal / procurement / operations /
+       finance / compliance / admin). Outputs rendered via React → HTML →
+       Puppeteer (PDF) or ExcelJS (XLSX); delivered through signed URLs
+       (TTL 60s).
+
+    ## Security model
+    - JWT required on every endpoint (`Authorization: Bearer <token>`).
+    - All requests carry `X-Request-ID` (correlation header).
+    - DB-layer permission gating via `fn_current_user_has_permission(TEXT)`;
+      `42501` SQLSTATE → 403 at controller.
+    - 8 net-new permissions (4 CR-K + 4 CR-L) backfilled across 11 roles.
+    - **Self-approval guard** on `acceptRisk` enforced both at FE
+      (AcceptRiskDialog) and BE (`risk-case.controller.ts:682`) — defense in
+      depth.
+    - 6 net-new sensitive fields (`body`, `file_uri`, `output_uri`,
+      `parameters`, `error_message`, `justification`, `decisionNote`,
+      `closureNote`) redacted at three layers: Pino logger, `fn_audit_trigger`
+      redact list (mig 251 — baseline 55 → 58), and API error responses.
+
+    ## Signed-URL minting
+    Two endpoints mint signed download URLs at the controller layer (never
+    echo the raw `file_uri` / `output_uri`):
+    - `GET /risk-cases/:id/evidence/:attachmentId` (TTL 60s)
+    - `GET /reports/runs/:id` (TTL 60s, only when `status='complete'`)
+
+    ## Asynchronous run lifecycle
+    `POST /reports/templates/:id/run` returns `202 Accepted` + `runId`. Client
+    polls `GET /reports/runs/:id` until `status='complete'` or `'failed'`.
+    Worker pickup is internal — `fn_report_run_pending_get` uses CTE + FOR
+    UPDATE SKIP LOCKED (S2-24) and atomically flips `pending → generating`
+    with audit-log emission inside the same CTE (S2-8).
+
+    ## Internal-only worker endpoints
+    Six endpoints are gated by `requireInternalActor` middleware (worker
+    service account only) — they are documented here for contract
+    completeness:
+    - `POST /risk-cases/auto-create-from-correlation`
+    - `GET  /risk-cases/escalation-check`
+    - `GET  /admin/reports/runs/pending`
+    - `POST /admin/reports/runs/:id/complete`
+    - `GET  /admin/reports/data/:slug` (24 distinct data fns via single
+      path-param-dispatcher route)
+
+    ## Time-freeze integration (CR-J carry-forward)
+    Every Unit-7 fn uses `fn_demo_now()` for business-logic time references
+    (due_at, snoozed_until, slaCountdownSeconds, last_run_at, generatedAt,
+    report-run started_at + completed_at, 24 data-fn date-range defaults).
+    Audit/forensic timestamps (`risk_case_event.occurred_at`,
+    `risk_case_attachment.uploaded_at`, `report_run.created_at`,
+    `audit_log.changed_at`) intentionally use `CURRENT_TIMESTAMP` —
+    wall-clock forensic integrity.
+
+    ## HITL decisions locked
+    9 decisions auto-resolved at HITL Gate 2 — see `M19-M20-handoff.md`
+    §"HITL Decisions" for the full Q&A table.
+  version: "1.0.0"
+  contact:
+    name: Musanad Platform — Dexian
+  license:
+    name: Proprietary
+
+servers:
+  - url: https://{host}/api/v1
+    variables:
+      host:
+        default: localhost:3000
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Risk Cases
+    description: Risk case lifecycle — create, list, detail, transitions, escalation, accept-risk, snooze, close, evidence, comments
+  - name: Risk Cases (Internal)
+    description: Worker-only endpoints — auto-create-from-correlation, escalation-check
+  - name: Reports — User
+    description: Template library + run trigger + run poll (any authenticated persona)
+  - name: Reports — Admin
+    description: Template CRUD + worker pickup/complete + 24 data-fn dispatcher (platform_admin / Super Admin only)
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+        totalPages: { type: integer, minimum: 0 }
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success: { type: boolean, enum: [false] }
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: { type: object, additionalProperties: true }
+        requestId: { type: string, format: uuid }
+
+    # --- Risk Case shared shapes ----------------------------------
+
+    RiskCasePriority:
+      type: string
+      enum: [low, medium, high, critical]
+
+    RiskCaseStatus:
+      type: string
+      enum: [open, in_review, approved, rejected, escalated, accept_risk, snoozed, closed]
+
+    RiskCaseType:
+      type: string
+      enum: [correlation_alert, obligation_due, sla_breach, system, manual]
+
+    ClosureOutcome:
+      type: string
+      enum: [mitigated, accepted, no_action, advisory_dispatched]
+
+    RiskCaseListItem:
+      type: object
+      required: [id, caseType, priority, title, status, slaCountdownSeconds]
+      properties:
+        id: { type: integer, format: int64 }
+        caseType: { $ref: '#/components/schemas/RiskCaseType' }
+        priority: { $ref: '#/components/schemas/RiskCasePriority' }
+        title: { type: string }
+        status: { $ref: '#/components/schemas/RiskCaseStatus' }
+        contractId: { type: integer, format: int64, nullable: true }
+        contractTitle: { type: string, nullable: true }
+        assignedRole: { type: string, nullable: true }
+        assignedUserId: { type: integer, format: int64, nullable: true }
+        assignedUserName: { type: string, nullable: true }
+        dueAt: { type: string, format: date-time, nullable: true }
+        snoozedUntil: { type: string, format: date-time, nullable: true }
+        slaCountdownSeconds: { type: integer, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    RiskCaseEvent:
+      type: object
+      required: [id, eventType, occurredAt]
+      properties:
+        id: { type: integer, format: int64 }
+        eventType:
+          type: string
+          enum: [created, assigned, status_changed, comment_added, evidence_uploaded, escalated, accepted_risk, snoozed, closed, reopened]
+        actorId: { type: integer, format: int64, nullable: true }
+        actorName: { type: string, nullable: true }
+        payload: { type: object, additionalProperties: true }
+        occurredAt: { type: string, format: date-time }
+
+    RiskCaseAttachment:
+      type: object
+      required: [id, fileName, fileMime, fileBytes, uploadedAt]
+      properties:
+        id: { type: integer, format: int64 }
+        fileName: { type: string }
+        fileMime: { type: string }
+        fileBytes: { type: integer, format: int64 }
+        uploadedBy: { type: integer, format: int64 }
+        uploadedByName: { type: string, nullable: true }
+        uploadedAt: { type: string, format: date-time }
+
+    RiskCaseDetail:
+      allOf:
+        - $ref: '#/components/schemas/RiskCaseListItem'
+        - type: object
+          properties:
+            body: { type: string, nullable: true }
+            slaHours: { type: integer, nullable: true }
+            closedAt: { type: string, format: date-time, nullable: true }
+            closedBy: { type: integer, format: int64, nullable: true }
+            closureOutcome:
+              oneOf:
+                - $ref: '#/components/schemas/ClosureOutcome'
+                - type: 'null'
+            metadata: { type: object, additionalProperties: true }
+            timeline:
+              type: array
+              items: { $ref: '#/components/schemas/RiskCaseEvent' }
+            attachments:
+              type: array
+              items: { $ref: '#/components/schemas/RiskCaseAttachment' }
+            linkedCorrelation:
+              type: object
+              nullable: true
+              additionalProperties: true
+            linkedContract:
+              type: object
+              nullable: true
+              additionalProperties: true
+            linkedAdvisoryDrafts:
+              type: array
+              items: { type: object, additionalProperties: true }
+
+    # --- Report shared shapes -------------------------------------
+
+    ReportKind:
+      type: string
+      enum: [excel, pdf, both]
+
+    ReportRunStatus:
+      type: string
+      enum: [pending, generating, complete, failed]
+
+    ReportFormat:
+      type: string
+      enum: [excel, pdf]
+
+    ReportTemplateUserListItem:
+      type: object
+      required: [id, templateId, displayNameEn, reportKind, enabled]
+      properties:
+        id: { type: integer, format: int64 }
+        templateId: { type: string }
+        displayNameEn: { type: string }
+        displayNameAr: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        reportKind: { $ref: '#/components/schemas/ReportKind' }
+        isScheduled: { type: boolean }
+        enabled: { type: boolean }
+        lastRunAt: { type: string, format: date-time, nullable: true }
+
+    ReportTemplateAdminListItem:
+      allOf:
+        - $ref: '#/components/schemas/ReportTemplateUserListItem'
+        - type: object
+          properties:
+            dataSource: { type: string }
+            assignedRoles:
+              type: array
+              items: { type: string }
+            scheduleCron: { type: string, nullable: true }
+            scheduleRecipients:
+              type: array
+              items: { type: string }
+              nullable: true
+
+    ReportTemplate:
+      allOf:
+        - $ref: '#/components/schemas/ReportTemplateAdminListItem'
+        - type: object
+          properties:
+            parameterSchema: { type: object, additionalProperties: true }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+
+    ReportRunDetail:
+      type: object
+      required: [id, reportTemplateId, status, format, triggeredBy, createdAt]
+      properties:
+        id: { type: integer, format: int64 }
+        reportTemplateId: { type: integer, format: int64 }
+        templateId: { type: string }
+        displayNameEn: { type: string }
+        triggeredBy:
+          type: string
+          enum: [manual, scheduled]
+        triggeredByUserId: { type: integer, format: int64, nullable: true }
+        triggeredByUserName: { type: string, nullable: true }
+        parameters: { type: object, additionalProperties: true }
+        format: { $ref: '#/components/schemas/ReportFormat' }
+        status: { $ref: '#/components/schemas/ReportRunStatus' }
+        outputSizeBytes: { type: integer, format: int64, nullable: true }
+        errorMessage: { type: string, nullable: true, description: "Redacted in client responses; populated only in audit_log." }
+        startedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        signedUrl: { type: string, nullable: true, description: "Minted only when status=complete; TTL 60s." }
+        signedUrlExpiresAt: { type: string, format: date-time, nullable: true }
+
+    ReportDataEnvelope:
+      type: object
+      required: [payload, meta]
+      description: |
+        Uniform envelope returned by every fn_report_data_<slug>. Renderer
+        (Puppeteer for PDF, ExcelJS for XLSX) consumes this shape directly.
+      properties:
+        payload:
+          type: object
+          additionalProperties: true
+          description: Per-template payload — structure varies by data_source slug.
+        meta:
+          type: object
+          required: [tenantId, generatedAt, sourceTraceability]
+          properties:
+            tenantId: { type: string, format: uuid }
+            generatedAt: { type: string, format: date-time }
+            parameters: { type: object, additionalProperties: true }
+            sourceTraceability:
+              type: array
+              items:
+                type: object
+                required: [tableName, recordIds, count]
+                properties:
+                  tableName: { type: string }
+                  recordIds:
+                    type: array
+                    items: { type: integer, format: int64 }
+                  count: { type: integer }
+
+  responses:
+    Error400:
+      description: Validation error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Error401:
+      description: Unauthenticated — missing or invalid JWT (aud/iss/exp checked)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Error403:
+      description: Forbidden — permission gate or role check failed
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Error404:
+      description: Not found (or not visible to caller — info-leak avoidance)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Error409:
+      description: Conflict — state-machine violation, dedupe collision, or matrix issue
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Error500:
+      description: Internal error — raw Postgres errors never exposed; correlate via requestId
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+
+  # ============================================================
+  # CR-K — Risk Cases
+  # ============================================================
+
+  /risk-cases:
+    get:
+      tags: [Risk Cases]
+      summary: List risk cases (filterable + paginated)
+      operationId: listRiskCases
+      description: |
+        List risk cases with filters + pagination. Per-role + per-case-type
+        visibility enforced via `system_setting.risk_case_visibility_map`.
+      x-db-function: fn_risk_case_list
+      x-migration: 259
+      x-story-id: S-K-3
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [open, in_review, approved, rejected, escalated, accept_risk, snoozed, closed, open_all] } }
+        - { in: query, name: priority, schema: { $ref: '#/components/schemas/RiskCasePriority' } }
+        - { in: query, name: assignedToMe, schema: { type: boolean, default: false } }
+        - { in: query, name: slaDueWithinHours, schema: { type: integer, minimum: 1, maximum: 720 } }
+        - { in: query, name: caseType, schema: { $ref: '#/components/schemas/RiskCaseType' } }
+        - { in: query, name: search, schema: { type: string, maxLength: 200 }, description: "ILIKE match on title" }
+        - { in: query, name: page, schema: { type: integer, default: 1, minimum: 1 } }
+        - { in: query, name: limit, schema: { type: integer, default: 20, minimum: 1, maximum: 100 } }
+      responses:
+        "200":
+          description: Page of risk cases
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/RiskCaseListItem' }
+                  pagination: { $ref: '#/components/schemas/PaginationMeta' }
+        "401": { $ref: '#/components/responses/Error401' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "500": { $ref: '#/components/responses/Error500' }
+
+    post:
+      tags: [Risk Cases]
+      summary: Create a manual risk case
+      operationId: createRiskCase
+      x-db-function: fn_risk_case_create
+      x-migration: 258
+      x-story-id: S-K-2
+      x-required-permission: risk.case.create
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, contract_drafter, contract_approver_2]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [priority, title]
+              properties:
+                contractId: { type: integer, format: int64, nullable: true }
+                priority: { $ref: '#/components/schemas/RiskCasePriority' }
+                title: { type: string, minLength: 1, maxLength: 500 }
+                body: { type: string, nullable: true }
+                assignedRole: { type: string, nullable: true }
+                assignedUserId: { type: integer, format: int64, nullable: true }
+                slaHours: { type: integer, nullable: true, minimum: 1 }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Risk case created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RiskCaseDetail' }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}:
+    get:
+      tags: [Risk Cases]
+      summary: Get a risk case with timeline + attachments + linked entities
+      operationId: getRiskCase
+      x-db-function: fn_risk_case_get_by_id
+      x-migration: 259
+      x-story-id: S-K-4
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Risk case detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RiskCaseDetail' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  /risk-cases/auto-create-from-correlation:
+    post:
+      tags: [Risk Cases (Internal)]
+      summary: INTERNAL — auto-create from correlation (worker only)
+      operationId: autoCreateRiskCaseFromCorrelation
+      description: |
+        Invoked by `correlation-evaluator.worker.ts` after parsing
+        `produce_yaml.alert.create_case`. DEFINER fn; idempotent via
+        `dedupe_key='correlation:<id>'`.
+      x-db-function: fn_risk_case_auto_create_from_correlation
+      x-migration: 258
+      x-story-id: S-K-1
+      x-required-permission: internal
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-internal-only: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlationId]
+              properties:
+                correlationId: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Auto-create result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  riskCaseId: { type: integer, format: int64, nullable: true }
+                  wasNew: { type: boolean }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+
+  /risk-cases/{id}/assign:
+    post:
+      tags: [Risk Cases]
+      summary: Assign a risk case to a role and/or user
+      operationId: assignRiskCase
+      description: |
+        Composite permission gate — `risk.case.create` OR `risk.case.escalate`
+        OR current assignee. At least one of `assignedRole` / `assignedUserId`
+        must be provided.
+      x-db-function: fn_risk_case_assign
+      x-migration: 258
+      x-story-id: S-K-5
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, executive, contract_drafter, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                assignedRole: { type: string, nullable: true }
+                assignedUserId: { type: integer, format: int64, nullable: true }
+      responses:
+        "200":
+          description: Risk case after assignment
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskCaseDetail' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/comments:
+    post:
+      tags: [Risk Cases]
+      summary: Append a comment to the risk-case timeline
+      operationId: addRiskCaseComment
+      x-db-function: fn_risk_case_add_comment
+      x-migration: 258
+      x-story-id: S-K-6
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [comment]
+              properties:
+                comment: { type: string, minLength: 1, maxLength: 5000 }
+      responses:
+        "201":
+          description: Comment event appended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  eventId: { type: integer, format: int64 }
+        "400": { $ref: '#/components/responses/Error400' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  /risk-cases/{id}/evidence:
+    post:
+      tags: [Risk Cases]
+      summary: Upload evidence file to a risk case
+      operationId: addRiskCaseEvidence
+      description: |
+        BE handles `multipart/form-data` upload via `multer.memoryStorage()`,
+        streams body to Supabase Storage at
+        `risk-case-evidence/<tenantId>/<caseId>/<uuid>-<fileName>`, then calls
+        `fn_risk_case_add_evidence` with the resulting `fileUri`. 50 MB cap.
+      x-db-function: fn_risk_case_add_evidence
+      x-migration: 258
+      x-story-id: S-K-7
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, contract_drafter, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary, description: "Max 50 MB" }
+      responses:
+        "201":
+          description: Evidence record created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attachmentId: { type: integer, format: int64 }
+                  eventId: { type: integer, format: int64 }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/evidence/{attachmentId}:
+    get:
+      tags: [Risk Cases]
+      summary: Get evidence metadata + signed download URL
+      operationId: getRiskCaseEvidence
+      description: |
+        Returns attachment metadata plus a freshly-minted Supabase signed URL
+        (TTL 60s). The raw `file_uri` is never exposed to the client.
+      x-db-function: fn_risk_case_evidence_get
+      x-migration: 259
+      x-story-id: S-K-8
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+        - { in: path, name: attachmentId, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Attachment + signed URL
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/RiskCaseAttachment'
+                  - type: object
+                    required: [signedUrl, signedUrlExpiresAt]
+                    properties:
+                      signedUrl: { type: string }
+                      signedUrlExpiresAt: { type: string, format: date-time }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  /risk-cases/{id}/status-transition:
+    post:
+      tags: [Risk Cases]
+      summary: Strict-matrix status transition (open→in_review, in_review→approved|rejected)
+      operationId: statusTransitionRiskCase
+      description: |
+        Strict matrix transitions only — `open → in_review`,
+        `in_review → approved`, `in_review → rejected`. Other transitions
+        (escalate / accept_risk / snooze / close) use dedicated endpoints.
+        Per-case-type permission gate:
+        - `correlation_alert`, `sla_breach`: `risk.case.escalate` OR assignee
+        - `obligation_due`, `manual`: assignee OR `risk.case.create`
+      x-db-function: fn_risk_case_status_transition
+      x-migration: 258
+      x-story-id: S-K-9
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, executive, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toStatus]
+              properties:
+                toStatus: { type: string, enum: [in_review, approved, rejected] }
+                decisionNote: { type: string, nullable: true, maxLength: 5000 }
+      responses:
+        "200":
+          description: Risk case after transition
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskCaseDetail' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/escalate:
+    post:
+      tags: [Risk Cases]
+      summary: Escalate a risk case to the next matrix role
+      operationId: escalateRiskCase
+      description: |
+        Reads `system_setting.escalation_matrix` to determine the next role.
+        Cycle detection: `matrixHopCount > 10` → `P0001 matrix_cycle_detected`
+        → 409.
+      x-db-function: fn_risk_case_escalate
+      x-migration: 258
+      x-story-id: S-K-10
+      x-required-permission: risk.case.escalate
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, executive, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, nullable: true, maxLength: 5000 }
+      responses:
+        "200":
+          description: Escalation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  caseId: { type: integer, format: int64 }
+                  fromRole: { type: string, nullable: true }
+                  toRole: { type: string }
+                  matrixHopCount: { type: integer }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/accept-risk:
+    post:
+      tags: [Risk Cases]
+      summary: Record an Accept-Risk decision (named approver per matrix)
+      operationId: acceptRiskCase
+      description: |
+        Records an Accept-Risk decision with a named approver per
+        `system_setting.accept_risk_approval_matrix`
+        (critical→Executive; high→Legal Counsel; medium→role peer).
+
+        **Self-approval guard** at both layers — the BE controller rejects
+        with 403 `cannot_self_approve` when `req.user.id === approverUserId`;
+        FE blocks at AcceptRiskDialog.
+      x-db-function: fn_risk_case_accept_risk
+      x-migration: 258
+      x-story-id: S-K-11
+      x-required-permission: risk.case.accept_risk
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approverUserId, justification]
+              properties:
+                approverUserId: { type: integer, format: int64 }
+                justification: { type: string, minLength: 10, maxLength: 10000 }
+      responses:
+        "200":
+          description: Risk case after acceptance
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskCaseDetail' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/snooze:
+    post:
+      tags: [Risk Cases]
+      summary: Snooze a risk case until a future timestamp
+      operationId: snoozeRiskCase
+      description: |
+        Snooze cap = 30 days from `fn_demo_now()`. Validation enforces
+        future-timestamp + cap.
+      x-db-function: fn_risk_case_snooze
+      x-migration: 258
+      x-story-id: S-K-12
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, executive, contract_drafter, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [snoozedUntil]
+              properties:
+                snoozedUntil: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Snoozed
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskCaseDetail' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/{id}/close:
+    post:
+      tags: [Risk Cases]
+      summary: Close a risk case with a closure outcome
+      operationId: closeRiskCase
+      description: |
+        Requires prior `approved` / `rejected` / `accept_risk` / `escalated`
+        status. Closure outcomes: `mitigated` / `accepted` / `no_action` /
+        `advisory_dispatched`.
+      x-db-function: fn_risk_case_close
+      x-migration: 258
+      x-story-id: S-K-13
+      x-required-permission: risk.case.close
+      x-authorised-roles: [platform_admin, "Super Admin", operations, finance_treasury, compliance_esg, legal_counsel, executive, contract_drafter, contract_approver, contract_approver_2]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [outcome]
+              properties:
+                outcome: { $ref: '#/components/schemas/ClosureOutcome' }
+                closureNote: { type: string, nullable: true, maxLength: 5000 }
+      responses:
+        "200":
+          description: Closed
+          content: { application/json: { schema: { $ref: '#/components/schemas/RiskCaseDetail' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /risk-cases/escalation-check:
+    get:
+      tags: [Risk Cases (Internal)]
+      summary: INTERNAL — escalation-worker scan (cross-tenant)
+      operationId: riskCaseEscalationCheck
+      description: |
+        5-minute escalation-worker pickup. DEFINER STABLE; returns
+        cross-tenant candidates. Worker loops the result and sets per-row
+        tenant GUC before calling `fn_risk_case_escalate`.
+      x-db-function: fn_risk_case_escalation_check
+      x-migration: 259
+      x-story-id: S-K-14
+      x-required-permission: internal
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-internal-only: true
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 100, minimum: 1, maximum: 1000 } }
+      responses:
+        "200":
+          description: Candidate cases due for escalation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  candidates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        caseId: { type: integer, format: int64 }
+                        tenantId: { type: string, format: uuid }
+                        currentRole: { type: string, nullable: true }
+        "403": { $ref: '#/components/responses/Error403' }
+
+  # ============================================================
+  # CR-L — Reports & Briefings (User surfaces)
+  # ============================================================
+
+  /reports/templates:
+    get:
+      tags: [Reports — User]
+      summary: List report templates available to the caller
+      operationId: listReportTemplates
+      description: |
+        Filters out templates whose `assigned_roles` do not overlap with
+        caller's roles. Single endpoint serves user, executive, and other
+        persona dashboards. `?adminMode=true` requires
+        `report.template.manage`.
+      x-db-function: fn_report_template_list
+      x-migration: 263
+      x-story-id: S-L-1
+      x-additional-story-ids: [S-L-13, S-L-14]
+      x-required-permission: report.read
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2, contract_recipient]
+      parameters:
+        - { in: query, name: adminMode, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: Template list (shape depends on adminMode)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    oneOf:
+                      - type: array
+                        items: { $ref: '#/components/schemas/ReportTemplateUserListItem' }
+                      - type: array
+                        items: { $ref: '#/components/schemas/ReportTemplateAdminListItem' }
+        "403": { $ref: '#/components/responses/Error403' }
+
+  /reports/templates/{id}/run:
+    post:
+      tags: [Reports — User]
+      summary: Trigger a manual report run (returns runId; renderer runs async)
+      operationId: triggerReportRun
+      description: |
+        Queues an async report run. Returns `202` + `runId`. Client polls
+        `GET /reports/runs/:id` until `status='complete'` or `'failed'`.
+        Same endpoint covers scheduled triggers when the caller is the
+        scheduler service account (`triggeredBy='scheduled'`).
+      x-db-function: fn_report_run_trigger
+      x-migration: 264
+      x-story-id: S-L-2
+      x-additional-story-ids: [S-L-3, S-L-11, S-L-15, S-L-16]
+      x-required-permission: report.read
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2, contract_recipient]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [format]
+              properties:
+                triggeredBy: { type: string, enum: [manual, scheduled] }
+                parameters: { type: object, additionalProperties: true }
+                format: { $ref: '#/components/schemas/ReportFormat' }
+      responses:
+        "202":
+          description: Run queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId: { type: integer, format: int64 }
+                  status: { type: string, enum: [pending] }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  /reports/runs/{id}:
+    get:
+      tags: [Reports — User]
+      summary: Poll run status and download URL
+      operationId: getReportRun
+      description: |
+        Returns run state. When `status='complete'`, also returns a freshly
+        minted signed URL (TTL 60s). Visibility:
+        `triggered_by_user_id = caller` OR caller has `report.run.read.all`.
+      x-db-function: fn_report_run_get_by_id
+      x-migration: 264
+      x-story-id: S-L-4
+      x-additional-story-ids: [S-L-5]
+      x-required-permission: report.read
+      x-authorised-roles: [platform_admin, "Super Admin", executive, legal_counsel, operations, finance_treasury, compliance_esg, contract_drafter, contract_approver, contract_approver_2, contract_recipient]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Report run detail
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReportRunDetail' } } }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  # ============================================================
+  # CR-L — Reports & Briefings (Admin surfaces)
+  # ============================================================
+
+  /admin/reports/templates:
+    get:
+      tags: [Reports — Admin]
+      summary: List all report templates (enabled or not)
+      operationId: listReportTemplatesAdmin
+      description: Convenience alias to `/reports/templates?adminMode=true`.
+      x-db-function: fn_report_template_list
+      x-migration: 263
+      x-story-id: S-L-6
+      x-required-permission: report.template.manage
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      responses:
+        "200":
+          description: Admin template list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReportTemplateAdminListItem' }
+        "403": { $ref: '#/components/responses/Error403' }
+
+    post:
+      tags: [Reports — Admin]
+      summary: Create a new report template
+      operationId: createReportTemplate
+      description: |
+        `data_source` is validated by an `EXISTS` check on
+        `pg_proc.fn_report_data_<data_source>`. If `isScheduled=true`,
+        `scheduleCron` and `scheduleRecipients` are mandatory.
+        `node-cron.validate()` enforced at BE Zod layer.
+      x-db-function: fn_report_template_create
+      x-migration: 263
+      x-story-id: S-L-8
+      x-required-permission: report.template.manage
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [templateId, displayNameEn, reportKind, dataSource, assignedRoles]
+              properties:
+                templateId: { type: string, pattern: '^[a-z0-9_]+$', minLength: 1, maxLength: 200 }
+                displayNameEn: { type: string, minLength: 1, maxLength: 500 }
+                displayNameAr: { type: string, nullable: true, maxLength: 500 }
+                description: { type: string, nullable: true, maxLength: 5000 }
+                reportKind: { $ref: '#/components/schemas/ReportKind' }
+                dataSource: { type: string, minLength: 1, maxLength: 200 }
+                parameterSchema: { type: object, additionalProperties: true }
+                assignedRoles:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                isScheduled: { type: boolean }
+                scheduleCron: { type: string, nullable: true }
+                scheduleRecipients:
+                  type: array
+                  items: { type: string }
+                  nullable: true
+      responses:
+        "201":
+          description: Template created
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReportTemplate' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /admin/reports/templates/{id}:
+    get:
+      tags: [Reports — Admin]
+      summary: Get a template by id (admin or roles-overlap visibility)
+      operationId: getReportTemplate
+      x-db-function: fn_report_template_get_by_id
+      x-migration: 263
+      x-story-id: S-L-7
+      x-required-permission: report.template.manage
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Template
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReportTemplate' } } }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+    put:
+      tags: [Reports — Admin]
+      summary: Update a template (templateId / tenantId / reportKind immutable)
+      operationId: updateReportTemplate
+      x-db-function: fn_report_template_update
+      x-migration: 263
+      x-story-id: S-L-9
+      x-required-permission: report.template.manage
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                displayNameEn: { type: string, minLength: 1, maxLength: 500 }
+                displayNameAr: { type: string, nullable: true, maxLength: 500 }
+                description: { type: string, nullable: true, maxLength: 5000 }
+                dataSource: { type: string, minLength: 1, maxLength: 200 }
+                parameterSchema: { type: object, additionalProperties: true }
+                assignedRoles:
+                  type: array
+                  minItems: 1
+                  items: { type: string }
+                isScheduled: { type: boolean }
+                scheduleCron: { type: string, nullable: true }
+                scheduleRecipients:
+                  type: array
+                  items: { type: string }
+                  nullable: true
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReportTemplate' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+    delete:
+      tags: [Reports — Admin]
+      summary: Soft-delete a report template (history preserved)
+      operationId: deleteReportTemplate
+      description: |
+        Soft delete (`is_active=false`, `enabled=false`). All `report_run`
+        history preserved per HITL CR-L-Q3.
+      x-db-function: fn_report_template_delete
+      x-migration: 263
+      x-story-id: S-L-10
+      x-required-permission: report.template.manage
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templateId: { type: integer, format: int64 }
+                  deletedAt: { type: string, format: date-time }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+
+  /admin/reports/runs/pending:
+    get:
+      tags: [Reports — Admin]
+      summary: INTERNAL — worker pickup (atomic pending→generating flip)
+      operationId: getPendingReportRuns
+      description: |
+        DEFINER fn — atomically flips `pending → generating` inside a CTE +
+        FOR UPDATE SKIP LOCKED, with audit-log emission inside the same CTE
+        (S2-8 compliance). Worker-only.
+      x-db-function: fn_report_run_pending_get
+      x-migration: 264
+      x-story-id: S-L-11
+      x-required-permission: internal
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-internal-only: true
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 5, minimum: 1, maximum: 50 } }
+      responses:
+        "200":
+          description: Pending runs (now flipped to generating)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        runId: { type: integer, format: int64 }
+                        templateId: { type: integer, format: int64 }
+                        dataSource: { type: string }
+                        format: { $ref: '#/components/schemas/ReportFormat' }
+                        parameters: { type: object, additionalProperties: true }
+        "403": { $ref: '#/components/responses/Error403' }
+
+  /admin/reports/runs/{id}/complete:
+    post:
+      tags: [Reports — Admin]
+      summary: INTERNAL — worker terminal-state hand-off
+      operationId: completeReportRun
+      description: |
+        DEFINER fn. Transitions `generating → complete` (with `outputUri` +
+        `outputSizeBytes`) OR `generating → failed` (with `errorMessage`).
+        Updates `report_template.last_run_at` on success.
+      x-db-function: fn_report_run_complete
+      x-migration: 264
+      x-story-id: S-L-12
+      x-required-permission: internal
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-internal-only: true
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [complete, failed] }
+                outputUri: { type: string }
+                outputSizeBytes: { type: integer, format: int64, minimum: 0 }
+                errorMessage: { type: string, maxLength: 10000 }
+      responses:
+        "200":
+          description: Run finalised
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId: { type: integer, format: int64 }
+                  status: { $ref: '#/components/schemas/ReportRunStatus' }
+                  completedAt: { type: string, format: date-time }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }
+        "404": { $ref: '#/components/responses/Error404' }
+        "409": { $ref: '#/components/responses/Error409' }
+
+  /admin/reports/data/{slug}:
+    get:
+      tags: [Reports — Admin]
+      summary: INTERNAL — data-fn dispatcher (24 slugs)
+      operationId: getReportData
+      description: |
+        Single-route path-param dispatcher for the 24 `fn_report_data_*`
+        family. Worker-only. The `slug` is validated against a controller-side
+        allowlist before invocation. Each fn returns the uniform
+        `ReportDataEnvelope` shape.
+
+        ## Available slugs (24)
+
+        **Executive (4)** — `executive_weekly_brief`, `executive_monthly_board`,
+        `executive_avar_trend`, `executive_top10_exposures`
+
+        **Legal (4)** — `legal_advisory_queue`,
+        `legal_clause_review_backlog`, `legal_fm_eligibility`,
+        `legal_regulatory_digest`
+
+        **Procurement (4)** — `procurement_supplier_scorecard`,
+        `procurement_supplier_scorecard_detail`,
+        `procurement_icv_compliance`, `procurement_sla_breach`
+
+        **Operations (3)** — `operations_risk_board_snapshot`,
+        `operations_delivery_delay`, `operations_penalty_exposure`
+
+        **Finance Treasury (3)** — `finance_fx_exposure`,
+        `finance_price_review_queue`, `finance_payment_delay`
+
+        **Compliance & ESG (3)** — `compliance_sanctions_exposure`,
+        `compliance_subcontractor_chain`, `compliance_audit_rights`
+
+        **Platform Admin (3)** — `admin_system_health`,
+        `admin_audit_chain_verification`, `admin_source_health_snapshot`
+      x-db-function: fn_report_data_<slug>
+      x-migration: "265..271"
+      x-story-id: S-L-16
+      x-required-permission: internal
+      x-authorised-roles: [platform_admin, "Super Admin"]
+      x-internal-only: true
+      parameters:
+        - in: path
+          name: slug
+          required: true
+          schema:
+            type: string
+            enum:
+              - executive_weekly_brief
+              - executive_monthly_board
+              - executive_avar_trend
+              - executive_top10_exposures
+              - legal_advisory_queue
+              - legal_clause_review_backlog
+              - legal_fm_eligibility
+              - legal_regulatory_digest
+              - procurement_supplier_scorecard
+              - procurement_supplier_scorecard_detail
+              - procurement_icv_compliance
+              - procurement_sla_breach
+              - operations_risk_board_snapshot
+              - operations_delivery_delay
+              - operations_penalty_exposure
+              - finance_fx_exposure
+              - finance_price_review_queue
+              - finance_payment_delay
+              - compliance_sanctions_exposure
+              - compliance_subcontractor_chain
+              - compliance_audit_rights
+              - admin_system_health
+              - admin_audit_chain_verification
+              - admin_source_health_snapshot
+        - in: query
+          name: parameters
+          required: false
+          schema: { type: string, description: "JSON-encoded parameters object" }
+      responses:
+        "200":
+          description: Uniform data envelope
+          content: { application/json: { schema: { $ref: '#/components/schemas/ReportDataEnvelope' } } }
+        "400": { $ref: '#/components/responses/Error400' }
+        "403": { $ref: '#/components/responses/Error403' }

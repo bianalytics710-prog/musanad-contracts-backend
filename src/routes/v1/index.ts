@@ -209,4 +209,22 @@ v1Router.use('/advisory-drafts', advisoryDraftsRouter);
 // so we don't modify the existing user routes.
 v1Router.use('/users', notificationPreferencesRouter);
 
+// ============================================================
+// M19 (CR-K) — Risk Cases.
+//   14 endpoints under /api/v1/risk-cases/* including 2 internal-only
+//   worker endpoints (escalation-check, auto-create-from-correlation).
+// ============================================================
+import riskCaseRouter from './risk-case.routes';
+v1Router.use('/risk-cases', riskCaseRouter);
+
+// ============================================================
+// M20 (CR-L) — Reports & Briefings — user-facing surface.
+//   GET    /api/v1/reports/templates                (report.read)
+//   POST   /api/v1/reports/templates/:id/run        (report.read)
+//   GET    /api/v1/reports/runs/:id                 (report.read)
+// Admin template CRUD + worker pickup mount in routes/v1/admin/index.ts.
+// ============================================================
+import reportRouter from './report.routes';
+v1Router.use('/reports', reportRouter);
+
 export default v1Router;
