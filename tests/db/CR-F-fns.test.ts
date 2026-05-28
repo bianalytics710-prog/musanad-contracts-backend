@@ -486,67 +486,93 @@ describe('fn_risk_score_compute', () => {
 
 describe('fn_risk_score_explain', () => {
   /**
-   * @link S9 AC-S9-01 — DEFECT-DB-02: fn_risk_score_explain has 'column "id" does not exist'
-   * Root cause: The subquery inside fn_risk_score_explain referencing contributing_correlations
-   * array elements uses `c.id` ambiguously. Despite migration 176 fixing sig.signal_kind→sig.kind
-   * and sig.occurred_at→sig.event_date_v2, the function still throws 42703 for ALL calls.
-   * The WHEN OTHERS block at line 28 re-raises as SQLSTATE, hiding the original error.
-   * Fix needed: DB layer — fn_risk_score_explain in migration 176 or a patch migration.
+   * @link S9 AC-S9-01 — fn_risk_score_explain returns full explain payload for a contract with score.
+   * Returns riskScoreId + contractId as strings, 5-dimension breakdown, healthScore,
+   * marValue/marCurrency/marFormula, weightsAtCalculation, weightsVersion,
+   * triggeredBy, calculatedAt, contributingCorrelations array.
    */
-  it('AC-S9-01: DEFECT-DB-02 — fn_risk_score_explain column "id" does not exist (42703) for any contract call', async () => {
+  it('AC-S9-01: fn_risk_score_explain returns full explain payload for a bootstrapped contract', async () => {
     const contractId = await getBootstrappedContractId();
     if (!contractId) return;
 
-    // DEFECT-DB-02: fn throws for ALL code paths due to ambiguous "id" reference
-    // After fix: should return riskScoreId, contractId as strings + full explain shape
-    await expect(
-      callFnInTxn<unknown>(
-        EXECUTIVE.id,
-        'fn_risk_score_explain',
-        [contractId, EXECUTIVE.id],
-      ),
-    ).rejects.toThrow(/column.*id.*does not exist|42703|fn_risk_score_explain/i);
+    const result = await callFnInTxn<{
+      riskScoreId: string;
+      contractId: string;
+      calculatedAt: string;
+      dimensions: Record<string, unknown>;
+      healthScore: number;
+      marValue: string | null;
+      marCurrency: string;
+      marFormula: Record<string, unknown>;
+      weightsAtCalculation: Record<string, number>;
+      weightsVersion: string;
+      triggeredBy: string;
+      contributingCorrelations: unknown[];
+    }>(
+      EXECUTIVE.id,
+      'fn_risk_score_explain',
+      [contractId, EXECUTIVE.id],
+    );
+
+    expect(typeof result.riskScoreId).toBe('string');
+    expect(typeof result.contractId).toBe('string');
+    expect(result.dimensions).toBeDefined();
+    expect(typeof result.healthScore).toBe('number');
+    expect(typeof result.marCurrency).toBe('string');
+    expect(Array.isArray(result.contributingCorrelations)).toBe(true);
+    expect(typeof result.weightsVersion).toBe('string');
   });
 
-  it('AC-S9-01: DEFECT-DB-02 — contributingCorrelations hydration path also fails (migration 176 column fix incomplete)', async () => {
+  it('AC-S9-01: fn_risk_score_explain returns full payload for contract with correlations', async () => {
     const contractWithCorrelations = await getContractWithCorrelations();
     const contractId = contractWithCorrelations ?? await getBootstrappedContractId();
     if (!contractId) return;
 
-    // Both paths (with and without correlations) hit the same 42703 error
-    await expect(
-      callFnInTxn<unknown>(
-        EXECUTIVE.id,
-        'fn_risk_score_explain',
-        [contractId, EXECUTIVE.id],
-      ),
-    ).rejects.toThrow(/column.*id.*does not exist|42703|fn_risk_score_explain/i);
+    const result = await callFnInTxn<{
+      riskScoreId: string;
+      contractId: string;
+      contributingCorrelations: unknown[];
+      dimensions: Record<string, unknown>;
+    }>(
+      EXECUTIVE.id,
+      'fn_risk_score_explain',
+      [contractId, EXECUTIVE.id],
+    );
+
+    expect(typeof result.riskScoreId).toBe('string');
+    expect(typeof result.contractId).toBe('string');
+    expect(Array.isArray(result.contributingCorrelations)).toBe(true);
+    expect(result.dimensions).toBeDefined();
   });
 
-  it('AC-S9-02: DEFECT-DB-02 — matchedClause snippet test blocked (fn throws before snippet check)', async () => {
+  it('AC-S9-02: fn_risk_score_explain — matchedClause snippet field present in payload', async () => {
     const contractId = await getBootstrappedContractId();
     if (!contractId) return;
 
-    // Can't test snippet limit — fn always throws
-    await expect(
-      callFnInTxn<unknown>(
-        EXECUTIVE.id,
-        'fn_risk_score_explain',
-        [contractId, EXECUTIVE.id],
-      ),
-    ).rejects.toThrow(/42703|fn_risk_score_explain/i);
+    const result = await callFnInTxn<{
+      riskScoreId: string;
+      contractId: string;
+      contributingCorrelations: unknown[];
+    }>(
+      EXECUTIVE.id,
+      'fn_risk_score_explain',
+      [contractId, EXECUTIVE.id],
+    );
+
+    // fn resolves — contributingCorrelations array is present (may be empty for contracts with no correlations)
+    expect(typeof result.riskScoreId).toBe('string');
+    expect(Array.isArray(result.contributingCorrelations)).toBe(true);
   });
 
-  it('AC-S9-03: DEFECT-DB-02 blocks P0002 test — fn throws 42703 before reaching NOT FOUND guard', async () => {
-    // The fn always errors at the contributing_correlations subquery before reaching IF NOT FOUND
-    // Expected after fix: P0002 for non-existent contract
+  it('AC-S9-03: non-existent contract → P0002 (not found)', async () => {
+    // fn correctly raises P0002 when the contract_id has no risk_score row
     await expect(
       callFnInTxn<unknown>(
         EXECUTIVE.id,
         'fn_risk_score_explain',
         [999999999, EXECUTIVE.id],
       ),
-    ).rejects.toThrow(/42703|fn_risk_score_explain|not found/i);
+    ).rejects.toThrow(/P0002|not found/i);
   });
 
   it('AC-S9-04: caller without score.read → 42501 (permission check fires BEFORE defect code path)', async () => {
@@ -1016,23 +1042,29 @@ describe('fn_scoring_weights_get', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('fn_scoring_weights_set', () => {
-  it('AC-S7-01: happy path — saves valid weights — DEFECT-DB-01: fn body INSERT missing prev_hash/this_hash (not-null constraint violation)', async () => {
-    // DEFECT-DB-01 (DB layer): fn_scoring_weights_set emits INSERT INTO audit_log without
-    // mandatory prev_hash + this_hash NOT NULL columns. The INSERT fails with:
-    // "null value in column "prev_hash" of relation "audit_log" violates not-null constraint"
-    // Fix: replace the manual INSERT with fn_audit_log_record_v2() call (M10 pattern, migration 128).
-    // This test documents the expected failure and will pass once the defect is fixed.
+  it('AC-S7-01: happy path — saves valid weights → returns newVersion, weightsApplied, totalSum', async () => {
+    // fn_scoring_weights_set resolves successfully — audit_log uses fn_audit_log_record_v2 helper
+    const result = await callFn<{
+      newVersion: string;
+      totalSum: number;
+      weightsApplied: {
+        legal: number;
+        financial: number;
+        operational: number;
+        reputational: number;
+        compliance: number;
+        version: string;
+      };
+    }>(
+      PLATFORM_ADMIN.id,
+      'fn_scoring_weights_set',
+      [{ legal: 0.20, financial: 0.30, operational: 0.20, reputational: 0.10, compliance: 0.20 }, PLATFORM_ADMIN.id],
+    );
 
-    // Validate that validation logic itself works (weights, dimensions, permission check)
-    // by testing the error path that happens BEFORE the audit INSERT
-    await expect(
-      callFn<unknown>(
-        PLATFORM_ADMIN.id,
-        'fn_scoring_weights_set',
-        [{ legal: 0.20, financial: 0.30, operational: 0.20, reputational: 0.10, compliance: 0.20 }, PLATFORM_ADMIN.id],
-      ),
-    ).rejects.toThrow(/prev_hash|this_hash|not-null|audit_log/i);
-    // Expected: after fix, the above call should SUCCEED and return newVersion as string
+    expect(typeof result.newVersion).toBe('string');
+    expect(result.totalSum).toBe(1);
+    expect(typeof result.weightsApplied.version).toBe('string');
+    expect(result.weightsApplied.financial).toBe(0.30);
   });
 
   it('AC-S7-02: weights not summing to 1.0 ± 0.001 → 22023', async () => {
@@ -1065,26 +1097,27 @@ describe('fn_scoring_weights_set', () => {
     ).rejects.toThrow(/42501|permission/i);
   });
 
-  it('AC-S7-06: audit_log row emitted after fn_scoring_weights_set (R-PA7 pattern) — DEFECT: fn body INSERT INTO audit_log missing prev_hash/this_hash NOT NULL columns', async () => {
-    // This test documents DEFECT-DB-01 found by Testing Agent:
-    // fn_scoring_weights_set emits INSERT INTO audit_log without prev_hash + this_hash columns
-    // which are NOT NULL in audit_log. The fn raises:
-    // "null value in column "prev_hash" of relation "audit_log" violates not-null constraint"
-    // This is a DB layer defect — test documents it as expected failure.
-    // Recommendation: fn_scoring_weights_set body needs to populate prev_hash/this_hash
-    // using the fn_audit_log_record_v2 helper (see M10 pattern migration 128).
-    //
-    // NOTE: fn_scoring_weights_set and fn_scoring_weights_get tests (AC-S7-01, AC-S7-06)
-    // will fail due to this defect when the fn_scoring_weights_set code path executes.
-    // Defect classified: DB layer — fn_scoring_weights_set at migration 171.
+  it('AC-S7-06: audit_log row emitted after fn_scoring_weights_set (R-PA7 pattern)', async () => {
+    // fn_scoring_weights_set uses fn_audit_log_record_v2 helper — audit_log row is written correctly.
+    // Verify that calling set produces an audit_log row for the system_setting table.
+    const countBefore = await adminQuery<{ count: string }>(
+      `SELECT count(*) FROM audit_log WHERE table_name = 'system_setting' AND action = 'UPDATE'`,
+      [],
+    );
+    const before = Number(countBefore[0]!.count);
 
-    await expect(
-      callFn<unknown>(
-        PLATFORM_ADMIN.id,
-        'fn_scoring_weights_set',
-        [{ legal: 0.20, financial: 0.30, operational: 0.20, reputational: 0.10, compliance: 0.20 }, PLATFORM_ADMIN.id],
-      ),
-    ).rejects.toThrow(/prev_hash|this_hash|not-null|audit_log/i);
+    await callFn<unknown>(
+      PLATFORM_ADMIN.id,
+      'fn_scoring_weights_set',
+      [{ legal: 0.20, financial: 0.30, operational: 0.20, reputational: 0.10, compliance: 0.20 }, PLATFORM_ADMIN.id],
+    );
+
+    const countAfter = await adminQuery<{ count: string }>(
+      `SELECT count(*) FROM audit_log WHERE table_name = 'system_setting' AND action = 'UPDATE'`,
+      [],
+    );
+    const after = Number(countAfter[0]!.count);
+    expect(after).toBeGreaterThan(before);
   });
 });
 

@@ -423,63 +423,44 @@ describe('CR-G — GET /api/v1/dashboards/procurement', () => {
 // ============================================================================
 // Cross-cutting: executive fallback on all 4 new dashboard routes
 //
-// DEFECT-CR-G-ROUTE-FALLBACK: The route layer uses authorise(['insights.operations'])
-// (and equivalents for other dashboards) as a strict pre-gate. The executive role
-// does NOT hold insights.operations/finance_treasury/compliance_esg (it holds
-// insights.executive). The fn_ body has an executive fallback clause, but the
-// authorise() middleware blocks executives before they reach the fn_.
-//
-// Result: executive gets 403 at the HTTP layer on all 4 new persona dashboards,
-// even though the DB function supports executive fallback.
-//
-// Expected after fix: routes should include `authorise(['insights.X', 'insights.executive'])`
-// OR the authorise middleware should be replaced with a conditional permission check.
-//
-// The DB-layer executive fallback IS verified in CR-G-fns.test.ts (callDashboardFn
-// bypasses the route layer and invokes the fn_ directly).
+// Route layer uses authoriseAnyOf(['insights.X', 'insights.executive']) so
+// executive role reaches the fn_ body which applies the executive fallback clause.
 // ============================================================================
 
 describe('CR-G — executive fallback access on all 4 persona dashboards', () => {
   /**
-   * DEFECT-CR-G-ROUTE-FALLBACK: executive gets 403 at route layer (not fn_ layer).
-   * The authorise(['insights.operations']) middleware blocks executive before reaching fn_.
-   * fn_ body supports executive fallback (verified in CR-G-fns.test.ts AC-S2-T8).
-   * This test documents the CURRENT behavior and flags the defect.
+   * Routes use authoriseAnyOf(['insights.X', 'insights.executive']).
+   * Executive has insights.executive — reaches fn_ body which applies fallback clause.
    */
-  it('[DEFECT-CR-G-ROUTE-FALLBACK] executive → 403 on /dashboards/operations (route-level gate missing fallback)', async () => {
+  it('executive → 200 on /dashboards/operations (insights.executive fallback)', async () => {
     const res = await request(app)
       .get('/api/v1/dashboards/operations')
       .set('Authorization', `Bearer ${executiveToken}`);
-    // CURRENT behavior: 403 — authorise(['insights.operations']) blocks executive
-    // EXPECTED after fix: 200 — route should include insights.executive as allowed
-    expect(res.status).toBe(403);
-    console.warn(
-      '[DEFECT-CR-G-ROUTE-FALLBACK] executive blocked by route-level authorise() on /dashboards/operations. ' +
-      'Fix: authorise([\'insights.operations\', \'insights.executive\']) OR add executive to role_permission for insights.operations.',
-    );
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeDefined();
   }, 15_000);
 
-  it('[DEFECT-CR-G-ROUTE-FALLBACK] executive → 403 on /dashboards/finance-treasury', async () => {
+  it('executive → 200 on /dashboards/finance-treasury (insights.executive fallback)', async () => {
     const res = await request(app)
       .get('/api/v1/dashboards/finance-treasury')
       .set('Authorization', `Bearer ${executiveToken}`);
-    expect(res.status).toBe(403);
-    console.warn('[DEFECT-CR-G-ROUTE-FALLBACK] executive blocked on /dashboards/finance-treasury');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeDefined();
   }, 15_000);
 
-  it('[DEFECT-CR-G-ROUTE-FALLBACK] executive → 403 on /dashboards/compliance-esg', async () => {
+  it('executive → 200 on /dashboards/compliance-esg (insights.executive fallback)', async () => {
     const res = await request(app)
       .get('/api/v1/dashboards/compliance-esg')
       .set('Authorization', `Bearer ${executiveToken}`);
-    expect(res.status).toBe(403);
-    console.warn('[DEFECT-CR-G-ROUTE-FALLBACK] executive blocked on /dashboards/compliance-esg');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeDefined();
   }, 15_000);
 
-  it('[DEFECT-CR-G-ROUTE-FALLBACK] executive → 403 on /dashboards/procurement', async () => {
+  it('executive → 200 on /dashboards/procurement (insights.executive fallback)', async () => {
     const res = await request(app)
       .get('/api/v1/dashboards/procurement')
       .set('Authorization', `Bearer ${executiveToken}`);
-    expect(res.status).toBe(403);
-    console.warn('[DEFECT-CR-G-ROUTE-FALLBACK] executive blocked on /dashboards/procurement');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toBeDefined();
   }, 15_000);
 });

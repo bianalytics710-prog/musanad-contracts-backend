@@ -122,15 +122,11 @@ describe('CR-F risk score routes — auth gate (401)', () => {
 
 describe('CR-F — GET /api/v1/contracts/:id/risk-score', () => {
   /**
-   * @link S9 AC-S9-01 — Returns RiskScoreExplainResponse for contract with score
-   * DEFECT-DB-02: fn_risk_score_explain contains a SQL bug — 'column "id" does not exist'
-   * The error occurs in the subquery joining contributing_correlations with correlation/signal/source
-   * tables. The WHEN OTHERS block re-raises as SQLSTATE, which translatePgError routes to 500.
-   * This is SEPARATE from the CRITICAL-1 fix in migration 176 (signal_kind/occurred_at) —
-   * migration 176 fixed those column names but introduced or left this ambiguous "id" reference.
-   * Fix: DB layer — fn_risk_score_explain body needs the ambiguous column reference resolved.
+   * @link S9 AC-S9-01 — Returns RiskScoreExplainResponse for contract with score.
+   * fn_risk_score_explain resolved — returns full explain shape with riskScoreId,
+   * contractId, dimensions, healthScore, marValue, weightsAtCalculation, etc.
    */
-  it('AC-S9-01: executive → DEFECT-DB-02 fn_risk_score_explain "column id does not exist" → 500 (expected failure — report only)', async () => {
+  it('AC-S9-01: executive → 200 + RiskScoreExplainResponse shape for contract with score', async () => {
     const contractId = await getContractWithScore();
     if (!contractId) {
       console.warn('[SKIP] No contract with risk score found in test DB');
@@ -141,31 +137,25 @@ describe('CR-F — GET /api/v1/contracts/:id/risk-score', () => {
       .get(`/api/v1/contracts/${contractId}/risk-score`)
       .set('Authorization', `Bearer ${executiveToken}`);
 
-    // DEFECT-DB-02: fn_risk_score_explain currently returns 500 due to ambiguous "id" column
-    // Expected after fix: 200 with RiskScoreExplainResponse shape
-    // Test documents the defect — will flip to expect(res.status).toBe(200) after fix
-    expect(res.status).toBe(500); // Current observed behavior — DEFECT-DB-02
-    // TODO: After fix, change to:
-    // expect(res.status).toBe(200);
-    // expect(typeof res.body.data.riskScoreId).toBe('string');
+    expect(res.status).toBe(200);
+    expect(typeof res.body.data.riskScoreId).toBe('string');
+    expect(typeof res.body.data.contractId).toBe('string');
+    expect(res.body.data.dimensions).toBeDefined();
+    expect(typeof res.body.data.healthScore).toBe('number');
+    expect(Array.isArray(res.body.data.contributingCorrelations)).toBe(true);
   });
 
   /**
-   * @link S9 AC-S9-02 — Contract with no risk_score → 404
-   * DEFECT-DB-02 also affects this test — even contracts with no risk_score return 500
-   * instead of 404 because the fn throws for all code paths.
+   * @link S9 AC-S9-02 — Non-existent contract → 404 NOT_FOUND.
+   * fn_risk_score_explain correctly raises P0002 for contracts with no risk_score row.
    */
-  it('AC-S9-02: non-existent contract → DEFECT-DB-02 fn_risk_score_explain returns 500 instead of 404 (expected failure — report only)', async () => {
+  it('AC-S9-02: non-existent contract → 404 NOT_FOUND', async () => {
     const res = await request(app)
       .get('/api/v1/contracts/999999999/risk-score')
       .set('Authorization', `Bearer ${executiveToken}`);
 
-    // DEFECT-DB-02: fn_risk_score_explain raises WHEN OTHERS for all paths → 500
-    // Expected after fix: 404 NOT_FOUND
-    expect(res.status).toBe(500); // Current observed behavior — DEFECT-DB-02
-    // TODO: After fix, change to:
-    // expect(res.status).toBe(404);
-    // expect(res.body.error?.code).toBe('NOT_FOUND');
+    expect(res.status).toBe(404);
+    expect(res.body.error?.code).toBe('NOT_FOUND');
   });
 
   it('AC-S9-03: contract_recipient on contract they do not own → 403 or 404', async () => {
@@ -182,9 +172,8 @@ describe('CR-F — GET /api/v1/contracts/:id/risk-score', () => {
     expect([403, 404]).toContain(res.status);
   });
 
-  it('AC-S9-03: drafter (has score.read) → DEFECT-DB-02 fn_risk_score_explain returns 500 (expected failure — report only)', async () => {
-    // contract_drafter has score.read permission — after DEFECT-DB-02 is fixed should return 200
-    // DEFECT-DB-02: fn_risk_score_explain throws 42703 for all callers regardless of permission
+  it('AC-S9-03: drafter (has score.read) → 200 or 404 depending on whether contract has a score', async () => {
+    // contract_drafter has score.read permission — fn_risk_score_explain resolves correctly
     const contractId = await getContractWithScore();
     if (!contractId) return;
 
@@ -192,9 +181,8 @@ describe('CR-F — GET /api/v1/contracts/:id/risk-score', () => {
       .get(`/api/v1/contracts/${contractId}/risk-score`)
       .set('Authorization', `Bearer ${drafterToken}`);
 
-    // DEFECT-DB-02: fn_risk_score_explain currently returns 500 (42703 falls through to InternalError)
-    // Expected after fix: [200, 404]
-    expect([200, 404, 500]).toContain(res.status); // 500 = DEFECT-DB-02 observed behavior
+    // drafter has score.read — should receive the explain payload (200) or 404 if no score row
+    expect([200, 404]).toContain(res.status);
   });
 });
 
@@ -401,12 +389,10 @@ describe('CR-F — PATCH /api/v1/admin/scoring-weights', () => {
   });
 
   /**
-   * @link S7 AC-S7-01 — Valid weights → 200 + new version assigned
-   * DEFECT-DB-01: fn_scoring_weights_set emits manual INSERT INTO audit_log without
-   * required NOT NULL columns prev_hash + this_hash → 500 error.
-   * Fix: use fn_audit_log_record_v2() helper like migration 128 (M10 pattern).
+   * @link S7 AC-S7-01 — Valid weights → 200 + new version assigned.
+   * fn_scoring_weights_set uses fn_audit_log_record_v2 helper — resolves successfully.
    */
-  it('AC-S7-01: valid weights (sum=1.0) → DEFECT-DB-01 fn_scoring_weights_set audit_log missing prev_hash/this_hash → 400 (expected failure — report only)', async () => {
+  it('AC-S7-01: valid weights (sum=1.0) → 200 + newVersion assigned', async () => {
     const res = await request(app)
       .patch('/api/v1/admin/scoring-weights')
       .set('Authorization', `Bearer ${platformAdminToken}`)
@@ -418,14 +404,10 @@ describe('CR-F — PATCH /api/v1/admin/scoring-weights', () => {
         compliance: 0.20,
       });
 
-    // DEFECT-DB-01: fn body INSERT INTO audit_log missing prev_hash/this_hash →
-    // PostgreSQL raises SQLSTATE 23502 (not_null_violation) →
-    // translatePgError maps 23502 to ValidationError → HTTP 400 VALIDATION_ERROR
-    // Expected after fix: 200 with { newVersion, weightsApplied, totalSum }
-    expect(res.status).toBe(400); // Current observed behavior — DEFECT-DB-01 via 23502→400 mapping
-    // TODO: After fix, change to:
-    // expect(res.status).toBe(200);
-    // expect(typeof res.body.data.newVersion).toBe('string');
+    expect(res.status).toBe(200);
+    expect(typeof res.body.data.newVersion).toBe('string');
+    expect(res.body.data.totalSum).toBe(1);
+    expect(res.body.data.weightsApplied).toBeDefined();
   });
 
   it('AC-S7-03: missing dimension key → 400 VALIDATION_ERROR', async () => {
