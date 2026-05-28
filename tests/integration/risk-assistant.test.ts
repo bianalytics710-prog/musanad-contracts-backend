@@ -473,9 +473,10 @@ describe('CR-G — SSE streaming path (stream=true, default)', () => {
       .send({ query: 'Quick test', persona: 'executive' })
       .timeout(15_000)
       .buffer(false)
-      .parse((res) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .parse((res: any) => {
         // Abort after reading headers — we only need Content-Type
-        res.resume();
+        (res as import('http').IncomingMessage).resume();
         return Promise.resolve();
       });
 

@@ -84,6 +84,13 @@ v1Router.use('/dashboards', dashboardsRouter);
 // M_parity — Lovable feature-depth parity (read-only entities).
 // migration 058 + 059. All JWT-authenticated; zero new PUBLIC fn_'s;
 // permission gating in fn_ body (contract.read.department OR contract.edit).
+// CR-M — workforceListRouter handles the literal GET /parties/workforce. It
+// MUST be registered BEFORE partiesRouter, whose `GET /:id` route would
+// otherwise capture 'workforce' as a numeric :id and fail IdParamSchema
+// validation (400) before the list handler is reached. (Import is hoisted;
+// see the CR-M block lower in this file for the per-endpoint contract.)
+v1Router.use('/parties', workforceListRouter);
+v1Router.use('/parties', partyWorkforceRouter);
 v1Router.use('/parties', partiesRouter);
 v1Router.use('/templates', templatesRouter);
 v1Router.use('/obligations', obligationsRouter);
@@ -226,5 +233,30 @@ v1Router.use('/risk-cases', riskCaseRouter);
 // ============================================================
 import reportRouter from './report.routes';
 v1Router.use('/reports', reportRouter);
+
+// ============================================================
+// CR-M — Labor-Law Cascade + ADNOC-World Foundation.
+//
+// Party Workforce:
+//   GET    /api/v1/parties/workforce                    — list (party.workforce.read)
+//   POST   /api/v1/parties/:partyId/workforce           — upsert (party.workforce.manage)
+//   GET    /api/v1/parties/:partyId/workforce           — get (party.workforce.read)
+//
+// workforceListRouter (literal /workforce) MUST be mounted BEFORE partyWorkforceRouter
+// (:partyId param) so '/workforce' does not match as a partyId.
+//
+// Regulatory Cascade:
+//   POST   /api/v1/regulatory/cascade/run               — run (regulatory.cascade.run)
+//   GET    /api/v1/regulatory/cascade                   — list (regulatory.cascade.read)
+//   GET    /api/v1/regulatory/cascade/:runId            — detail (regulatory.cascade.read)
+//   PATCH  /api/v1/regulatory/cascade/items/:itemId/status — status (regulatory.cascade.read)
+//   POST   /api/v1/regulatory/cascade/items/:itemId/draft-amendment — advisory seam
+// ============================================================
+import { workforceListRouter, partyWorkforceRouter } from './party-workforce.routes';
+import regulatoryCascadeRouter from './regulatory-cascade.routes';
+// NOTE: workforceListRouter + partyWorkforceRouter are mounted earlier in this
+// file (immediately before partiesRouter) so the literal /parties/workforce
+// path is matched before partiesRouter's `GET /:id`. Do not re-mount them here.
+v1Router.use('/regulatory/cascade', regulatoryCascadeRouter);
 
 export default v1Router;

@@ -41,6 +41,8 @@ import { RssAdapter } from '../adapters/rss-aggregator.adapter';
 import { CommodityCrudeAdapter } from '../adapters/commodity-crude.adapter';
 import { GdeltAdapter } from '../adapters/gdelt-v2.adapter';
 import { FxAdapter } from '../adapters/fx-usd-aed.adapter';
+// CR-M — MOHRE Labor-Law adapter (seeded mock, on-demand pull support)
+import { MohreLaborAdapter } from '../adapters/mohre-labor.adapter';
 
 const DEFAULT_CRON = '* * * * *'; // every minute
 
@@ -97,6 +99,12 @@ export const buildAdapterForRow = (row: DueSourceRow): SourceAdapter | null => {
       return new FxAdapter({
         severity_rules:
           (row.severity_mapping as { rules?: never[] } | null)?.rules ?? undefined,
+      });
+    case 'mohre_labor':
+      // CR-M — MOHRE Labor-Law Feed (seeded mock; on-demand pull via POST /admin/sources/:id/pull)
+      return new MohreLaborAdapter({
+        source_id: row.source_id,
+        source_reliability: row.source_reliability,
       });
     default: {
       // RSS sub-feeds

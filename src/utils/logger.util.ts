@@ -1122,6 +1122,34 @@ const SENSITIVE_PATHS: string[] = [
   '*.*.errorMessage',
   'res.body.errorMessage',
 
+  // -- CR-M — Regulatory Cascade sensitive fields --
+  //    Audit trigger redact list extended 58→60 in migration 281.
+  //    Pino paths mirror that extension as defence-in-depth.
+
+  // penaltyBasis — internal penalty derivation trace (JSONB) — never log
+  'penaltyBasis',
+  'req.body.penaltyBasis',
+  'req.body.*.penaltyBasis',
+  '*.penaltyBasis',
+  '*.*.penaltyBasis',
+  'penalty_basis',
+  'req.body.penalty_basis',
+  'req.body.*.penalty_basis',
+  '*.penalty_basis',
+  '*.*.penalty_basis',
+
+  // remediationNote — free-text remediation note (may contain counterparty-sensitive text)
+  'remediationNote',
+  'req.body.remediationNote',
+  'req.body.*.remediationNote',
+  '*.remediationNote',
+  '*.*.remediationNote',
+  'remediation_note',
+  'req.body.remediation_note',
+  'req.body.*.remediation_note',
+  '*.remediation_note',
+  '*.*.remediation_note',
+
   // justification — fn_risk_case_accept_risk free-form min-10-char rationale
   'justification',
   'req.body.justification',

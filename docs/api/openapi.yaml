@@ -16351,3 +16351,316 @@ x-paths-root:
         "429": { description: Rate limit exceeded (30 req/min/user), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
         "500": { $ref: "#/components/responses/ServerError" }
         "500": { $ref: "#/components/responses/ServerError" }
+
+  # ============================================================
+  # CR-M — Labor-Law Cascade + ADNOC-World Foundation
+  # Migrations 281..295 | Shipped 2026-05-28
+  # 8 net-new endpoints: cascade (5) + party workforce (3)
+  # ============================================================
+
+  /regulatory/cascade/run:
+    post:
+      tags: ["CR-M — Labor-Law Cascade"]
+      summary: Run labor-law cascade
+      description: |
+        Fan the Federal Decree-Law No.9/2024 signal across ADNOC's contractor population.
+        Produces one regulatory_cascade_item per non-compliant or clause-matched contractor.
+        Synchronous (<5s for ~40 contractors). Returns full run detail immediately.
+        SECURITY DEFINER function — BE sets app.current_tenant_id + app.current_user_id GUCs.
+      operationId: runRegulatoryCascade
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "platform_admin", "Super Admin"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signalId:
+                  type: integer
+                  description: osint_signal.id of the Federal Decree-Law No.9/2024 signal
+                impactSignalId:
+                  type: integer
+                  description: Alias for signalId (legacy naming — controller normalises)
+                params:
+                  type: object
+                  properties:
+                    employmentClauseTypes:
+                      type: array
+                      items: { type: string }
+                      description: Override employment clause-type filter (defaults to server config)
+              description: At least one of signalId or impactSignalId required
+      responses:
+        "200":
+          description: Cascade complete — full run detail with per-contractor items
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegulatoryCascadeRun" }
+        "400": { description: signalId missing or invalid, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks regulatory.cascade.run permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Signal not found or not kind=regulatory, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { $ref: "#/components/responses/ServerError" }
+
+  /regulatory/cascade:
+    get:
+      tags: ["CR-M — Labor-Law Cascade"]
+      summary: List regulatory cascade runs
+      description: Paginated list of cascade runs ordered by run_at DESC. NFR < 1s.
+      operationId: listRegulatoryCascadeRuns
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "legal_counsel", "executive", "procurement_supplier_risk", "platform_admin", "Super Admin"]
+      parameters:
+        - name: signalId
+          in: query
+          schema: { type: integer }
+          description: Filter to a specific signal's runs
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated list of cascade runs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegulatoryCascadeRunListResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks regulatory.cascade.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /regulatory/cascade/{runId}:
+    get:
+      tags: ["CR-M — Labor-Law Cascade"]
+      summary: Get cascade run detail
+      description: Full run header + per-contractor items array. N+1 prevented by CTE jsonb_agg. NFR < 1s.
+      operationId: getRegulatoryCascadeRun
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "legal_counsel", "executive", "procurement_supplier_risk", "platform_admin", "Super Admin"]
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: regulatory_cascade_run.id
+      responses:
+        "200":
+          description: Cascade run with items
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegulatoryCascadeRun" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks regulatory.cascade.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Run not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /regulatory/cascade/items/{itemId}/status:
+    patch:
+      tags: ["CR-M — Labor-Law Cascade"]
+      summary: Update cascade item remediation status
+      description: Advance remediation lifecycle on a cascade item. Any read-capable persona can update (CR-M-Q6 decision — legal_counsel needs this for post-draft-amendment marking).
+      operationId: setCascadeItemStatus
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "legal_counsel", "executive", "procurement_supplier_risk", "platform_admin", "Super Admin"]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: regulatory_cascade_item.id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [pending, in_progress, amended, dismissed, resolved]
+                note:
+                  type: string
+                  maxLength: 2000
+                  nullable: true
+      responses:
+        "200":
+          description: Updated cascade item
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegulatoryCascadeItemDetail" }
+        "400": { description: Invalid status value, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks regulatory.cascade.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Item not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /regulatory/cascade/items/{itemId}/draft-amendment:
+    post:
+      tags: ["CR-M — Labor-Law Cascade"]
+      summary: Generate labor-law amendment advisory draft
+      description: |
+        7-step orchestration in regulatory-cascade-draft.service.ts:
+        1. Load cascade item (extracts signalId, affectedContractIds).
+        2. Idempotency guard — 409 if advisory_draft_id already set.
+        3. Resolve contractId (body.contractId or item.affectedContractIds[0]).
+        4. Locate or create correlation (signal=decree, contract=affected).
+        5. Fetch labor_law_amendment_v1 advisory_template id.
+        6. generateAdvisoryDraft (Mustache + LLM via CR-H advisory-drafter.service).
+        7. fn_regulatory_cascade_item_link_draft — sets advisory_draft_id, status→amended.
+        Separation of duties: compliance_esg can run cascade but NOT draft amendments (403).
+      operationId: draftCascadeAmendment
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["legal_counsel", "compliance_esg (403)", "platform_admin", "Super Admin"]
+      x-permission: advisory.draft.review
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: regulatory_cascade_item.id
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contractId:
+                  type: integer
+                  description: Override contract to associate with draft (defaults to first affectedContractId)
+      responses:
+        "200":
+          description: Advisory draft created and linked
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DraftAmendmentResponse" }
+        "400": { description: No affectedContractIds on item, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks advisory.draft.review permission (compliance_esg is intentionally blocked), content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Item / signal / contract not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "409": { description: Advisory draft already linked to this item, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /parties/workforce:
+    get:
+      tags: ["CR-M — Party Workforce"]
+      summary: List workforce records across contractor parties
+      description: Paginated list of party_workforce rows filterable by band/compliance/name. Joins party for names.
+      operationId: listPartyWorkforce
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "legal_counsel", "executive", "procurement_supplier_risk", "platform_admin", "Super Admin"]
+      parameters:
+        - name: band
+          in: query
+          schema: { type: string, enum: ['<20', '20-49', '50+'] }
+          description: Filter by headcount band
+        - name: compliant
+          in: query
+          schema: { type: boolean }
+          description: Filter by compliance status
+        - name: search
+          in: query
+          schema: { type: string }
+          description: ILIKE search on party.name_en
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated workforce list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyWorkforceListResponse" }
+        "400": { description: Invalid band value, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks party.workforce.read permission, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /parties/{partyId}/workforce:
+    get:
+      tags: ["CR-M — Party Workforce"]
+      summary: Get workforce snapshot for a contractor party
+      operationId: getPartyWorkforce
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "legal_counsel", "executive", "procurement_supplier_risk", "platform_admin", "Super Admin"]
+      parameters:
+        - name: partyId
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Workforce snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyWorkforce" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks party.workforce.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: No active workforce row for this party, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+    post:
+      tags: ["CR-M — Party Workforce"]
+      summary: Upsert workforce attributes for a contractor party
+      description: Creates or updates the active workforce row (one per tenant+party). Derives headcount_band and is_compliant server-side.
+      operationId: setPartyWorkforce
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["compliance_esg", "platform_admin", "Super Admin"]
+      parameters:
+        - name: partyId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [headcount, emiratisationTarget, emiratisationActual]
+              properties:
+                headcount: { type: integer, minimum: 0 }
+                emiratisationTarget: { type: integer, minimum: 0 }
+                emiratisationActual: { type: integer, minimum: 0 }
+                category:
+                  type: string
+                  enum: [drilling, logistics, epc, operational_support, other]
+                notes: { type: string, maxLength: 2000, nullable: true }
+      responses:
+        "200":
+          description: Workforce row created or updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyWorkforce" }
+        "400": { description: Validation error, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks party.workforce.manage, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Party not found or not active, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+# CR-M component schemas (appended to components/schemas section below)
+# Note: The components/schemas block is defined earlier in this file; the schemas below are
+# documented here as addendum.  BE consuming code uses src/types/regulatory-cascade.types.ts.
+#
+# PartyWorkforce:
+#   id, partyId, partyNameEn, partyNameAr, headcount, headcountBand ('<20'|'20-49'|'50+'),
+#   emiratisationTarget, emiratisationActual, isCompliant, category, source, updatedAt
+#
+# PartyWorkforceListResponse:
+#   data: [PartyWorkforce], pagination: { total, limit, offset }
+#
+# RegulatoryCascadeItemDetail:
+#   id, partyId, contractorNameEn, contractorNameAr, emirate, headcountBand, isCompliant,
+#   emiratisationGap, affectedClauseCount, affectedClauseIds, affectedContractIds,
+#   icvAttachmentIds, icvAttachmentCount, penaltyExposureMinAed, penaltyExposureMaxAed,
+#   penaltyBasis (SENSITIVE), remediationStatus, advisoryDraftId, advisoryDraftStatus
+#
+# RegulatoryCascadeRun:
+#   id, tenantId, signalId, regulationRef, status, summary (byBand/totals/generatedAt),
+#   params, affectedContractorCount, totalPenaltyMinAed, totalPenaltyMaxAed,
+#   dataClassification, runAt, createdAt, createdByName, items: [RegulatoryCascadeItemDetail]
+#
+# RegulatoryCascadeRunListResponse:
+#   data: [RegulatoryCascadeRunListItem], pagination: { total, limit, offset }
+#
+# DraftAmendmentResponse:
+#   draftId, correlationId, templateId, contractId, approvalStatus, remediationStatus, itemId
