@@ -30,21 +30,32 @@ export type {
 } from '../types/osint.types';
 
 /**
- * SHA-256 dedup hash per Annex B + design note:
- *   sha256(source_id || '|' || isoformat(event_date OR fetched_at) || '|'
- *          || lower(trim(title)))
+ * SHA-256 dedup hash — stable, content-based identity for a signal:
+ *   sha256(source_id || '|' || isoformat(event_date) || '|' || lower(trim(title)))
+ *
+ * IMPORTANT: the dedup key must NOT depend on fetch time. A previous version
+ * fell back to `fetched_at` when `event_date` was absent, which made the hash
+ * change on every poll — so list-style sources with no per-entry date
+ * (sanctions lists especially) re-inserted their entire payload on every pull
+ * (the OFAC SDN list alone produced ~469k duplicate rows). Records that
+ * genuinely change over time carry an `event_date`; records without one
+ * (e.g. a sanctions-list entry) dedup on (source_id, title) identity, which is
+ * correct — the same entity should collapse to one row.
+ *
+ * `fetchedAt` is retained in the signature for call-site compatibility but is
+ * intentionally not part of the hash.
  *
  * Used by every adapter normalise() to populate NormalisedSignal.dedup_hash;
  * fn_osint_signal_upsert ON CONFLICT (tenant_id, dedup_hash) DO NOTHING
- * leverages this to make ingestion idempotent (AC-S7-03).
+ * leverages this to make ingestion idempotent across re-pulls (AC-S7-03).
  */
 export const computeDedupHash = (
   sourceId: string,
   eventDate: Date | undefined,
-  fetchedAt: Date,
+  _fetchedAt: Date,
   title: string,
 ): string => {
-  const ts = (eventDate ?? fetchedAt).toISOString();
+  const ts = eventDate ? eventDate.toISOString() : '';
   const norm = `${sourceId}|${ts}|${title.trim().toLowerCase()}`;
   return createHash('sha256').update(norm, 'utf8').digest('hex');
 };

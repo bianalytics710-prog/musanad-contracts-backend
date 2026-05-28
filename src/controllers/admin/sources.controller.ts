@@ -20,7 +20,11 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../../database/client';
-import { ApiError } from '../../utils/errors.util';
+import { ApiError, NotFoundError } from '../../utils/errors.util';
+import {
+  runSourceFetchSweep,
+  runSingleSourceFetch,
+} from '../../workers/source-fetch.worker';
 import type {
   OsintSourceListQueryInferred,
   OsintSourceIdParamInferred,
@@ -261,6 +265,89 @@ export const adminSourcesController = {
       req.logger.error(
         {
           action: 'admin.sources.testPull',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorTypeOf(err),
+        },
+        'Controller error',
+      );
+      next(err);
+    }
+  },
+
+  /**
+   * POST /api/v1/admin/sources/pull-now — run one on-demand fetch sweep across
+   * all enabled sources (replaces the every-minute cron in the demo posture).
+   * Gated by source.manage at the route layer.
+   */
+  async pullNow(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'admin.sources.pullNow', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const stats = await runSourceFetchSweep();
+      req.logger.info(
+        {
+          action: 'admin.sources.pullNow',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          ...stats,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(stats);
+    } catch (err) {
+      req.logger.error(
+        {
+          action: 'admin.sources.pullNow',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorTypeOf(err),
+        },
+        'Controller error',
+      );
+      next(err);
+    }
+  },
+
+  /**
+   * POST /api/v1/admin/sources/:id/pull — run an on-demand fetch for a single
+   * source (real network fetch + persist). Distinct from /test-pull, which is
+   * the DB-side dry-run preview. Gated by source.manage at the route layer.
+   */
+  async pullSource(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'admin.sources.pull', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const { id } = req.params as unknown as OsintSourceIdParamInferred;
+      const result = await runSingleSourceFetch(Number(id));
+      if (!result.found) {
+        next(new NotFoundError('Source not found'));
+        return;
+      }
+      req.logger.info(
+        {
+          action: 'admin.sources.pull',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          sourceId: result.sourceId,
+          inserted: result.inserted,
+          total: result.total,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      req.logger.error(
+        {
+          action: 'admin.sources.pull',
           userId: req.user?.id,
           duration: Date.now() - startTime,
           errorType: errorTypeOf(err),

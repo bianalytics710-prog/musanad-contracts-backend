@@ -15,7 +15,7 @@
  * by rls.middleware.
  */
 import { Router } from 'express';
-import { authenticate } from '../../middleware/auth.middleware';
+import { authenticate, authorise } from '../../middleware/auth.middleware';
 import { rlsMiddleware } from '../../middleware/rls.middleware';
 import {
   authedReadRateLimiter,
@@ -50,6 +50,15 @@ router.post(
   adminSourcesController.create,
 );
 
+// On-demand ingestion (demo posture — replaces the every-minute cron).
+// Registered before the /:id routes so the literal path is matched first.
+router.post(
+  '/pull-now',
+  authedWriteRateLimiter,
+  authorise(['source.manage']),
+  adminSourcesController.pullNow,
+);
+
 router.get(
   '/:id',
   authedReadRateLimiter,
@@ -77,6 +86,14 @@ router.post(
   authedWriteRateLimiter,
   validate(osintSourceIdParamSchema, 'params'),
   adminSourcesController.testPull,
+);
+
+router.post(
+  '/:id/pull',
+  authedWriteRateLimiter,
+  authorise(['source.manage']),
+  validate(osintSourceIdParamSchema, 'params'),
+  adminSourcesController.pullSource,
 );
 
 router.post(

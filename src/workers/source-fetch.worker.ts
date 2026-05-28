@@ -277,6 +277,49 @@ export const runSourceFetchSweep = async (): Promise<SweepStats> => {
 };
 
 /**
+ * Manual single-source fetch — backs the on-demand "Test pull" button
+ * (POST /api/v1/admin/sources/:id/pull). Runs the same fetch → normalise →
+ * upsert path as the sweep, scoped to one source row by id. Ignores the
+ * `enabled` flag so an admin can pull a source on demand even when the
+ * scheduled worker is off (the demo posture). Returns { found } so the
+ * controller can 404 cleanly.
+ */
+export const runSingleSourceFetch = async (
+  osintSourceId: number,
+): Promise<{ found: boolean; sourceId?: string; inserted: number; total: number }> => {
+  const res = await pool().query<DueSourceRow>(
+    `SELECT s.id, s.tenant_id, s.source_id, s.url, s.source_reliability,
+            s.refresh_seconds, s.rate_limit, s.metadata, s.geography_filter,
+            s.severity_mapping,
+            c.credential_ref
+       FROM osint_source s
+       LEFT JOIN source_credential c
+         ON c.osint_source_id = s.id
+        AND c.tenant_id = s.tenant_id
+        AND c.is_active = TRUE
+      WHERE s.id = $1
+        AND s.is_active = TRUE
+      LIMIT 1`,
+    [osintSourceId],
+  );
+  const row = res.rows[0];
+  if (!row) return { found: false, inserted: 0, total: 0 };
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const { inserted, total } = await processSource(row, since);
+  logger.info(
+    {
+      action: 'sourceFetchWorker.manualPull',
+      osintSourceId,
+      sourceId: row.source_id,
+      inserted,
+      total,
+    },
+    'Manual single-source pull complete',
+  );
+  return { found: true, sourceId: row.source_id, inserted, total };
+};
+
+/**
  * Start the cron driver. Idempotent. NODE_ENV=test short-circuits.
  * Also requires SOURCE_FETCH_WORKER_ENABLED=true (defaults to false in CR-A
  * to keep dev local boots quiet — flip to true in production env).
