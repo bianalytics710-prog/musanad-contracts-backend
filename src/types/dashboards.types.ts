@@ -286,13 +286,17 @@ export interface TrendMonthValueAed {
 
 /**
  * Counterparty concentration row — fn_dashboard_executive
- * topCounterpartiesByValue5. counterpartyName not joined (no parties table yet);
- * FE shows counterpartyId with fallback 'pending' label per AC-S7-04.
+ * topCounterpartiesByValue5. counterpartyName, counterpartyNameAr, and
+ * counterpartyEmirate are now embedded by fn_dashboard_executive (CR-FIX1
+ * DB migration); optional to remain compatible with older cached fn_ rows.
  */
 export interface CounterpartyConcentrationRow {
   counterpartyId: number;
   totalValueAed: number;
   contractCount: number;
+  counterpartyName?: string;
+  counterpartyNameAr?: string | null;
+  counterpartyEmirate?: string | null;
 }
 
 /**

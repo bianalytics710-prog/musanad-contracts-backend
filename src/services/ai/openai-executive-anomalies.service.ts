@@ -74,7 +74,33 @@ export const detectAnomalies = async (args: {
         model,
         temperature: 0.4,
         max_tokens: 1500,
-        response_format: { type: 'json_object' },
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'executive_anomalies',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['anomalies'],
+              properties: {
+                anomalies: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['insight', 'severity', 'drillDownFilter'],
+                    properties: {
+                      insight: { type: 'string' },
+                      severity: { type: 'string', enum: ['info', 'warning', 'critical'] },
+                      drillDownFilter: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
         messages: [
           { role: 'system', content: args.systemPrompt },
           { role: 'user', content: args.userMessage },
