@@ -17109,3 +17109,570 @@ x-paths-root:
 #
 # DraftAmendmentResponse:
 #   draftId, correlationId, templateId, contractId, approvalStatus, remediationStatus, itemId
+
+# =============================================================================
+# CR-O — Trade Margin (M21 Financial Intelligence, Trade half)
+# Migrations 309–321 | Shipped 2026-05-29
+# Base path prefix: /api/v1/financial
+# Permissions: finance.margin.read (read) | finance.trade.manage (write/recompute)
+# Roles (read): finance_treasury, executive, platform_admin, Super Admin
+# Roles (manage): finance_treasury, platform_admin, Super Admin
+# =============================================================================
+
+  /financial/trade-margin:
+    get:
+      summary: List trade positions with latest margin
+      description: >
+        Returns a paginated list of trade positions (sell and buy sides) with inline
+        latest margin figures from the latest_margin materialized view.
+        Supports filtering by side, grade, status, and full-text search on
+        position_ref + counterparty name.
+        All NUMERIC money fields (marginPerBbl, totalMarginUsd, totalMarginAed,
+        volumeBbl) are serialised as strings (::text) to preserve NUMERIC(12,4) /
+        NUMERIC(18,2) precision — parseFloat() before arithmetic.
+      operationId: listTradePositions
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - executive
+        - platform_admin
+        - Super Admin
+      parameters:
+        - name: side
+          in: query
+          schema:
+            type: string
+            enum: [sell, buy]
+          description: Filter to one trade side
+        - name: grade
+          in: query
+          schema:
+            type: string
+            enum: [murban, west_african_x, brent, dubai, wti, other]
+          description: Filter to one crude grade
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, priced, closed]
+          description: Filter by position lifecycle status (default all)
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 200
+          description: ILIKE search on position_ref and counterparty name_en
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: Paginated list of trade positions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TradePositionListItem'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          description: Invalid filter values (enum mismatch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.margin.read required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /financial/trade-margin/aggregate:
+    get:
+      summary: Aggregate margin by counterparty, quarter, or side
+      description: >
+        Portfolio-level margin rollup using the latest_margin MV.
+        Supports groupBy: counterparty | quarter | side (default: side).
+        S2-24 split-aggregate CTE pattern — no nested aggregates.
+        Returns zero totals + empty breakdown when no open positions exist.
+        IMPORTANT: this static path is registered BEFORE the parameterised
+        /:positionId route in Express to prevent route-matching conflicts.
+      operationId: aggregateTradeMargin
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - executive
+        - platform_admin
+        - Super Admin
+      parameters:
+        - name: groupBy
+          in: query
+          schema:
+            type: string
+            enum: [counterparty, quarter, side]
+            default: side
+          description: Aggregation dimension
+      responses:
+        '200':
+          description: Portfolio margin aggregate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarginAggregateResult'
+        '400':
+          description: Invalid groupBy value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.margin.read required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /financial/trade-margin/{positionId}:
+    get:
+      summary: Get trade position detail with latest margin
+      description: >
+        Returns full position detail including costComponents[], latestMargin block
+        (from the latest_margin MV), counterparty, internalEntity, and optional
+        linkedContract summary. Uses fn_trade_position_get (read path).
+        Returns 404 when the position does not exist or is inactive.
+      operationId: getTradePositionDetail
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - executive
+        - platform_admin
+        - Super Admin
+      parameters:
+        - name: positionId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: trade_position.id
+      responses:
+        '200':
+          description: Trade position detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradePosition'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.margin.read required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Position not found or inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /financial/trade-margin/{positionId}/history:
+    get:
+      summary: Get margin snapshot history for a position
+      description: >
+        Returns all margin_snapshot rows for a position in ascending computed_at
+        order (oldest first — designed for trend chart rendering left-to-right).
+        Reads margin_snapshot table directly, NOT the latest_margin MV, so all
+        historical snapshots are returned.
+        Returns count:0 + snapshots:[] when position exists but has no snapshots.
+      operationId: getMarginSnapshotHistory
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - executive
+        - platform_admin
+        - Super Admin
+      parameters:
+        - name: positionId
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: trade_position.id
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+          description: Max snapshots to return
+      responses:
+        '200':
+          description: Snapshot history (ASC order)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarginSnapshotHistoryResult'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.margin.read required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Position not found (P0002 from fn_margin_snapshot_history)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /financial/price-benchmarks:
+    get:
+      summary: List price benchmark observations
+      description: >
+        Paginated benchmark price series (Murban OSP, Brent, Dubai, WTI, WAF, USD/AED FX).
+        Supports filtering by benchmark_code and date range.
+        ORDER BY benchmark_code, price_date DESC.
+        priceValue is serialised as a string (::text from NUMERIC(12,4)).
+      operationId: listPriceBenchmarks
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - executive
+        - platform_admin
+        - Super Admin
+      parameters:
+        - name: benchmarkCode
+          in: query
+          schema:
+            type: string
+            enum: [murban_osp, brent, dubai, wti, west_african_x, usd_aed]
+          description: Filter to one benchmark series
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start of date range (YYYY-MM-DD)
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End of date range (YYYY-MM-DD)
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Paginated benchmark price series
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PriceBenchmarkListItem'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationMeta'
+        '400':
+          description: Invalid benchmarkCode or date format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.margin.read required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      summary: Record a price benchmark observation (upsert)
+      description: >
+        UPSERT a single price_benchmark row identified by
+        (tenant_id, benchmark_code, price_date). Idempotent — ON CONFLICT DO UPDATE.
+        Used for ad-hoc benchmark entry; the bulk recompute path uses
+        POST /price-benchmarks/recompute instead.
+        Requires finance.trade.manage.
+      operationId: recordPriceBenchmark
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - platform_admin
+        - Super Admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordPriceBenchmarkDto'
+      responses:
+        '201':
+          description: Benchmark row created or updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceBenchmark'
+        '400':
+          description: Validation error — missing required fields, priceValue < 0, or bad enum
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.trade.manage required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /financial/price-benchmarks/recompute:
+    post:
+      summary: Recompute all open forward positions after a benchmark price change
+      description: >
+        The OSP-drop demo action. UPSERTS a new price_benchmark row for the given
+        benchmark_code + priceDate, then recomputes margin for every open position
+        whose pricing_basis matches the benchmark and delivery_month is on or after
+        the new price date. Returns an aggregate portfolio delta.
+        Demo: set Murban OSP to $104.44 for 2026-06-01 → Jun/Jul/Aug forward
+        cargoes recompute → delta = -$37.86M USD / AED -139.04M.
+        This is a synchronous, deterministic operation. The same fn also emits
+        pg_notify('margin_recompute_requested') for the async worker path.
+        IMPORTANT: this static path is registered BEFORE POST / in Express.
+        Requires finance.trade.manage (DEFINER function — also gated in fn body).
+      operationId: recomputeByPriceChange
+      tags:
+        - CR-O — Trade Margin
+      security:
+        - BearerAuth: []
+      x-authorised-roles:
+        - finance_treasury
+        - platform_admin
+        - Super Admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecomputePriceBenchmarkDto'
+      responses:
+        '200':
+          description: >
+            Recompute complete. positionsRecomputed count + deltaAed/deltaUsd
+            (negative = margin compression). positionsRecomputed:0 is informational,
+            not an error (200, not 422).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarginRecomputeResult'
+        '400':
+          description: Validation error — negative newPrice, invalid benchmarkCode, or bad priceDate format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permission — finance.trade.manage required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: DB function failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+# CR-O component schemas (appended — existing components/schemas block defined earlier)
+# Note: All NUMERIC money fields returned as string (::text) — parseFloat() before arithmetic.
+# Field names validated 1-to-1 against deployed fn JSONB keys (migrations 315/316).
+#
+# TradePositionListItem:
+#   id, positionRef, side (TradeSide), grade (TradeGrade),
+#   counterparty: { id, nameEn, nameAr },
+#   volumeBbl (string), pricingBasis, deliveryMonth, termOrSpot, status,
+#   marginPerBbl (string|null), totalMarginUsd (string|null),
+#   totalMarginAed (string|null), recommendation (MarginRecommendation|null),
+#   latestComputedAt (string|null)
+#
+# TradePosition (full detail):
+#   id, positionRef, side, grade,
+#   counterparty: CounterpartySummary { id, nameEn, nameAr },
+#   internalEntity: CounterpartySummary | null,
+#   volumeBbl (string), pricingBasis, deliveryMonth, termOrSpot,
+#   linkedContract: { id, contractNumber, titleEn, titleAr } | null,
+#   status, notes,
+#   costComponents: [{ id, componentType, amountUsdPerBbl (string), isRevenue, notes }],
+#   latestMargin: { marginPerBbl (string), totalMarginUsd (string), totalMarginAed (string),
+#                   recommendation, latestComputedAt } | null,
+#   dataClassification, createdAt, updatedAt, createdBy, updatedBy, isActive
+#
+# MarginAggregateResult:
+#   totalMarginAed (string), totalMarginUsd (string), currency ('AED'),
+#   positionCount (integer), groupBy ('counterparty'|'quarter'|'side'),
+#   breakdown: [{ key (string), label (string), marginAed (string), marginUsd (string),
+#                 positionCount (integer), pctOfTotal (number 0-100) }]
+#
+# MarginSnapshotHistoryResult:
+#   tradePositionId (integer), count (integer),
+#   snapshots: [{ marginSnapshotId, computedAt, benchmarkPriceUsed (string|null),
+#                 revenuePerBbl (string), costPerBbl (string), marginPerBbl (string),
+#                 totalMarginUsd (string), totalMarginAed (string), triggeredBy }]
+#
+# MarginRecomputeResult:
+#   benchmarkCode, newPrice (string), priceDate, positionsRecomputed (integer),
+#   deduplicatedCount (integer), priorAggregateMarginAed (string),
+#   newAggregateMarginAed (string), deltaAed (string), deltaUsd (string),
+#   recomputedPositionIds: [integer]
+#
+# PriceBenchmark (full entity):
+#   id, benchmarkCode, priceDate, priceValue (string), unit, periodGrain, source,
+#   notes, createdAt, updatedAt, createdBy, updatedBy, isActive
+#
+# PriceBenchmarkListItem:
+#   id, benchmarkCode, priceDate, priceValue (string), unit, periodGrain, source, notes
+#
+# RecordPriceBenchmarkDto (request body for POST /price-benchmarks):
+#   benchmarkCode (required), priceDate (required, YYYY-MM-DD), priceValue (required, string|number),
+#   unit (required), periodGrain? (default 'monthly'), source? (default 'mock'), notes? (string|null)
+#
+# RecomputePriceBenchmarkDto (request body for POST /price-benchmarks/recompute):
+#   benchmarkCode (required), newPrice (required, string|number, non-negative),
+#   priceDate? (optional, YYYY-MM-DD, defaults to first of current month)
+#
+# TradeMarginSummary (additive key 11 in fn_dashboard_executive — executive dashboard only):
+#   openPositionCount (integer), totalMarginAed (string), totalMarginUsd (string),
+#   bySide: { sell: { positionCount, marginAed }, buy: { positionCount, marginAed } },
+#   recentMarginChange: { benchmarkCode, deltaAed (string), deltaUsd (string), asOf } | null,
+#   topPositionsByMargin3: [{ tradePositionId, positionRef, side, counterpartyName, totalMarginAed (string) }]
+#   NOTE: recentMarginChange is dynamically computed via S2-24 LAG-window CTE (mig 321).
+#         Returns null when no price_change snapshots exist within the 30-day window.
+#   NOTE: fn_dashboard_executive wraps this key in BEGIN..EXCEPTION..END + COALESCE zero-shape
+#         fallback — a margin-data gap cannot break the executive dashboard.
+

@@ -1165,6 +1165,21 @@ const SENSITIVE_PATHS: string[] = [
   'req.body.closureNote',
   '*.closureNote',
   '*.*.closureNote',
+
+  // -- M21 (CR-O) — Oil-Trade Margin sensitive fields --
+  //    breakdown: margin_snapshot.breakdown JSONB — commercially sensitive per-bbl
+  //    cost waterfall (lifting/transport/insurance/hedge costs + OSP used).
+  //    Audit trigger redact list extended in migration 314. Pino mirrors it.
+  //    DB design note H-2: "Pino BE redact paths should mirror."
+  //    Scoped paths prevent blanket-redacting every 'breakdown' key but
+  //    cover the controller response + body paths comprehensively.
+  'req.body.breakdown',
+  'req.body.*.breakdown',
+  '*.breakdown',
+  '*.*.breakdown',
+  'res.body.data.breakdown',
+  'res.body.data.snapshots',
+  'res.body.data.*.breakdown',
 ];
 
 const baseConfig = {

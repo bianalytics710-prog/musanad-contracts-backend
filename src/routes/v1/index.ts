@@ -274,4 +274,18 @@ v1Router.use('/regulatory/cascade', regulatoryCascadeRouter);
 import financialBudgetBurnRouter from './financial-budget-burn.routes';
 v1Router.use('/financial/budget-burn', financialBudgetBurnRouter);
 
+// ============================================================
+// M21 (CR-O) — Oil-Trade Margin (Financial Intelligence, Trade half).
+//   GET  /api/v1/financial/trade-margin                      — positions list (finance.margin.read)
+//   GET  /api/v1/financial/trade-margin/aggregate            — portfolio rollup (finance.margin.read)
+//   GET  /api/v1/financial/trade-margin/:positionId          — position detail (finance.margin.read)
+//   GET  /api/v1/financial/trade-margin/:positionId/history  — snapshot history (finance.margin.read)
+//   GET  /api/v1/financial/price-benchmarks                  — benchmark series list (finance.margin.read)
+//   POST /api/v1/financial/price-benchmarks/recompute        — OSP-drop demo action (finance.trade.manage)
+//   POST /api/v1/financial/price-benchmarks                  — record benchmark (finance.trade.manage)
+// ============================================================
+import { tradeMarginRouter, priceBenchmarksRouter } from './financial-trade-margin.routes';
+v1Router.use('/financial/trade-margin', tradeMarginRouter);
+v1Router.use('/financial/price-benchmarks', priceBenchmarksRouter);
+
 export default v1Router;

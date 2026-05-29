@@ -116,6 +116,11 @@ import {
   startReportScheduler,
   stopReportScheduler,
 } from './services/report-scheduler.service';
+// M21 (CR-O) — Margin Recompute worker (PG LISTEN margin_recompute_requested + daily cron)
+import {
+  startMarginRecomputeWorker,
+  stopMarginRecomputeWorker,
+} from './workers/margin-recompute.worker';
 
 const app = express();
 
@@ -275,6 +280,14 @@ const server = app.listen(port, () => {
   // Each scheduled task enqueues a report_run with triggered_by='scheduled'.
   // No-op in test AND requires REPORT_SCHEDULER_ENABLED=true.
   startReportScheduler();
+
+  // M21 (CR-O) — Margin Recompute worker.
+  // PG LISTEN margin_recompute_requested: log/verify MV after price-change recomputes.
+  // Daily sentinel cron at 01:00 UTC: fn_margin_aggregate probe.
+  // No-op in test AND requires MARGIN_RECOMPUTE_WORKER_ENABLED=true (default off).
+  // Demo path is the synchronous POST /price-benchmarks/recompute — this worker
+  // is the production async wiring.
+  void startMarginRecomputeWorker();
 });
 
 // --- Graceful shutdown ---
@@ -308,6 +321,8 @@ const shutdown = async (signal: string): Promise<void> => {
     // M20 (CR-L) — stop report run worker + scheduler.
     stopReportRunWorker();
     stopReportScheduler();
+    // M21 (CR-O) — stop margin recompute worker (PG LISTEN + cron).
+    stopMarginRecomputeWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
