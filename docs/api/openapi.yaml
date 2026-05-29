@@ -16637,6 +16637,451 @@ x-paths-root:
         "403": { description: Actor lacks party.workforce.manage, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
         "404": { description: Party not found or not active, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
 
+  # ----------------------------------------------------------------
+  # CR-N — Budget Burn (M21 Financial Intelligence, Cost half)
+  # 9 endpoints under /api/v1/financial/budget-burn
+  # Migrations: 296–308 | Added: 2026-05-29
+  # Permission: finance.budget.read (read), finance.budget.manage (write),
+  #             advisory.draft.review (draft-cure-notice)
+  # Roles (read): finance_treasury, executive, procurement_supplier_risk, operations,
+  #               platform_admin, Super Admin
+  # Roles (manage): finance_treasury, platform_admin, Super Admin
+  # Roles (cure notice): legal_counsel, platform_admin, Super Admin
+  # ----------------------------------------------------------------
+
+  /financial/budget-burn:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: Portfolio budget burn rollup across all budgeted contracts
+      description: |
+        Returns a portfolio-level rollup (total budget, total actual, variance, over-budget count,
+        top over-budget contracts) plus a paginated list of per-contract burn rows.
+        Never returns 404 — returns zeros/empty arrays when no budgeted contracts exist.
+        Powered by fn_budget_burn_portfolio. NFR < 3s.
+      operationId: getBudgetBurnPortfolio
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: fiscalYear
+          in: query
+          required: false
+          schema: { type: integer, minimum: 2000, maximum: 2100 }
+          description: Filter to a specific fiscal year (calendar year). Default — all years.
+        - name: minVariancePct
+          in: query
+          required: false
+          schema: { type: number, minimum: 0 }
+          description: Return only contracts with variancePct >= this value.
+        - name: costCategory
+          in: query
+          required: false
+          schema: { type: string, enum: [day_rate, manpower, equipment, milestone, other] }
+          description: Filter to one cost category.
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Portfolio budget burn rollup
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BudgetBurnPortfolio" }
+        "400": { description: Invalid filter values, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/budgets:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: List contract budget lines (paginated)
+      description: |
+        Paginated list of contract_budget rows with optional filters.
+        Powered by fn_contract_budget_list. Money fields returned as string.
+      operationId: listContractBudgets
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: query
+          required: false
+          schema: { type: integer }
+          description: Filter to a specific contract.
+        - name: fiscalYear
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: costCategory
+          in: query
+          required: false
+          schema: { type: string, enum: [day_rate, manpower, equipment, milestone, other] }
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Paginated list of budget lines
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractBudgetListResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/budgets/{id}:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: Get a single budget line by id
+      description: Returns one contract_budget row with embedded contract summary. Powered by fn_contract_budget_get.
+      operationId: getContractBudgetById
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+          description: contract_budget.id
+      responses:
+        "200":
+          description: Budget line detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractBudget" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Budget line not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/cost-actuals:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: List actual-spend lines (paginated)
+      description: |
+        Paginated list of contract_cost_actual rows with optional filters.
+        Month grain by default (ERP feed). Money fields as string.
+        Powered by fn_contract_cost_actual_list.
+      operationId: listContractCostActuals
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: fiscalYear
+          in: query
+          required: false
+          schema: { type: integer }
+        - name: costCategory
+          in: query
+          required: false
+          schema: { type: string, enum: [day_rate, manpower, equipment, milestone, other] }
+        - name: periodLabel
+          in: query
+          required: false
+          schema: { type: string }
+          description: "Filter to a specific period label (e.g. '2026-04')."
+        - name: page
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: Paginated list of actual-spend lines
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractCostActualListResponse" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/{contractId}:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: Detailed burn view — budget vs actual by period and category
+      description: |
+        Per-period × category budget-vs-actual, variance amount + %, cumulative burn,
+        % of total budget consumed, remaining budget for one contract.
+        Quarter-grain byPeriod + month-grain monthlyActuals (do not align by label — fn owns rollup).
+        Key names: totalBudgetedAed (not totalBudgetAed), burnRatePct (not pctBudgetConsumed).
+        Powered by fn_budget_burn_compute. NFR < 2s.
+      operationId: getContractBudgetBurnCompute
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: integer }
+          description: contract.id
+      responses:
+        "200":
+          description: Detailed burn view
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BudgetBurnCompute" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found or no budget, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/{contractId}/variance:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: Variance analysis — breaches + correlated cure/LD clause refs
+      description: |
+        Lists (period, category) pairs breaching the variance threshold.
+        Threshold: query param thresholdPct → system_setting 'financial.budget.variance_threshold_pct' → default 5.
+        Returns correlated cure_period + liquidated_damages extracted-clause refs from the contract.
+        Returns cureNoticeEligible=true when breachCount>0 AND at least one cure_period clause present.
+        Comparison: month actual vs pro-rated monthly budget (quarterly/3) — so a single-month spike fires a breach.
+        Powered by fn_budget_variance_for_contract. NFR < 2s.
+      operationId: getContractBudgetVariance
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: thresholdPct
+          in: query
+          required: false
+          schema: { type: number, minimum: 0, maximum: 100 }
+          description: Override variance threshold %. Default from system_setting (5 if missing).
+      responses:
+        "200":
+          description: Variance result with breach list and correlated clauses
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BudgetVarianceResult" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/{contractId}/projection:
+    get:
+      tags: ["CR-N — Budget Burn"]
+      summary: Year-end projection via run-rate extrapolation
+      description: |
+        Run-rate extrapolation: projects fiscal-year-end spend based on actuals to date.
+        asOfPeriod defaults to latest month with actuals.
+        confidenceNote: 'high' (>=6 months), 'medium' (3-5), 'low' (<3), 'insufficient_data' (0 actuals — 200, not 404).
+        Fiscal year = calendar year (ADNOC-aligned). 12-month constant.
+        Powered by fn_budget_year_end_projection. NFR < 2s.
+      operationId: getContractBudgetProjection
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "executive", "procurement_supplier_risk", "operations", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: asOfPeriod
+          in: query
+          required: false
+          schema: { type: string, pattern: '^\d{4}-\d{2}$' }
+          description: "'YYYY-MM' period label cutoff. Defaults to latest month with actuals."
+      responses:
+        "200":
+          description: Year-end projection result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BudgetYearEndProjection" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.read, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/{contractId}/cost-actuals:
+    post:
+      tags: ["CR-N — Budget Burn"]
+      summary: Record an actual-spend line (manual entry)
+      description: |
+        Records a single contract_cost_actual row. Upsert semantics — re-posting the same
+        (contractId, periodLabel, costCategory, referenceNo) is idempotent (returns the updated row).
+        referenceNo is optional — coalesced to '' if absent.
+        Powered by fn_contract_cost_actual_record (VOLATILE INVOKER + explicit finance.budget.manage check).
+      operationId: recordContractCostActual
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["finance_treasury", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [periodLabel, fiscalYear, costCategory, actualAmountAed]
+              properties:
+                periodLabel:
+                  type: string
+                  pattern: '^\d{4}-\d{2}$'
+                  description: "'YYYY-MM' month label (default grain)."
+                fiscalYear:
+                  type: integer
+                  minimum: 2000
+                  maximum: 2100
+                costCategory:
+                  type: string
+                  enum: [day_rate, manpower, equipment, milestone, other]
+                actualAmountAed:
+                  type: string
+                  description: Non-negative. String to preserve NUMERIC(18,2) precision.
+                source:
+                  type: string
+                  enum: [erp_feed, manual]
+                  default: manual
+                referenceNo:
+                  type: string
+                  maxLength: 100
+                  description: ERP voucher/invoice reference. Coalesced to '' if absent.
+                periodType:
+                  type: string
+                  enum: [month, quarter, year]
+                  default: month
+                notes:
+                  type: string
+                  maxLength: 2000
+                  nullable: true
+      responses:
+        "201":
+          description: Actual-spend line created or updated (upsert)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractCostActual" }
+        "400": { description: Validation error — missing required fields / amount < 0 / invalid enum, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks finance.budget.manage, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found or inactive, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+  /financial/budget-burn/variance/{contractId}/draft-cure-notice:
+    post:
+      tags: ["CR-N — Budget Burn"]
+      summary: Draft a budget-variance cure notice (legal_counsel)
+      description: |
+        Orchestrates the cure-notice draft seam: calls fn_budget_variance_for_contract →
+        guards cureNoticeEligible → locates/creates correlation (rule.budget.variance_overrun) →
+        renders budget_cure_notice_v1 Mustache template → calls fn_advisory_draft_generate.
+        Returns 422 when cureNoticeEligible = false (no breaches above threshold).
+        Reuses the CR-H advisory-drafter pattern. All body fields are optional.
+        Permission required: advisory.draft.review (legal_counsel, platform_admin, Super Admin).
+      operationId: draftBudgetVarianceCureNotice
+      security: [{ BearerAuth: [] }]
+      x-authorised-roles: ["legal_counsel", "platform_admin", "Super Admin"]
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                thresholdPct:
+                  type: number
+                  description: Override variance threshold for eligibility check.
+                focusPeriodLabel:
+                  type: string
+                  description: Override which breach period to focus on in the notice body.
+      responses:
+        "200":
+          description: Cure notice draft created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DraftCureNoticeResponse" }
+        "400": { description: Validation error in body, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { description: Actor lacks advisory.draft.review, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "404": { description: Contract not found, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "422": { description: Cure notice not eligible — no variance breaches above threshold, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+        "500": { description: DB function failure or advisory draft generation failure, content: { application/json: { schema: { $ref: "#/components/schemas/ErrorResponse" } } } }
+
+# CR-N component schemas (addendum — consuming code uses src/types/budget-burn.types.ts)
+#
+# BudgetBurnPortfolio:
+#   summary: { contractsWithBudget, totalBudgetAed, totalActualAed, totalVarianceAed,
+#              overBudgetCount, totalProjectedOverrunAed }
+#   topOverBudget: [{ contractId, contractNumber, titleEn, variancePct, varianceAed }]
+#   data: [PortfolioContractRow] — contractId, contractNumber, titleEn, titleAr,
+#         counterpartyName, counterpartyNameAr, budgetAed, actualAed, varianceAed,
+#         variancePct, pctConsumed, projectedOverUnderAed, varianceFlag
+#   pagination: { total, page, limit, totalPages }
+#
+# BudgetBurnCompute:
+#   contractId, contractNumber, titleEn, titleAr, currency,
+#   totalBudgetedAed (string), totalActualAed (string), totalVarianceAed (string),
+#   totalVariancePct (number), burnRatePct (number), remainingBudgetAed (string),
+#   byPeriod: [{ periodLabel, fiscalYear, budgetAed, actualAed, varianceAed,
+#              variancePct, byCategory: [{ costCategory, budgetAed, actualAed,
+#              varianceAed, variancePct, overThreshold }] }]
+#   monthlyActuals: [{ periodLabel, costCategory, actualAed }]
+#   cumulativeBurn: [{ periodLabel, cumulativeActualAed, cumulativeBudgetAed }]
+#   NOTE: deployed fn uses totalBudgetedAed (not totalBudgetAed) + burnRatePct (not pctBudgetConsumed)
+#
+# BudgetVarianceResult:
+#   contractId, thresholdPct, thresholdSource ('param'|'system_setting'|'default'),
+#   breaches: [{ periodLabel, costCategory, fiscalYear, budgetAed, actualAed,
+#               varianceAed, variancePct, severity ('warning'|'breach') }]
+#   breachCount, maxVariancePct,
+#   correlatedClauses: { curePeriod: [{ clauseId, clauseType, curePeriodDays, pageNo }],
+#                        liquidatedDamages: [{ clauseId, clauseType, ldRate, ldCap, pageNo }] }
+#   cureNoticeEligible (boolean)
+#
+# BudgetYearEndProjection:
+#   contractId, fiscalYear, asOfPeriod, monthsElapsed, monthsRemaining,
+#   actualToDateAed, runRatePerMonthAed, projectedYearEndAed, allocatedFyAed,
+#   projectedOverUnderAed, projectedOverUnderPct, isProjectedOverBudget,
+#   confidenceNote ('high'|'medium'|'low'|'insufficient_data')
+#   — all *Aed fields are string | null; monetary precision preserved
+#
+# ContractBudget (get):
+#   id, contractId, contract: { id, contractNumber, titleEn, titleAr },
+#   periodType, periodLabel, fiscalYear, costCategory,
+#   allocatedAmountAed (string), currency, notes, source, createdAt, updatedAt,
+#   createdBy, updatedBy, isActive
+#
+# ContractBudgetListResponse:
+#   data: [{ id, contractId, contractNumber, periodType, periodLabel, fiscalYear,
+#           costCategory, allocatedAmountAed (string), currency, notes, createdAt }]
+#   pagination: { total, page, limit, totalPages }
+#
+# ContractCostActual:
+#   id, contractId, periodType, periodLabel, fiscalYear, costCategory,
+#   actualAmountAed (string), currency, source, referenceNo (string — '' means no ref),
+#   recordedAt, notes, createdAt, updatedAt, createdBy, updatedBy, isActive
+#
+# ContractCostActualListResponse:
+#   data: [ContractCostActualListItem — same minus audit fields], pagination
+#
+# DraftCureNoticeResponse:
+#   draftId (advisory_draft.id), correlationId, templateId,
+#   contractId, approvalStatus ('unapproved'), cureNoticeEligible (boolean)
+
 # CR-M component schemas (appended to components/schemas section below)
 # Note: The components/schemas block is defined earlier in this file; the schemas below are
 # documented here as addendum.  BE consuming code uses src/types/regulatory-cascade.types.ts.

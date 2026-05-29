@@ -259,4 +259,19 @@ import regulatoryCascadeRouter from './regulatory-cascade.routes';
 // path is matched before partiesRouter's `GET /:id`. Do not re-mount them here.
 v1Router.use('/regulatory/cascade', regulatoryCascadeRouter);
 
+// ============================================================
+// M21 (CR-N) — Financial Budget Burn (Services-Contract Budget Burn).
+//   GET  /api/v1/financial/budget-burn                       — portfolio rollup (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/budgets               — list budget lines (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/budgets/:id           — budget line detail (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/cost-actuals          — list actuals (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/:contractId           — burn compute (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/:contractId/variance  — variance+clause refs (finance.budget.read)
+//   GET  /api/v1/financial/budget-burn/:contractId/projection — year-end projection (finance.budget.read)
+//   POST /api/v1/financial/budget-burn/:contractId/cost-actuals — record actual (finance.budget.manage)
+//   POST /api/v1/financial/budget-burn/variance/:contractId/draft-cure-notice — cure-notice (advisory.draft.review)
+// ============================================================
+import financialBudgetBurnRouter from './financial-budget-burn.routes';
+v1Router.use('/financial/budget-burn', financialBudgetBurnRouter);
+
 export default v1Router;
