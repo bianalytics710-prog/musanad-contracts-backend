@@ -23,6 +23,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../database/client';
+import { ADNOC_TENANT_ID } from '../middleware/rls.middleware';
 import { logger as rootLogger } from '../utils/logger.util';
 import {
   decodeUnsafe,
@@ -171,9 +172,12 @@ export const authController = {
       const accessToken = signAccessToken({ userId: userRecord.id, role: userRecord.role.name });
       const { token: refreshToken } = signRefreshToken({ userId: userRecord.id });
 
-      // 7. Build AuthUser response (lookup permissions)
+      // 7. Build AuthUser response (lookup permissions + effectiveModules)
+      // CR-V: pass ADNOC_TENANT_ID so fn_user_get_by_id → fn_user_effective_modules
+      // evaluates module state against the tenant's product_module_enable overrides.
       const fullUser = await db.callFunction<User | null>('fn_user_get_by_id', [userRecord.id], {
         actorId: userRecord.id,
+        tenantId: ADNOC_TENANT_ID,
       });
       if (!fullUser) {
         throw new InvalidCredentialsError('Invalid email or password');
@@ -185,6 +189,8 @@ export const authController = {
         lastName: fullUser.lastName,
         role: fullUser.role,
         permissions: fullUser.permissions,
+        // CR-V: include effectiveModules in login response so FE can gate sidebar items
+        effectiveModules: fullUser.effectiveModules ?? [],
       };
 
       req.logger.info(

@@ -2,8 +2,14 @@
  * /api/v1/admin/* — admin oversight + configuration endpoints.
  * All routes require JWT (each sub-router applies `authenticate`) and
  * permission-gate per endpoint. First introduced by M2 (Q3-OI-E).
+ *
+ * CR-V: /admin/demo is gated by requireModuleEnabled('demo_harness').
+ * All other /admin/* paths are PLATFORM bundle (always-on); not gated.
  */
 import { Router } from 'express';
+import { authenticate } from '../../../middleware/auth.middleware';
+import { rlsMiddleware } from '../../../middleware/rls.middleware';
+import { requireModuleEnabled } from '../../../middleware/module.middleware';
 import approvalMatrixRouter from './approval-matrix.routes';
 import approvalChainsRouter from './approval-chains.routes';
 import approvalStepsRouter from './approval-steps.routes';
@@ -124,9 +130,22 @@ router.use('/notification-dispatch-log', notificationDispatchLogRouter);
 // health-check). Mounted AFTER CR-C demo router to cohabit at '/demo';
 // paths are disjoint (/purge, /data-classification-summary vs /scenarios,
 // /reset, /time-freeze, /time-unfreeze, /health-check).
+// CR-V: gate demo harness routes on demo_harness module being enabled.
 // ============================================================
 import demoHarnessRouter from './demo-harness.routes';
+router.use('/demo', authenticate, rlsMiddleware, requireModuleEnabled('demo_harness'));
 router.use('/demo', demoHarnessRouter);
+
+// ============================================================
+// CR-V — Product Module Toggle admin surface.
+//   GET    /admin/modules                         (settings.read)
+//   PATCH  /admin/modules/:key                   (settings.write)
+//   PATCH  /admin/bundles/:code                  (settings.write)
+//   GET    /admin/role-modules                   (settings.read)
+//   PATCH  /admin/role-modules/:roleId/:moduleKey (settings.write)
+// ============================================================
+import modulesRouter from './modules.routes';
+router.use('/', modulesRouter);
 
 // ============================================================
 // M20 (CR-L) — Admin Reports surface.

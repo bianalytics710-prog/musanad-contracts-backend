@@ -41,6 +41,24 @@ interface EscalationCheckResult {
 }
 
 async function escalateCandidate(c: EscalationCandidate): Promise<void> {
+  // CR-V: module-enabled guard — skip if 'risk_cases' module is disabled for this tenant.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [c.tenantId, 'risk_cases'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId: c.tenantId },
+    );
+    if (!enabled) {
+      logger.info({ action: 'riskCaseEscalationWorker.moduleDisabled', moduleKey: 'risk_cases',
+        tenantId: c.tenantId, caseId: c.id }, 'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'riskCaseEscalationWorker.moduleGuardError', caseId: c.id,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   try {
     await db.callFunction(
       'fn_risk_case_escalate',

@@ -5,6 +5,14 @@
  * with status='pending_retry' and next_retry_at <= NOW() and retries
  * SMTP delivery.
  *
+ * CR-V NOTE: notification-retry worker is intentionally NOT gated by any
+ * single module. Notifications serve advisory_queue, risk_cases, reports,
+ * and other modules — gating on one module would block retries for all
+ * others. This worker is cross-cutting infrastructure and runs regardless
+ * of module enable state (same policy as score-recompute).
+ * DEBT: per-row module check based on notification context_type is possible
+ * in a future CR if per-module notification suppression is needed.
+ *
  * Pattern mirrors M11 ingestion.worker.ts + M14 score-recompute.worker.ts.
  *
  * S2-20: SYSTEM_ACTOR_ID = 0 — fn_ calls from this worker use actor 0.

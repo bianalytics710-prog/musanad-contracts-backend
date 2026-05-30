@@ -101,6 +101,24 @@ async function processJob(row: PendingVersionRow): Promise<void> {
   const contractVersionId = row.id;
   const tenantId = row.tenant_id ?? ADNOC_TENANT_ID;
 
+  // CR-V: module-enabled guard — skip if 'impact_signals' module is disabled.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [tenantId, 'impact_signals'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId },
+    );
+    if (!enabled) {
+      logger.info({ action: 'ingestionWorker.moduleDisabled', moduleKey: 'impact_signals',
+        tenantId, contractVersionId }, 'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'ingestionWorker.moduleGuardError', contractVersionId,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   logger.info(
     { action: 'ingestionWorker.job_start', contractVersionId, tenantId },
     'Starting ingestion job',

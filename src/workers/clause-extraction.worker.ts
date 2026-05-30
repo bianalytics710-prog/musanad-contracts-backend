@@ -18,6 +18,7 @@
 import cron, { type ScheduledTask } from 'node-cron';
 import pLimit from 'p-limit';
 import { pool } from '../database/config';
+import { db } from '../database/client';
 import { logger } from '../utils/logger.util';
 import { extractClausesForVersion } from '../services/clause-extraction.service';
 
@@ -65,7 +66,29 @@ async function fetchPendingExtractions(): Promise<PendingExtractionRow[]> {
   }
 }
 
+/** ADNOC single-tenant sentinel — same as rls.middleware fallback. */
+const ADNOC_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+
 async function processTick(): Promise<void> {
+  // CR-V: module-enabled guard — skip if 'clauses' module is disabled for the default tenant.
+  // Clause extraction uses the single-tenant ADNOC UUID (multi-tenant: extend per-row).
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [ADNOC_TENANT_ID, 'clauses'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId: ADNOC_TENANT_ID },
+    );
+    if (!enabled) {
+      logger.info({ action: 'clauseExtractionWorker.moduleDisabled', moduleKey: 'clauses' },
+        'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'clauseExtractionWorker.moduleGuardError',
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   let rows: PendingExtractionRow[];
   try {
     rows = await fetchPendingExtractions();

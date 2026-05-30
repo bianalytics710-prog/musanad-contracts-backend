@@ -75,6 +75,24 @@ const countSignals24h = async (osintSourceId: number, tenantId: string): Promise
  * Run one health-check for a single source row. Public for unit tests.
  */
 export const runHealthCheckForSource = async (row: HealthCheckRow): Promise<void> => {
+  // CR-V: module-enabled guard — skip if 'impact_signals' module is disabled for this tenant.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [row.tenant_id, 'impact_signals'],
+      { actorId: 0, tenantId: row.tenant_id },
+    );
+    if (!enabled) {
+      logger.info({ action: 'sourceHealthWorker.moduleDisabled', moduleKey: 'impact_signals',
+        tenantId: row.tenant_id, sourceId: row.source_id }, 'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'sourceHealthWorker.moduleGuardError', sourceId: row.source_id,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   // buildAdapterForRow accepts the full DueSourceRow shape from the fetch
   // worker; signature compatible — both rows carry the same columns.
   const adapter = buildAdapterForRow(row);

@@ -42,6 +42,24 @@ interface CorrelationRow {
 let _notifyClient: PoolClient | null = null;
 
 async function processCorrelationsForSignal(signalId: number, tenantId: string): Promise<void> {
+  // CR-V: module-enabled guard — skip if 'risk_cases' module is disabled for this tenant.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [tenantId, 'risk_cases'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId },
+    );
+    if (!enabled) {
+      logger.info({ action: 'riskCaseAutoCreateWorker.moduleDisabled', moduleKey: 'risk_cases',
+        tenantId, signalId }, 'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'riskCaseAutoCreateWorker.moduleGuardError', signalId,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   let correlationIds: number[] = [];
   try {
     const client = await pool().connect();

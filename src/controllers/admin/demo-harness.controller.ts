@@ -143,6 +143,9 @@ export const demoHarnessController = {
         throw new ValidationError('scenarioId path parameter is required', { scenarioId: 'required' });
       }
       const result = await svc.triggerScenario(req.user!.id, scenarioId);
+      // CR-V: result may be DemoTriggerResult or ModuleDisabledTriggerResult.
+      // Use type narrowing for log fields that only exist on DemoTriggerResult.
+      const isDisabled = result !== null && typeof result === 'object' && 'reason' in result && result.reason === 'module_disabled';
       req.logger.info(
         {
           action: 'admin.demo.scenarios.trigger',
@@ -150,9 +153,12 @@ export const demoHarnessController = {
           duration: Date.now() - startTime,
           statusCode: 200,
           scenarioId,
-          runId: result?.runId,
-          elapsedMs: result?.elapsedMs,
-          success: result?.success,
+          moduleDisabled: isDisabled,
+          ...(!isDisabled && result !== null && typeof result === 'object' && {
+            runId: (result as { runId?: number }).runId,
+            elapsedMs: (result as { elapsedMs?: number }).elapsedMs,
+            success: (result as { success?: boolean }).success,
+          }),
         },
         'Controller exit',
       );

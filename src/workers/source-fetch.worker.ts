@@ -156,6 +156,24 @@ export const processSource = async (
   row: DueSourceRow,
   since: Date,
 ): Promise<{ inserted: number; total: number }> => {
+  // CR-V: module-enabled guard — skip if 'impact_signals' module is disabled for this tenant.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [row.tenant_id, 'impact_signals'],
+      { actorId: 0, tenantId: row.tenant_id },
+    );
+    if (!enabled) {
+      logger.info({ action: 'sourceFetchWorker.moduleDisabled', moduleKey: 'impact_signals',
+        tenantId: row.tenant_id, sourceId: row.source_id }, 'module disabled, worker tick skipped');
+      return { inserted: 0, total: 0 };
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'sourceFetchWorker.moduleGuardError', sourceId: row.source_id,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   const adapter = buildAdapterForRow(row);
   if (!adapter) {
     logger.warn(

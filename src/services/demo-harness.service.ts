@@ -60,16 +60,77 @@ export const getScenarioById = (
     { actorId, tenantId },
   );
 
-export const triggerScenario = (
+/**
+ * CR-V: scenario→module mapping. Before triggering a scenario that depends on a
+ * specific togglable ECIP module, check fn_module_enabled and short-circuit with
+ * the standard module_disabled envelope if the module is off.
+ * Scenarios not listed here have no single-module dependency and always run.
+ * Mirrors the demo_scenario.scenario_id values from migration 323.
+ */
+const SCENARIO_MODULE_MAP: Record<string, string> = {
+  labor_cascade:  'regulatory_cascade',
+  budget_burn:    'financial.budget_burn',
+  trade_margin:   'financial.trade_margin',
+};
+
+/**
+ * Shape returned by fn_demo_scenario_trigger (per migration 324 fn_ envelope).
+ * The module_disabled variant matches the existing outcome-envelope shape so the
+ * FE demo control panel can render an "off" badge via the same result.prepared check.
+ */
+interface ModuleDisabledTriggerResult {
+  prepared: false;
+  reason: 'module_disabled';
+  moduleKey: string;
+  scenarioCode: string;
+}
+
+export const triggerScenario = async (
   actorId: number,
   scenarioId: string,
   tenantId: string = ADNOC_TENANT_ID,
-): Promise<DemoTriggerResult> =>
-  db.callFunction<DemoTriggerResult>(
+): Promise<DemoTriggerResult | ModuleDisabledTriggerResult> => {
+  // CR-V: per-scenario module gate (BE service layer — no migration needed).
+  const moduleKey = SCENARIO_MODULE_MAP[scenarioId];
+  if (moduleKey) {
+    try {
+      const enabled = await db.callFunction<boolean>(
+        'fn_module_enabled',
+        [tenantId, moduleKey],
+        { actorId, tenantId },
+      );
+      if (!enabled) {
+        logger.info(
+          { action: 'demoHarness.triggerScenario.moduleDisabled', moduleKey, scenarioId, tenantId },
+          'Demo scenario blocked — module disabled',
+        );
+        return {
+          prepared: false,
+          reason: 'module_disabled',
+          moduleKey,
+          scenarioCode: scenarioId,
+        };
+      }
+    } catch (guardErr) {
+      // Non-fatal: if fn_module_enabled errors (e.g. migration lag), proceed with trigger.
+      logger.warn(
+        {
+          action: 'demoHarness.triggerScenario.moduleGuardError',
+          scenarioId,
+          moduleKey,
+          errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN',
+        },
+        'module guard check failed — proceeding with scenario trigger (fail-open)',
+      );
+    }
+  }
+
+  return db.callFunction<DemoTriggerResult>(
     'fn_demo_scenario_trigger',
     [actorId, scenarioId],
     { actorId, tenantId },
   );
+};
 
 /**
  * Reset demo — sets app.demo.reset_token GUC in the same transaction before

@@ -207,7 +207,7 @@ describe('POST /api/v1/regulatory/cascade/run', () => {
     trackedRunIds.push(body.id);
   }, 20_000);
 
-  it('AC#7-int-01: drafter → 403 (no regulatory.cascade.run)', async () => {
+  it('AC#7-int-01: drafter → 404 (module guard — CR-V)', async () => {
     const signalId = await getDecreeSignalId();
     if (!signalId) return;
 
@@ -216,7 +216,8 @@ describe('POST /api/v1/regulatory/cascade/run', () => {
       .set('Authorization', `Bearer ${drafterToken}`)
       .send({ signalId });
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in regulatory_cascade role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#7-int-02: legal_counsel → 403 (read-only, cannot run)', async () => {
@@ -291,12 +292,13 @@ describe('GET /api/v1/regulatory/cascade', () => {
     expect(Array.isArray(body.data)).toBe(true);
   });
 
-  it('AC#7-int-03: drafter → 403 (no regulatory.cascade.read)', async () => {
+  it('AC#7-int-03: drafter → 404 (module guard — CR-V)', async () => {
     const res = await request(app)
       .get(ROUTE)
       .set('Authorization', `Bearer ${drafterToken}`);
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in regulatory_cascade role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#4-int-07: no JWT → 401', async () => {
@@ -360,12 +362,13 @@ describe('GET /api/v1/regulatory/cascade/:runId', () => {
     expect(res.status).toBe(404);
   });
 
-  it('AC#7-int-04: drafter → 403 on run detail', async () => {
+  it('AC#7-int-04: drafter → 404 on run detail (module guard — CR-V)', async () => {
     const res = await request(app)
       .get('/api/v1/regulatory/cascade/1')
       .set('Authorization', `Bearer ${drafterToken}`);
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in regulatory_cascade role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 });
 
@@ -437,13 +440,14 @@ describe('PATCH /api/v1/regulatory/cascade/items/:itemId/status', () => {
     expect(res.status).toBe(400);
   });
 
-  it('AC#7-int-05: drafter → 403 on item status update', async () => {
+  it('AC#7-int-05: drafter → 404 on item status update (module guard — CR-V)', async () => {
     const res = await request(app)
       .patch('/api/v1/regulatory/cascade/items/1/status')
       .set('Authorization', `Bearer ${drafterToken}`)
       .send({ status: 'in_progress' });
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in regulatory_cascade role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#4-int-13: no JWT → 401', async () => {
@@ -597,13 +601,14 @@ describe('POST /api/v1/regulatory/cascade/items/:itemId/draft-amendment (AC#5 se
     expect(res.status).toBe(404);
   });
 
-  it('AC#7-int-06: drafter → 403 on draft-amendment (no advisory.draft.review)', async () => {
+  it('AC#7-int-06: drafter → 404 on draft-amendment (module guard — CR-V)', async () => {
     const res = await request(app)
       .post('/api/v1/regulatory/cascade/items/1/draft-amendment')
       .set('Authorization', `Bearer ${drafterToken}`)
       .send({});
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in regulatory_cascade role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#5-int-05: no JWT → 401', async () => {

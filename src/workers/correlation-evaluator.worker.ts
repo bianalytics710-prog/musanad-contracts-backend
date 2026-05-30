@@ -38,6 +38,25 @@ let _notifyClient: PoolClient | null = null;
  * fn_rule_evaluate handles: matching, correlation persist, eval_error on timeout/failure.
  */
 async function processSignal(signalId: number): Promise<void> {
+  // CR-V: module-enabled guard — skip if 'impact_signals' module is disabled.
+  // Correlation evaluation is part of the OSINT pipeline (impact_signals module).
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [ADNOC_TENANT_ID, 'impact_signals'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId: ADNOC_TENANT_ID },
+    );
+    if (!enabled) {
+      logger.info({ action: 'correlationEvaluatorWorker.moduleDisabled', moduleKey: 'impact_signals',
+        signalId }, 'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'correlationEvaluatorWorker.moduleGuardError', signalId,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   const rules = getCachedRules();
   if (rules.length === 0) {
     logger.debug({ action: 'correlationEvaluatorWorker.processSignal', signalId }, 'No enabled rules — skip');

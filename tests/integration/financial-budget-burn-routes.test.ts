@@ -209,12 +209,14 @@ describe('GET /api/v1/financial/budget-burn (portfolio)', () => {
     expect(Array.isArray(body.data)).toBe(true);
   });
 
-  it('AC#8-int-01: drafter → 403 (no finance.budget.read)', async () => {
+  it('AC#8-int-01: drafter → 404 (module financial.budget_burn not in drafter role codes — CR-V)', async () => {
     const res = await request(app)
       .get(ROUTE)
       .set('Authorization', `Bearer ${drafterToken}`);
 
-    expect(res.status).toBe(403);
+    // CR-V: requireModuleEnabled fires before permission check; drafter is not in
+    // financial.budget_burn.default_role_codes so receives 404 MODULE_DISABLED.
+    expect(res.status).toBe(404);
   });
 
   it('AC#8-int-02: no JWT → 401', async () => {
@@ -295,11 +297,12 @@ describe('GET /api/v1/financial/budget-burn/budgets', () => {
     }
   });
 
-  it('AC#8-int-03: drafter → 403', async () => {
+  it('AC#8-int-03: drafter → 404 (module guard — CR-V)', async () => {
     const res = await request(app)
       .get(ROUTE)
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#8-int-04: no JWT → 401', async () => {
@@ -358,11 +361,12 @@ describe('GET /api/v1/financial/budget-burn/budgets/:id', () => {
     expect(res.status).toBe(404);
   });
 
-  it('AC#8-int-05: drafter → 403', async () => {
+  it('AC#8-int-05: drafter → 404 (module guard — CR-V)', async () => {
     const res = await request(app)
       .get('/api/v1/financial/budget-burn/budgets/1')
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 });
 
@@ -409,11 +413,12 @@ describe('GET /api/v1/financial/budget-burn/cost-actuals', () => {
     expect((body as any).success).toBeUndefined();
   });
 
-  it('AC#8-int-06: drafter → 403', async () => {
+  it('AC#8-int-06: drafter → 404 (module guard — CR-V)', async () => {
     const res = await request(app)
       .get(ROUTE)
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 });
 
@@ -501,12 +506,13 @@ describe('GET /api/v1/financial/budget-burn/:contractId (burn compute)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('AC#8-int-07: drafter → 403', async () => {
+  it('AC#8-int-07: drafter → 404 (module guard — CR-V)', async () => {
     if (!heroContractId) return;
     const res = await request(app)
       .get(`/api/v1/financial/budget-burn/${heroContractId}`)
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#8-int-08: no JWT → 401', async () => {
@@ -617,12 +623,13 @@ describe('GET /api/v1/financial/budget-burn/:contractId/variance', () => {
     expect(res.status).toBe(404);
   });
 
-  it('AC#8-int-09: drafter → 403', async () => {
+  it('AC#8-int-09: drafter → 404 (module guard — CR-V)', async () => {
     if (!heroContractId) return;
     const res = await request(app)
       .get(`/api/v1/financial/budget-burn/${heroContractId}/variance`)
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#8-int-10: no JWT → 401', async () => {
@@ -705,12 +712,13 @@ describe('GET /api/v1/financial/budget-burn/:contractId/projection', () => {
     expect(res.status).toBe(404);
   });
 
-  it('AC#8-int-11: drafter → 403', async () => {
+  it('AC#8-int-11: drafter → 404 (module guard — CR-V)', async () => {
     if (!heroContractId) return;
     const res = await request(app)
       .get(`/api/v1/financial/budget-burn/${heroContractId}/projection`)
       .set('Authorization', `Bearer ${drafterToken}`);
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 });
 
@@ -784,7 +792,7 @@ describe('POST /api/v1/financial/budget-burn/:contractId/cost-actuals (record co
     expect(res.status).toBe(403);
   });
 
-  it('AC#8-int-13: drafter → 403 (no finance.budget.manage)', async () => {
+  it('AC#8-int-13: drafter → 404 (module guard — CR-V)', async () => {
     if (!heroContractId) return;
 
     const res = await request(app)
@@ -797,7 +805,8 @@ describe('POST /api/v1/financial/budget-burn/:contractId/cost-actuals (record co
         actualAmountAed: '44333333',
       });
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#2-int-04: missing required field (no costCategory) → 400 Zod validation', async () => {
@@ -913,7 +922,7 @@ describe('POST /api/v1/financial/budget-burn/variance/:contractId/draft-cure-not
     expect(res.status).toBe(403);
   });
 
-  it('AC#6-int-03: drafter → 403 (no advisory.draft.review)', async () => {
+  it('AC#6-int-03: drafter → 404 (module guard — CR-V)', async () => {
     const contractId = heroContractId ?? 1;
 
     const res = await request(app)
@@ -921,7 +930,8 @@ describe('POST /api/v1/financial/budget-burn/variance/:contractId/draft-cure-not
       .set('Authorization', `Bearer ${drafterToken}`)
       .send({});
 
-    expect(res.status).toBe(403);
+    // CR-V: drafter not in financial.budget_burn role codes → 404 MODULE_DISABLED
+    expect(res.status).toBe(404);
   });
 
   it('AC#6-int-04: platform_admin → should reach service (has advisory.draft.review)', async () => {

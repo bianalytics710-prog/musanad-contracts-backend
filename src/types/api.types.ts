@@ -203,6 +203,14 @@ export interface User {
   updatedAt: string;
   role: RoleRef;
   permissions: string[];        // permission codes
+  /**
+   * CR-V — effective module keys computed by fn_user_effective_modules() and
+   * folded into fn_user_get_by_id (migration 345). Used by requireModuleEnabled()
+   * middleware to gate ECIP HTTP route groups with zero extra DB round-trips.
+   * Super Admin / platform_admin get all 25+ module keys; role-disabled users get
+   * the intersection subset.
+   */
+  effectiveModules?: string[];  // text[] from fn_user_effective_modules (optional for backwards compat)
 }
 
 /**

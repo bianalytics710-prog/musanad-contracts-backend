@@ -77,6 +77,26 @@ async function processRun(row: PendingRunRow): Promise<void> {
   const runId = row.id;
   const tenantId = row.tenantId;
 
+  // CR-V: module-enabled guard — skip tick if 'reports' module is disabled for this tenant.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [tenantId, 'reports'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId },
+    );
+    if (!enabled) {
+      logger.info({ action: 'reportRunWorker.moduleDisabled', moduleKey: 'reports', tenantId, runId },
+        'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    // Non-fatal: if fn_module_enabled itself errors (e.g. migration not yet applied on test branch),
+    // log and continue rather than blocking the worker entirely.
+    logger.warn({ action: 'reportRunWorker.moduleGuardError', runId,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   logger.info(
     {
       action: 'reportRunWorker.processRun',

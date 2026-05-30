@@ -55,6 +55,13 @@ let _cronTask: ScheduledTask | null = null;
  *
  * @param signalId - BIGINT signal ID from pg_notify payload.
  * @param tenantId - UUID tenant for GUC context (from notify payload).
+ *
+ * CR-V NOTE: score-recompute worker is intentionally NOT gated by any single module.
+ * Risk scoring spans risk_cases, financial.trade_margin, financial.budget_burn, and
+ * dashboards.* — no clean single-module mapping exists. Scoring runs regardless of
+ * module enable state so that stale scores don't accumulate if individual ECIP modules
+ * are toggled off and then back on. DEBT: consider a dedicated 'risk_scoring' module
+ * key in a future CR if per-module scoring control is needed.
  */
 async function processSignal(signalId: number, tenantId: string): Promise<void> {
   const startMs = Date.now();

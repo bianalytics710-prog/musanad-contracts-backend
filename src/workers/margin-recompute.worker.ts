@@ -75,6 +75,26 @@ async function processMarginRecomputeNotification(
 ): Promise<void> {
   const startMs = Date.now();
 
+  // CR-V: module-enabled guard — skip if 'financial.trade_margin' module is disabled.
+  try {
+    const enabled = await db.callFunction<boolean>(
+      'fn_module_enabled',
+      [payload.tenantId, 'financial.trade_margin'],
+      { actorId: SYSTEM_ACTOR_ID, tenantId: payload.tenantId },
+    );
+    if (!enabled) {
+      logger.info({ action: 'marginRecomputeWorker.moduleDisabled', moduleKey: 'financial.trade_margin',
+        tenantId: payload.tenantId, benchmarkCode: payload.benchmarkCode },
+        'module disabled, worker tick skipped');
+      return;
+    }
+  } catch (guardErr) {
+    logger.warn({ action: 'marginRecomputeWorker.moduleGuardError',
+      benchmarkCode: payload.benchmarkCode,
+      errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
+      'module guard check failed — continuing (fail-open)');
+  }
+
   logger.info(
     {
       action: 'marginRecomputeWorker.processNotification',

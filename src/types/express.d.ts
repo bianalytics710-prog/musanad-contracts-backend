@@ -9,6 +9,13 @@ export interface AuthUserContext {
   email: string;
   /** permission codes from fn_user_get_by_id; used by authorise() */
   permissions: string[];
+  /**
+   * CR-V — effective module keys for this user (intersection of bundle × module
+   * × role-module access matrix). Populated from fn_user_effective_modules() which
+   * is folded into fn_user_get_by_id (migration 345). Used by requireModuleEnabled()
+   * middleware to gate ECIP route groups without a second DB call.
+   */
+  effectiveModules: string[];
 }
 
 declare global {

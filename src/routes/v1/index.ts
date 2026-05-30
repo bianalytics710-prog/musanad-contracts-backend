@@ -1,5 +1,11 @@
 /**
  * Mount all /api/v1 routers.
+ *
+ * CR-V: ECIP route groups are gated by requireModuleEnabled(moduleKey) after
+ * authenticate + rlsMiddleware. CLM core routes (contracts, templates, parties,
+ * obligations, approvals, etc.) are NOT gated here — per brief, CLM-disable is
+ * deferred to a future CR; the FE sidebar filter handles it for now.
+ * PLATFORM routes (auth, users, roles, permissions, admin/*) are never gated.
  */
 import { Router } from 'express';
 import authRouter from './auth.routes';
@@ -11,6 +17,9 @@ import importBatchesRouter from './import-batches.routes';
 import aiRouter from './ai.routes';
 import approvalsRouter from './approvals.routes';
 import adminRouter from './admin';
+import { authenticate } from '../../middleware/auth.middleware';
+import { rlsMiddleware } from '../../middleware/rls.middleware';
+import { requireModuleEnabled } from '../../middleware/module.middleware';
 import signRouter from './sign.routes';
 import signaturePartiesRouter from './signature-parties.routes';
 import signatureInvitationsRouter from './signature-invitations.routes';
@@ -100,6 +109,8 @@ v1Router.use('/obligations', obligationsRouter);
 // Mount clauseReviewRouter (with literal /review-queue, /search) first.
 
 // R-LC7 — Impact Watch (multi-source intelligence).
+// CR-V — gate /impact-signals (impact_signals module)
+v1Router.use('/impact-signals', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/impact-signals', impactSignalsRouter);
 
 // M7 — OSINT Source Framework + Adapter Protocol (CR-A). 9 endpoints across
@@ -111,7 +122,11 @@ v1Router.use('/impact-signals', impactSignalsRouter);
 //   /api/v1/signals                — 1 endpoint (paginated normalised signal
 //                                     feed; signal.read.all gate in fn_)
 // All JWT-authenticated; zero new PUBLIC fn_'s. Tenant GUC via rls.middleware.
+// CR-V — gate /admin/sources (impact_signals module)
+v1Router.use('/admin/sources', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/admin/sources', adminSourcesRouter);
+// CR-V — gate /signals (impact_signals module)
+v1Router.use('/signals', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/signals', signalsRouter);
 
 // M8 — Internal Signal Data Path (CR-A2). 4 endpoints across 3 namespaces:
@@ -126,8 +141,12 @@ v1Router.use('/signals', signalsRouter);
 //                                          + Q-DA3 per-signal_type role
 //                                          mapping inside fn_)
 // All JWT-authenticated; zero new PUBLIC fn_'s. Tenant GUC via rls.middleware.
+// CR-V — gate /admin/internal-signals and /internal-signals (impact_signals module)
+v1Router.use('/admin/internal-signals', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/admin/internal-signals', adminInternalSignalsRouter);
+v1Router.use('/admin/internal-signal-kinds', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/admin/internal-signal-kinds', adminInternalSignalKindsRouter);
+v1Router.use('/internal-signals', authenticate, rlsMiddleware, requireModuleEnabled('impact_signals'));
 v1Router.use('/internal-signals', internalSignalsRouter);
 
 // M12 (CR-D) — Clause Extraction pipeline trigger (mounted under /contracts
@@ -141,6 +160,8 @@ v1Router.use('/contracts', extractClausesRouter);
 // has a `/:id` route that would capture `/review-queue` and `/search` as the
 // :id param. Express matches routers in mount order; literal-path routes here
 // short-circuit before the wildcard.
+// CR-V — gate /clauses (clauses module)
+v1Router.use('/clauses', authenticate, rlsMiddleware, requireModuleEnabled('clauses'));
 v1Router.use('/clauses', clauseReviewRouter);
 v1Router.use('/clauses', clausesRouter);
 
@@ -163,10 +184,33 @@ v1Router.use('/risk', riskAvarRouter);
 //   GET /api/v1/dashboards/compliance-esg      — Compliance & ESG persona (insights.compliance_esg)
 //   GET /api/v1/dashboards/procurement         — Procurement & Supplier Risk persona (insights.procurement_supplier_risk)
 //   POST /api/v1/ai/risk-assistant/ask         — AI Risk Assistant SSE Q&A (ai.invoke.risk_assistant)
-// NOTE: /dashboards/executive is unchanged — existing dashboardsRouter serves it.
+// NOTE: /dashboards/executive is served by dashboardsRouter (mounted earlier at /dashboards).
+//
+// CR-V: module guards for ECIP dashboard sub-paths + AI Risk Assistant.
+// dashboardsRouter and dashboardsCrgRouter share the /dashboards prefix.
+// The executive route (/dashboards/executive) is in dashboardsRouter (already mounted);
+// CR-V adds module guard for the CRG persona dashboard sub-paths by prefixing them
+// with authenticate + requireModuleEnabled before the sub-router handles the request.
+// Guard pattern: Express matches the longest prefix first, so explicit sub-path
+// guards here run before the generic dashboardsRouter catch-all.
 import dashboardsCrgRouter from './dashboards-crg.routes';
 import aiRiskAssistantRouter from './ai-risk-assistant.routes';
+
+// CR-V — gate /dashboards/executive (dashboards.executive module)
+v1Router.use('/dashboards/executive', authenticate, rlsMiddleware, requireModuleEnabled('dashboards.executive'));
+// CR-V — gate /dashboards/operations (dashboards.operations module)
+v1Router.use('/dashboards/operations', authenticate, rlsMiddleware, requireModuleEnabled('dashboards.operations'));
+// CR-V — gate /dashboards/finance-treasury (dashboards.finance_treasury module)
+v1Router.use('/dashboards/finance-treasury', authenticate, rlsMiddleware, requireModuleEnabled('dashboards.finance_treasury'));
+// CR-V — gate /dashboards/compliance-esg (dashboards.compliance_esg module)
+v1Router.use('/dashboards/compliance-esg', authenticate, rlsMiddleware, requireModuleEnabled('dashboards.compliance_esg'));
+// CR-V — gate /dashboards/procurement (dashboards.procurement module)
+v1Router.use('/dashboards/procurement', authenticate, rlsMiddleware, requireModuleEnabled('dashboards.procurement'));
+
 v1Router.use('/dashboards', dashboardsCrgRouter);
+
+// CR-V — gate /ai/risk-assistant (ai_risk_assistant module)
+v1Router.use('/ai/risk-assistant', authenticate, rlsMiddleware, requireModuleEnabled('ai_risk_assistant'));
 v1Router.use('/ai', aiRiskAssistantRouter);
 
 // Unit-3 (R-OPS + R-FT + R-CES) — Persona action routes.
@@ -209,6 +253,9 @@ v1Router.use('/contracts', auditRightsRouter);
 // NOTE: /admin/advisory-templates + /admin/notification-dispatch-log are mounted in admin/index.ts.
 import advisoryDraftsRouter from './advisory-drafts.routes';
 import notificationPreferencesRouter from './users/notification-preferences.routes';
+
+// CR-V — gate /advisory-drafts (advisory_queue module)
+v1Router.use('/advisory-drafts', authenticate, rlsMiddleware, requireModuleEnabled('advisory_queue'));
 v1Router.use('/advisory-drafts', advisoryDraftsRouter);
 // Mount /users/me/notification-preferences under /users namespace.
 // The existing userRouter is mounted at '/users' in v1Router above.
@@ -222,6 +269,8 @@ v1Router.use('/users', notificationPreferencesRouter);
 //   worker endpoints (escalation-check, auto-create-from-correlation).
 // ============================================================
 import riskCaseRouter from './risk-case.routes';
+// CR-V — gate /risk-cases (risk_cases module)
+v1Router.use('/risk-cases', authenticate, rlsMiddleware, requireModuleEnabled('risk_cases'));
 v1Router.use('/risk-cases', riskCaseRouter);
 
 // ============================================================
@@ -232,6 +281,8 @@ v1Router.use('/risk-cases', riskCaseRouter);
 // Admin template CRUD + worker pickup mount in routes/v1/admin/index.ts.
 // ============================================================
 import reportRouter from './report.routes';
+// CR-V — gate /reports (reports module)
+v1Router.use('/reports', authenticate, rlsMiddleware, requireModuleEnabled('reports'));
 v1Router.use('/reports', reportRouter);
 
 // ============================================================
@@ -257,6 +308,8 @@ import regulatoryCascadeRouter from './regulatory-cascade.routes';
 // NOTE: workforceListRouter + partyWorkforceRouter are mounted earlier in this
 // file (immediately before partiesRouter) so the literal /parties/workforce
 // path is matched before partiesRouter's `GET /:id`. Do not re-mount them here.
+// CR-V — gate /regulatory/cascade (regulatory_cascade module)
+v1Router.use('/regulatory/cascade', authenticate, rlsMiddleware, requireModuleEnabled('regulatory_cascade'));
 v1Router.use('/regulatory/cascade', regulatoryCascadeRouter);
 
 // ============================================================
@@ -272,6 +325,8 @@ v1Router.use('/regulatory/cascade', regulatoryCascadeRouter);
 //   POST /api/v1/financial/budget-burn/variance/:contractId/draft-cure-notice — cure-notice (advisory.draft.review)
 // ============================================================
 import financialBudgetBurnRouter from './financial-budget-burn.routes';
+// CR-V — gate /financial/budget-burn (financial.budget_burn module)
+v1Router.use('/financial/budget-burn', authenticate, rlsMiddleware, requireModuleEnabled('financial.budget_burn'));
 v1Router.use('/financial/budget-burn', financialBudgetBurnRouter);
 
 // ============================================================
@@ -285,7 +340,10 @@ v1Router.use('/financial/budget-burn', financialBudgetBurnRouter);
 //   POST /api/v1/financial/price-benchmarks                  — record benchmark (finance.trade.manage)
 // ============================================================
 import { tradeMarginRouter, priceBenchmarksRouter } from './financial-trade-margin.routes';
+// CR-V — gate /financial/trade-margin and /financial/price-benchmarks (financial.trade_margin module)
+v1Router.use('/financial/trade-margin', authenticate, rlsMiddleware, requireModuleEnabled('financial.trade_margin'));
 v1Router.use('/financial/trade-margin', tradeMarginRouter);
+v1Router.use('/financial/price-benchmarks', authenticate, rlsMiddleware, requireModuleEnabled('financial.trade_margin'));
 v1Router.use('/financial/price-benchmarks', priceBenchmarksRouter);
 
 export default v1Router;

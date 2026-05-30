@@ -11,6 +11,7 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../database/client';
+import { ADNOC_TENANT_ID } from './rls.middleware';
 import { ForbiddenError, UnauthorizedError } from '../utils/errors.util';
 import { verifyAccessToken } from '../utils/jwt.util';
 import type { User } from '../types/api.types';
@@ -50,12 +51,17 @@ export const authenticate = async (
   }
 
   // Lookup user — confirms isActive and refreshes the permission set.
+  // CR-V: also pass ADNOC_TENANT_ID so fn_user_get_by_id → fn_user_effective_modules
+  // evaluates module state against the tenant's product_module_enable overrides
+  // (not the system default). Single-tenant today; multi-tenant: resolve from JWT claim.
   let user: User | null;
   try {
     user = await db.callFunction<User | null>('fn_user_get_by_id', [payload.sub], {
       // For this lookup, set the GUC so the user_select_self_or_capability
       // RLS policy permits the read.
       actorId: payload.sub,
+      // CR-V: tenant GUC required by fn_user_effective_modules sub-call in fn_user_get_by_id.
+      tenantId: ADNOC_TENANT_ID,
     });
   } catch (err) {
     req.logger?.error(
@@ -80,6 +86,10 @@ export const authenticate = async (
     role: user.role.name,
     email: user.email,
     permissions: user.permissions ?? [],
+    // CR-V: effectiveModules is folded into fn_user_get_by_id by migration 345.
+    // Fall back to empty array for any request that hits an older DB branch
+    // (test branch may lag the dev branch by one migration during rollout).
+    effectiveModules: user.effectiveModules ?? [],
   };
   req.user = ctx;
   req.authUserId = ctx.id;
