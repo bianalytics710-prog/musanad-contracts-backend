@@ -97,6 +97,33 @@ export const delegate = async (
   );
 };
 
+/**
+ * A38 (Aisha audit fix 2026-06-01) — list users eligible to receive
+ * delegation for a given approval_step. Fronts fn_approval_delegate_candidates
+ * (mig 429). Used by the ApprovalDecisionDialog so the Delegate flow shows
+ * a name+role picker instead of a numeric user ID input.
+ */
+export interface DelegateCandidate {
+  id: number;
+  firstName: string;
+  lastName: string;
+  email: string;
+  role: string;
+}
+export interface DelegateCandidatesResponse {
+  data: DelegateCandidate[];
+}
+export const listDelegateCandidates = async (
+  actorId: number,
+  stepId: number,
+): Promise<DelegateCandidatesResponse> => {
+  return db.callFunction<DelegateCandidatesResponse>(
+    'fn_approval_delegate_candidates',
+    [actorId, stepId],
+    { actorId },
+  );
+};
+
 /** POST /api/v1/contracts/:id/approval-chain/preview → fn_approval_route_init_preview (S6) */
 export const routeInitPreview = async (
   actorId: number,

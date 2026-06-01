@@ -74,6 +74,18 @@ router.post(
   approvalController.delegate,
 );
 
+// GET /api/v1/approvals/:stepId/delegate-candidates — A38 Aisha audit fix
+//   Returns the list of users eligible to receive a delegation for the given
+//   step (role-compatible, active, not self). Gated on approval.delegate
+//   since this is functionally part of the delegate workflow.
+router.get(
+  '/:stepId/delegate-candidates',
+  authedReadRateLimiter,
+  authorise(['approval.delegate']),
+  validate(ApprovalStepIdParamSchema, 'params'),
+  approvalController.listDelegateCandidates,
+);
+
 // POST /api/v1/approvals/:stepId/request-info — R-LC4 LC-F7
 //   Posts a message to the contract comments thread and logs the action,
 //   without changing the step status (soft action — drafter replies).

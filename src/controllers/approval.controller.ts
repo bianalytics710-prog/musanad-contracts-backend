@@ -198,6 +198,50 @@ export const approvalController = {
     }
   },
 
+  /**
+   * GET /api/v1/approvals/:stepId/delegate-candidates → fn_approval_delegate_candidates
+   * (A38 Aisha audit fix — name+role picker source for the Delegate flow).
+   */
+  async listDelegateCandidates(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'approval.listDelegateCandidates',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const { stepId } = req.params as unknown as ApprovalStepIdParamInferred;
+      const result = await approvalService.listDelegateCandidates(req.user!.id, stepId);
+      req.logger.info(
+        {
+          action: 'approval.listDelegateCandidates',
+          userId: req.user?.id,
+          targetStepId: stepId,
+          candidateCount: Array.isArray(result?.data) ? result.data.length : 0,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'approval.listDelegateCandidates',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
   /** POST /api/v1/contracts/:id/approval-chain/preview → fn_approval_route_init_preview (S6) */
   async routeInitPreview(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
