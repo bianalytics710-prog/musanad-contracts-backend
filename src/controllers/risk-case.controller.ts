@@ -753,6 +753,46 @@ export const riskCaseController = {
   },
 
   // ============================================================
+  // POST /api/v1/risk-cases/:id/unsnooze  (P33 — Pari Polish Cluster E)
+  // ============================================================
+  unsnooze: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const startTime = Date.now();
+    req.logger.info({
+      action: 'fn_risk_case_unsnooze',
+      method: req.method,
+      path: req.path,
+      userId: req.user?.id,
+    });
+
+    try {
+      const id = parseInt(req.params.id ?? '', 10);
+      if (isNaN(id) || id <= 0) throw new ApiError(400, 'invalid_id', 'Invalid ID format');
+
+      const result = await db.callFunction(
+        'fn_risk_case_unsnooze',
+        [req.user!.id, id],
+        { actorId: req.user!.id, tenantId: req.tenantId },
+      );
+
+      req.logger.info({
+        action: 'fn_risk_case_unsnooze',
+        userId: req.user?.id,
+        duration: Date.now() - startTime,
+        statusCode: 200,
+      });
+      res.json(result);
+    } catch (error) {
+      req.logger.error({
+        action: 'fn_risk_case_unsnooze',
+        userId: req.user?.id,
+        duration: Date.now() - startTime,
+        errorType: (error as Error).name,
+      });
+      next(error);
+    }
+  },
+
+  // ============================================================
   // POST /api/v1/risk-cases/:id/close
   // ============================================================
   close: async (req: Request, res: Response, next: NextFunction): Promise<void> => {

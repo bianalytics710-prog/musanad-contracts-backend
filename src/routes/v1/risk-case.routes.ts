@@ -189,6 +189,13 @@ router.post(
   riskCaseController.snooze,
 );
 
+// P33 — Pari Polish: wake from snooze (no body)
+router.post(
+  '/:id/unsnooze',
+  authedWriteRateLimiter,
+  riskCaseController.unsnooze,
+);
+
 router.post(
   '/:id/close',
   authedWriteRateLimiter,
