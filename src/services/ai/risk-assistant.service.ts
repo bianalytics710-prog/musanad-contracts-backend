@@ -290,7 +290,7 @@ export const riskAssistantService = {
       } catch {
         // Prompt file missing — use minimal inline prompt
         systemPrompt = [
-          `You are the AI Risk Assistant for the Musanad Contracts platform.`,
+          `You are the AI Risk Assistant for the OqoodAI Contracts platform.`,
           `Persona: ${persona}.`,
           `Only cite contracts the user can access: ${allowedContractIds.slice(0, 50).join(', ')}.`,
           `Answer the user's question concisely with citations to relevant contract IDs.`,

@@ -238,12 +238,14 @@ export const sendTestEmail = async (
     socketTimeout: TEST_SEND_TIMEOUT_MS,
   });
 
-  const fromName = config.fromNameEn || 'Musanad Contracts Hub';
+  const fromName = config.fromNameEn || 'OqoodAI Contracts Hub';
+  // sender address keeps the existing musanad.local domain to preserve any
+  // upstream allowlists; only the display name changes.
   const fromAddress = config.fromAddress || 'no-reply@musanad.local';
 
-  const subject = 'Musanad — Test email';
-  const text = `This is a test email from Musanad Contracts Hub admin cockpit.\n\nIf you received this, your SMTP configuration is working.`;
-  const html = `<p>This is a test email from <strong>Musanad Contracts Hub</strong> admin cockpit.</p><p>If you received this, your SMTP configuration is working.</p>`;
+  const subject = 'OqoodAI — Test email';
+  const text = `This is a test email from OqoodAI Contracts Hub admin cockpit.\n\nIf you received this, your SMTP configuration is working.`;
+  const html = `<p>This is a test email from <strong>OqoodAI Contracts Hub</strong> admin cockpit.</p><p>If you received this, your SMTP configuration is working.</p>`;
 
   const startedAt = Date.now();
   try {

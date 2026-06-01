@@ -196,7 +196,7 @@ const server = app.listen(port, () => {
       aiProvider: _env.AI_PROVIDER,
       uaePassProvider: _env.UAE_PASS_PROVIDER,
     },
-    `Musanad Contracts backend listening on port ${port}`,
+    `OqoodAI Contracts backend listening on port ${port}`,
   );
 
   // M2 / S9 — start approval-escalation cron driver. The driver is a no-op
