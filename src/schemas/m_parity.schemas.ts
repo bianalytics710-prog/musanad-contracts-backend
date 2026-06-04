@@ -61,8 +61,53 @@ export const CreateTemplateSchema = z.object({
   bodyEn: z.string().max(50000).nullable().optional(),
   bodyAr: z.string().max(50000).nullable().optional(),
   regulatoryTags: z.array(z.string().trim().max(60)).max(20).optional(),
+  placeholders: z
+    .array(
+      z.object({
+        key: z
+          .string()
+          .trim()
+          .min(1)
+          .max(60)
+          .regex(/^[a-z][a-z0-9_]*$/, 'key must be snake_case'),
+        labelEn: z.string().trim().min(1).max(120),
+        labelAr: z.string().trim().max(120).nullable().optional(),
+        kind: z.enum(['party', 'date', 'currency', 'number', 'text']),
+        required: z.boolean(),
+      }),
+    )
+    .max(60)
+    .optional(),
+  regulatoryReference: z.string().trim().max(200).nullable().optional(),
 });
 export type CreateTemplateInferred = z.infer<typeof CreateTemplateSchema>;
+
+// All fields optional — partial PATCH.
+export const UpdateTemplateSchema = CreateTemplateSchema.partial().extend({
+  // Explicitly allow null for nullable fields so the client can clear them.
+  nameEn: z.string().trim().min(1).max(200).optional(),
+  contractType: z.string().trim().min(1).max(50).optional(),
+});
+export type UpdateTemplateInferred = z.infer<typeof UpdateTemplateSchema>;
+
+// POST /api/v1/templates/extract-from-contract
+export const ExtractTemplateFromContractSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  extractedText: z.string().min(50).max(200000),
+  contractTypeHint: z.string().trim().max(50).nullable().optional(),
+});
+export type ExtractTemplateFromContractInferred = z.infer<
+  typeof ExtractTemplateFromContractSchema
+>;
+
+// POST /api/v1/clauses/extract-from-contract
+export const ExtractClausesFromContractSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  extractedText: z.string().min(100).max(200000),
+});
+export type ExtractClausesFromContractInferred = z.infer<
+  typeof ExtractClausesFromContractSchema
+>;
 
 // ------------------------------------------------------------
 // 4. POST /api/v1/clauses → fn_clause_create
@@ -123,3 +168,9 @@ export const CreateObligationSchema = z.object({
     .optional(),
 });
 export type CreateObligationInferred = z.infer<typeof CreateObligationSchema>;
+
+// POST /api/v1/obligations/:id/flag
+export const FlagObligationSchema = z.object({
+  note: z.string().trim().max(2000).nullable().optional(),
+});
+export type FlagObligationInferred = z.infer<typeof FlagObligationSchema>;

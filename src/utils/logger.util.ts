@@ -1180,6 +1180,38 @@ const SENSITIVE_PATHS: string[] = [
   'res.body.data.breakdown',
   'res.body.data.snapshots',
   'res.body.data.*.breakdown',
+
+  // -- M22 (CR-MIG-DRIVE) — OAuth tokens + cipher secrets --
+  //    Audit trigger redact list extended in migration 470 (3 columns:
+  //    oauth_access_token_encrypted / oauth_refresh_token_encrypted /
+  //    oauth_scopes). Pino mirrors with wider net so any code path that
+  //    surfaces a token (decryption helpers, intermediate state) is also
+  //    masked. Also catches Google API SDK objects that may include
+  //    credentials, client_id, client_secret on .auth.
+  'req.body.accessToken',
+  'req.body.refreshToken',
+  'req.body.client_secret',
+  'req.body.code',                       // OAuth code is single-use but still sensitive
+  'req.query.code',                       // /google-drive/callback ?code=
+  'req.query.state',                      // HMAC payload should not leak
+  '*.accessToken',
+  '*.refreshToken',
+  '*.oauthAccessTokenEncrypted',
+  '*.oauthRefreshTokenEncrypted',
+  '*.oauth_access_token_encrypted',
+  '*.oauth_refresh_token_encrypted',
+  '*.oauth_access_token',
+  '*.oauth_refresh_token',
+  '*.client_secret',
+  '*.clientSecret',
+  '*.tokens.access_token',
+  '*.tokens.refresh_token',
+  '*.credentials.access_token',
+  '*.credentials.refresh_token',
+  'res.body.data.oauthAccessTokenEncrypted',
+  'res.body.data.oauthRefreshTokenEncrypted',
+  'res.body.data.*.oauthAccessTokenEncrypted',
+  'res.body.data.*.oauthRefreshTokenEncrypted',
 ];
 
 const baseConfig = {

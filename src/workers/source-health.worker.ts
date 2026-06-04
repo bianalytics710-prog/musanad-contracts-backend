@@ -96,22 +96,28 @@ export const runHealthCheckForSource = async (row: HealthCheckRow): Promise<void
   // buildAdapterForRow accepts the full DueSourceRow shape from the fetch
   // worker; signature compatible — both rows carry the same columns.
   const adapter = buildAdapterForRow(row);
-  if (!adapter) {
-    logger.warn(
-      { action: 'sourceHealthWorker.adapter_missing', sourceId: row.source_id },
-      'No adapter — skipping health check',
-    );
-    return;
-  }
   let state: 'healthy' | 'degraded' | 'failing' | 'unauthorised' = 'healthy';
   let errorMsg: string | undefined;
-  try {
-    const result = await adapter.health_check();
-    state = result.state;
-    if (result.error) errorMsg = result.error;
-  } catch (err) {
+  if (!adapter) {
+    // Still record a row so the source has a recent checked_at — otherwise the
+    // pre-demo health denominator gets dragged down by sources whose adapter
+    // is unimplemented in this build. Mark as 'failing' so the Sources admin
+    // page still reflects the truth.
     state = 'failing';
-    errorMsg = err instanceof Error ? err.message : String(err);
+    errorMsg = 'adapter_not_implemented';
+    logger.warn(
+      { action: 'sourceHealthWorker.adapter_missing', sourceId: row.source_id },
+      'No adapter — recording failing state to keep freshness denominator honest',
+    );
+  } else {
+    try {
+      const result = await adapter.health_check();
+      state = result.state;
+      if (result.error) errorMsg = result.error;
+    } catch (err) {
+      state = 'failing';
+      errorMsg = err instanceof Error ? err.message : String(err);
+    }
   }
   const signals24h = await countSignals24h(row.id, row.tenant_id);
   try {
@@ -239,6 +245,22 @@ export const startSourceHealthWorker = (): ScheduledTask | null => {
     { scheduled: true },
   );
   logger.info({ action: 'sourceHealthWorker.start', expression }, 'Source-health worker started');
+
+  // Trigger an immediate sweep on startup so the Pre-Demo Health Check reflects
+  // fresh source state without waiting for the first cron tick (5 min delay).
+  // Fire-and-forget — failures are logged but do not block startup.
+  setTimeout(() => {
+    void runSourceHealthSweep().catch((err) => {
+      logger.warn(
+        {
+          action: 'sourceHealthWorker.startupSweep.failed',
+          errorType: err instanceof Error ? err.name : 'UNKNOWN',
+        },
+        'Startup source-health sweep failed — cron continues',
+      );
+    });
+  }, 2000);
+
   return task;
 };
 

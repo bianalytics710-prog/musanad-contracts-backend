@@ -115,6 +115,20 @@ import scoringWeightsRouter from './scoring-weights.routes';
 router.use('/scoring-weights', scoringWeightsRouter);
 
 // ============================================================
+// Mig 529 — Risk Scoring Formula Config (additive v2 model).
+// GET /admin/risk-scoring-config   — score.read OR score.weights.manage OR score.config.manage
+// PUT /admin/risk-scoring-config   — score.config.manage
+// ============================================================
+import riskScoringConfigRouter from './risk-scoring-config.routes';
+router.use('/risk-scoring-config', riskScoringConfigRouter);
+
+// ============================================================
+// Mig 538 — Dev Login Personas visibility (PUT only; GET is public)
+// ============================================================
+import devLoginPersonasRouter from './dev-login-personas.routes';
+router.use('/dev-login-personas', devLoginPersonasRouter);
+
+// ============================================================
 // M16 (CR-H) — Advisory Drafter + Notification Delivery.
 // GET/POST/PATCH/DELETE /admin/advisory-templates   (advisory.template.manage)
 // GET /admin/notification-dispatch-log              (notification.dispatch_log.read)
@@ -160,5 +174,13 @@ router.use('/', modulesRouter);
 // ============================================================
 import adminReportsRouter from './reports.routes';
 router.use('/reports', adminReportsRouter);
+
+// ============================================================
+// M22 (CR-MIG-DRIVE) — Dedicated migration purge (DANGER ZONE).
+//   POST /admin/migration/purge-all/preview    migration.purge.all
+//   POST /admin/migration/purge-all            migration.purge.all
+// ============================================================
+import migrationPurgeRouter from './migration-purge.routes';
+router.use('/migration/purge-all', migrationPurgeRouter);
 
 export default router;

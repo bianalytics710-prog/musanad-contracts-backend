@@ -17,6 +17,9 @@ import importBatchesRouter from './import-batches.routes';
 import aiRouter from './ai.routes';
 import approvalsRouter from './approvals.routes';
 import adminRouter from './admin';
+// M22 / CR-MIG-DRIVE — Contract Migration + Google Drive Connector
+import integrationsRouter from './integrations.routes';
+import migrationRouter from './migration.routes';
 import { authenticate } from '../../middleware/auth.middleware';
 import { rlsMiddleware } from '../../middleware/rls.middleware';
 import { requireModuleEnabled } from '../../middleware/module.middleware';
@@ -48,10 +51,16 @@ import internalSignalsRouter from './internal-signals.routes';
 import { extractClausesRouter, clauseReviewRouter } from './clause-extraction.routes';
 // M13 (CR-E) — Correlation Rule Engine + DSL + Correlations list/dismiss
 import { correlationsRouter } from './correlation-rule.routes';
+// Notification feed for the FE bell (mig 504)
+import { notificationsRouter } from './notifications.routes';
 
 const v1Router = Router();
 
 v1Router.use('/auth', authRouter);
+
+// Mig 538 — Public dev login personas endpoint (no auth — login page needs it).
+import publicRouter from './public.routes';
+v1Router.use('/public', publicRouter);
 v1Router.use('/users', userRouter);
 v1Router.use('/roles', roleRouter);
 v1Router.use('/permissions', permissionRouter);
@@ -66,6 +75,10 @@ v1Router.use('/ai', aiRouter);
 // M2 — Approval Workflows (Q3-OI-E)
 v1Router.use('/approvals', approvalsRouter);
 v1Router.use('/admin', adminRouter);
+
+// M22 / CR-MIG-DRIVE
+v1Router.use('/integrations', integrationsRouter);
+v1Router.use('/migration', migrationRouter);
 
 // M3 — Signatures + Signer Q&A AI
 //   /sign is the verify_jwt=false token-bearer namespace (S3, S4, S5,
@@ -103,6 +116,7 @@ v1Router.use('/parties', partyWorkforceRouter);
 v1Router.use('/parties', partiesRouter);
 v1Router.use('/templates', templatesRouter);
 v1Router.use('/obligations', obligationsRouter);
+v1Router.use('/notifications', notificationsRouter);
 // NOTE: clausesRouter is mounted at /clauses AFTER clauseReviewRouter below.
 // clausesRouter has a `/:id` route that would otherwise capture
 // `/review-queue`, `/search`, etc. as the :id param and fail Zod validation.
@@ -345,5 +359,20 @@ v1Router.use('/financial/trade-margin', authenticate, rlsMiddleware, requireModu
 v1Router.use('/financial/trade-margin', tradeMarginRouter);
 v1Router.use('/financial/price-benchmarks', authenticate, rlsMiddleware, requireModuleEnabled('financial.trade_margin'));
 v1Router.use('/financial/price-benchmarks', priceBenchmarksRouter);
+
+// ============================================================
+// TPA — Third-Party Agreement Assessment (Legal Counsel).
+//   GET    /api/v1/tpa/playbooks                  — list ADNOC playbooks (tpa.review.read)
+//   GET    /api/v1/tpa/playbooks/:id              — playbook + clauses
+//   POST   /api/v1/tpa/reviews/upload             — multipart upload + analyse (tpa.review.create)
+//   GET    /api/v1/tpa/reviews                    — list reviews
+//   GET    /api/v1/tpa/reviews/:id                — detail + findings + documents
+//   PATCH  /api/v1/tpa/reviews/:id/findings/:fid  — override AI verdict (tpa.review.amend)
+//   POST   /api/v1/tpa/reviews/:id/status         — transition status (tpa.review.amend)
+//   GET    /api/v1/tpa/reviews/:id/redline.docx   — stream redline DOCX (tpa.review.amend)
+// ============================================================
+import tpaRouter from './tpa.routes';
+v1Router.use('/tpa', authenticate, rlsMiddleware, requireModuleEnabled('tpa_review'));
+v1Router.use('/tpa', tpaRouter);
 
 export default v1Router;

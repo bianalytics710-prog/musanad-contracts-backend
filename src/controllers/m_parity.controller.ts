@@ -9,9 +9,15 @@ import * as svc from '../services/m_parity.service';
 import type {
   CreatePartyInferred,
   CreateTemplateInferred,
+  UpdateTemplateInferred,
+  ExtractTemplateFromContractInferred,
   CreateClauseInferred,
   CreateObligationInferred,
+  ExtractClausesFromContractInferred,
+  FlagObligationInferred,
 } from '../schemas/m_parity.schemas';
+import { extractTemplateFromContract } from '../services/ai/extract-template-from-contract.service';
+import { extractClausesFromContract } from '../services/ai/extract-clauses-from-contract.service';
 
 const errorType = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
@@ -179,6 +185,29 @@ export const templatesController = {
     }
   },
 
+  async defaultClauses(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    req.logger.info(
+      { action: 'templates.defaultClauses', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const id = intParam(req.params.id, 'id');
+      const result = await svc.getTemplateDefaultClauses(req.user!.id, id);
+      req.logger.info(
+        { action: 'templates.defaultClauses', userId: req.user?.id, duration: Date.now() - start, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        { action: 'templates.defaultClauses', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
   async create(req: Request, res: Response, next: NextFunction): Promise<void> {
     const start = Date.now();
     req.logger.info(
@@ -197,6 +226,8 @@ export const templatesController = {
         bodyEn: body.bodyEn ?? null,
         bodyAr: body.bodyAr ?? null,
         regulatoryTags: body.regulatoryTags ?? [],
+        placeholders: body.placeholders ?? [],
+        regulatoryReference: body.regulatoryReference ?? null,
       });
       req.logger.info(
         { action: 'templates.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
@@ -206,6 +237,109 @@ export const templatesController = {
     } catch (e) {
       req.logger.error(
         { action: 'templates.create', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async update(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    req.logger.info(
+      { action: 'templates.update', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const id = intParam(req.params.id, 'id');
+      const body = req.body as UpdateTemplateInferred;
+      const result = await svc.updateTemplate(req.user!.id, id, {
+        nameEn: body.nameEn ?? null,
+        nameAr: body.nameAr ?? null,
+        descriptionEn: body.descriptionEn ?? null,
+        descriptionAr: body.descriptionAr ?? null,
+        bodyEn: body.bodyEn ?? null,
+        bodyAr: body.bodyAr ?? null,
+        language: body.language ?? null,
+        contractType: body.contractType ?? null,
+        regulatoryTags: body.regulatoryTags ?? null,
+        placeholders: body.placeholders ?? null,
+        regulatoryReference: body.regulatoryReference ?? null,
+      });
+      req.logger.info(
+        { action: 'templates.update', userId: req.user?.id, duration: Date.now() - start, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        { action: 'templates.update', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async remove(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    req.logger.info(
+      { action: 'templates.delete', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const id = intParam(req.params.id, 'id');
+      const result = await svc.deleteTemplate(req.user!.id, id);
+      req.logger.info(
+        { action: 'templates.delete', userId: req.user?.id, duration: Date.now() - start, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        { action: 'templates.delete', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async extractFromContract(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    const body = req.body as ExtractTemplateFromContractInferred;
+    req.logger.info(
+      {
+        action: 'templates.extractFromContract',
+        userId: req.user?.id,
+        filename: body.filename,
+        textLength: body.extractedText.length,
+      },
+      'Controller entry',
+    );
+    try {
+      const result = await extractTemplateFromContract({
+        filename: body.filename,
+        extractedText: body.extractedText,
+        contractTypeHint: body.contractTypeHint ?? null,
+      });
+      req.logger.info(
+        {
+          action: 'templates.extractFromContract',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          statusCode: 200,
+          placeholderCount: result.placeholders.length,
+          warningCount: result.warnings.length,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        {
+          action: 'templates.extractFromContract',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          errorType: errorType(e),
+        },
         'Controller error',
       );
       next(e);
@@ -260,6 +394,49 @@ export const clausesController = {
     } catch (e) {
       req.logger.error(
         { action: 'clauses.get', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async extractFromContract(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    const body = req.body as ExtractClausesFromContractInferred;
+    req.logger.info(
+      {
+        action: 'clauses.extractFromContract',
+        userId: req.user?.id,
+        filename: body.filename,
+        textLength: body.extractedText.length,
+      },
+      'Controller entry',
+    );
+    try {
+      const result = await extractClausesFromContract({
+        filename: body.filename,
+        extractedText: body.extractedText,
+      });
+      req.logger.info(
+        {
+          action: 'clauses.extractFromContract',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          statusCode: 200,
+          candidateCount: result.candidates.length,
+          warningCount: result.warnings.length,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        {
+          action: 'clauses.extractFromContract',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          errorType: errorType(e),
+        },
         'Controller error',
       );
       next(e);
@@ -362,6 +539,41 @@ export const obligationsController = {
     } catch (e) {
       req.logger.error(
         { action: 'obligations.create', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async flag(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    req.logger.info(
+      { action: 'obligations.flag', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const obligationId = intParam(req.params.id, 'id');
+      const body = req.body as FlagObligationInferred;
+      const result = await svc.flagObligation(
+        req.user!.id,
+        obligationId,
+        body.note ?? null,
+      );
+      req.logger.info(
+        {
+          action: 'obligations.flag',
+          userId: req.user?.id,
+          obligationId,
+          notificationCount: result.notificationCount,
+          duration: Date.now() - start,
+          statusCode: 201,
+        },
+        'Controller exit',
+      );
+      res.status(201).json(result);
+    } catch (e) {
+      req.logger.error(
+        { action: 'obligations.flag', userId: req.user?.id, duration: Date.now() - start, errorType: errorType(e) },
         'Controller error',
       );
       next(e);

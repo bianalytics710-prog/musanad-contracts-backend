@@ -347,8 +347,11 @@ export const aiContractRisksToolSchema = z.object({
       z.object({
         title: z.string().min(1).max(300),
         severity: z.enum(['high', 'medium', 'low']),
-        clauseAnchor: z.string().min(1).max(300),
-        clauseExcerpt: z.string().min(1).max(2000),
+        // clauseAnchor / clauseExcerpt are best-effort — gpt-4o-mini often
+        // returns null when the risk is about a missing clause. FE handles
+        // null gracefully (no jump target). Mirror other tabs' leniency.
+        clauseAnchor: z.string().max(300).nullable().optional(),
+        clauseExcerpt: z.string().max(2000).nullable().optional(),
         rationale: z.string().min(1).max(2000),
       }),
     )

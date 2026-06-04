@@ -102,8 +102,25 @@ export const draftingAssistantController = {
       const systemPrompt = await service.buildSystemPrompt(ctx);
 
       if (body.mode === 'suggest') {
-        // Non-streaming tool call
-        const userMessage = `Suggest up to 4 clauses for ${body.contractType}. Existing clauses: ${ctx.existingClauseCategories.join(', ') || '(none)'}.`;
+        // Non-streaming tool call. If the user typed a directive
+        // (mapped to body.selectedText by the FE AI Assist panel), thread
+        // it through to the LLM so suggestions reflect their intent. With
+        // no directive, fall back to the missing-clause flow.
+        const directive = body.selectedText?.trim();
+        const userMessage = directive
+          ? [
+              `Drafter directive: "${directive}"`,
+              `Contract type: ${body.contractType}.`,
+              `Existing clause categories: ${ctx.existingClauseCategories.join(', ') || '(none)'}.`,
+              '',
+              'Return exactly 3 suggestions in suggestions[]. Each MUST include:',
+              '  - kind: one of "missing_clause" | "weak_clause" | "regulatory"',
+              '  - title: short clause title that reflects the directive',
+              '  - rationale: 1-3 sentences explaining why this clause matches the directive',
+              '  - proposedText: a full drafted clause body (>= 80 words) ready to append to the contract',
+              'The directive is the primary signal; address it directly. Do not generate generic missing-clause boilerplate when the directive is specific.',
+            ].join('\n')
+          : `Suggest up to 4 clauses for ${body.contractType}. Existing clauses: ${ctx.existingClauseCategories.join(', ') || '(none)'}.`;
         const result = await service.suggestClauses({ systemPrompt, userMessage });
         modelUsed = result.modelUsed;
         tokensInput = result.tokensInput;

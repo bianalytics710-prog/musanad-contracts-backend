@@ -65,6 +65,13 @@ interface CorrelationContextRow {
   correlationRuleDescription: string | null;
   matchExplanation: string | null;
   matchedClauseText: string | null;
+  // mig 511 — customer-facing additions: titled clause + verbatim excerpt
+  // + contract title (so templates can render "Contract <number> — <title>"
+  // instead of just the number).
+  matchedClauseTitle: string | null;
+  matchedClauseExcerpt: string | null;
+  contractTitleEn: string | null;
+  contractTitleAr: string | null;
   counterpartyName: string | null;
   contractReferenceNumber: string | null;
   signalDate: string | null;
@@ -196,12 +203,26 @@ function buildMustacheContext(
 ): Record<string, string | number | null> {
   const noticeDateIso = new Date().toISOString().split('T')[0] ?? '';
 
+  // contract_id stays as the contract NUMBER (customer-facing reference),
+  // never the DB primary key. contract_title surfaces the human-readable
+  // title so templates can render "Contract OQOOD-2026-003 — Mubadala
+  // Investment Advisory" without exposing internal ids.
+  const contractRefNumber = stripNewlines(ctx.contractReferenceNumber);
+  const contractTitle = stripNewlines(ctx.contractTitleEn) || stripNewlines(ctx.contractTitleAr);
+
   return {
     notice_date: noticeDateIso,
-    contract_id: ctx.contractReferenceNumber ?? String(ctx.contractId),
+    contract_id: contractRefNumber || stripNewlines(ctx.contractReferenceNumber) || '—',
+    contract_number: contractRefNumber || '—',
+    contract_title: contractTitle || '',
     addressee: stripNewlines(ctx.counterpartyName) || 'Addressee',
     counterparty_name: stripNewlines(ctx.counterpartyName) || '',
+    // Clause references: prefer humanised title + verbatim excerpt over the
+    // raw summary. Templates can use {{clause_title}} + {{clause_excerpt}}
+    // alongside the legacy {{fm_clause_text}} fallback.
     fm_clause_text: escapeControlChars(ctx.matchedClauseText) || 'Force Majeure Clause',
+    clause_title: stripNewlines(ctx.matchedClauseTitle) || '',
+    clause_excerpt: escapeControlChars(ctx.matchedClauseExcerpt) || '',
     notice_period_days: 14,
     signal_date: ctx.signalDate ? String(ctx.signalDate).split('T')[0] ?? '' : noticeDateIso,
     signal_summary: escapeControlChars(ctx.signalSummary) || '',
@@ -350,10 +371,16 @@ export async function generateAdvisoryDraft(
     ? buildMustacheContext(ctx)
     : {
         notice_date: new Date().toISOString().split('T')[0] ?? '',
-        contract_id: resolvedContractId ? String(resolvedContractId) : 'N/A',
+        // Fallback path — we still avoid leaking the DB id by labelling it
+        // explicitly as "N/A" so the rendered draft never says "Contract 127".
+        contract_id: 'N/A',
+        contract_number: 'N/A',
+        contract_title: '',
         addressee: '',
         counterparty_name: '',
         fm_clause_text: '',
+        clause_title: '',
+        clause_excerpt: '',
         notice_period_days: 14,
         signal_date: '',
         signal_summary: '',

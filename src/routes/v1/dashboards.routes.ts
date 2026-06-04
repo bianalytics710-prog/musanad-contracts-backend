@@ -165,6 +165,14 @@ dashboardsRouter.get(
   dashboardsController.executiveAnomaliesHistory,
 );
 
+// E-rev-3 — GET /api/v1/dashboards/executive/expiring-contracts
+// Drilldown for the expiry-cliff modal.
+dashboardsRouter.get(
+  '/executive/expiring-contracts',
+  authedReadRateLimiter,
+  dashboardsController.executiveExpiringContracts,
+);
+
 // ------------------------------------------------------------
 // S7 — GET /api/v1/dashboards/executive
 // ------------------------------------------------------------

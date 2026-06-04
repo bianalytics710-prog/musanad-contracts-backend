@@ -220,8 +220,8 @@ export interface AiContractRisksPayload {
   risks: Array<{
     title: string;
     severity: 'high' | 'medium' | 'low';
-    clauseAnchor: string;
-    clauseExcerpt: string;
+    clauseAnchor?: string | null;
+    clauseExcerpt?: string | null;
     rationale: string;
   }>;
 }

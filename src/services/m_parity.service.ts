@@ -103,7 +103,32 @@ export const createParty = (
     { actorId },
   );
 
+export type TemplatePlaceholderKind = 'party' | 'date' | 'currency' | 'number' | 'text';
+
+export interface TemplatePlaceholder {
+  key: string;
+  labelEn: string;
+  labelAr?: string | null;
+  kind: TemplatePlaceholderKind;
+  required: boolean;
+}
+
 export interface TemplateListItem {
+  id: number;
+  nameEn: string;
+  nameAr: string | null;
+  contractType: string;
+  descriptionEn: string | null;
+  descriptionAr?: string | null;
+  language: 'en' | 'ar' | 'bilingual';
+  regulatoryTags: string[];
+  regulatoryReference: string | null;
+  usageCount: number;
+  placeholderCount: number;
+  updatedAt: string;
+}
+
+export interface TemplateDetail {
   id: number;
   nameEn: string;
   nameAr: string | null;
@@ -112,13 +137,12 @@ export interface TemplateListItem {
   descriptionAr: string | null;
   language: 'en' | 'ar' | 'bilingual';
   regulatoryTags: string[];
-  usageCount: number;
-  createdAt: string;
-}
-
-export interface TemplateDetail extends TemplateListItem {
+  regulatoryReference: string | null;
+  placeholders: TemplatePlaceholder[];
   bodyEn: string | null;
   bodyAr: string | null;
+  usageCount: number;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -145,6 +169,32 @@ export const getTemplateById = (
     { actorId },
   );
 
+export interface TemplateDefaultClause {
+  id: number;
+  clauseId: number;
+  sortOrder: number;
+  isDefault: boolean;
+  category: string;
+  variant: 'standard' | 'alternative' | 'fallback';
+  titleEn: string;
+  titleAr: string | null;
+}
+
+export interface TemplateDefaultClausesResult {
+  templateId: number;
+  data: TemplateDefaultClause[];
+}
+
+export const getTemplateDefaultClauses = (
+  actorId: number,
+  templateId: number,
+): Promise<TemplateDefaultClausesResult> =>
+  db.callFunction<TemplateDefaultClausesResult>(
+    'fn_template_default_clauses',
+    [actorId, templateId],
+    { actorId },
+  );
+
 export interface CreateTemplateInput {
   nameEn: string;
   contractType: string;
@@ -155,6 +205,8 @@ export interface CreateTemplateInput {
   bodyEn?: string | null;
   bodyAr?: string | null;
   regulatoryTags?: string[];
+  placeholders?: TemplatePlaceholder[];
+  regulatoryReference?: string | null;
 }
 
 export const createTemplate = (
@@ -174,7 +226,58 @@ export const createTemplate = (
       input.bodyEn ?? null,
       input.bodyAr ?? null,
       input.regulatoryTags ?? [],
+      JSON.stringify(input.placeholders ?? []),
+      input.regulatoryReference ?? null,
     ],
+    { actorId },
+  );
+
+export interface UpdateTemplateInput {
+  nameEn?: string | null;
+  nameAr?: string | null;
+  descriptionEn?: string | null;
+  descriptionAr?: string | null;
+  bodyEn?: string | null;
+  bodyAr?: string | null;
+  language?: 'en' | 'ar' | 'bilingual' | null;
+  contractType?: string | null;
+  regulatoryTags?: string[] | null;
+  placeholders?: TemplatePlaceholder[] | null;
+  regulatoryReference?: string | null;
+}
+
+export const updateTemplate = (
+  actorId: number,
+  templateId: number,
+  input: UpdateTemplateInput,
+): Promise<TemplateDetail> =>
+  db.callFunction<TemplateDetail>(
+    'fn_template_update',
+    [
+      actorId,
+      templateId,
+      input.nameEn ?? null,
+      input.nameAr ?? null,
+      input.descriptionEn ?? null,
+      input.descriptionAr ?? null,
+      input.bodyEn ?? null,
+      input.bodyAr ?? null,
+      input.language ?? null,
+      input.contractType ?? null,
+      input.regulatoryTags ?? null,
+      input.placeholders ? JSON.stringify(input.placeholders) : null,
+      input.regulatoryReference ?? null,
+    ],
+    { actorId },
+  );
+
+export const deleteTemplate = (
+  actorId: number,
+  templateId: number,
+): Promise<{ id: number; deleted: boolean }> =>
+  db.callFunction<{ id: number; deleted: boolean }>(
+    'fn_template_delete',
+    [actorId, templateId],
     { actorId },
   );
 
@@ -274,6 +377,17 @@ export interface ObligationListItem {
   status: 'open' | 'in_progress' | 'completed' | 'overdue' | 'waived';
   completedAt: string | null;
   createdAt: string;
+  /** Last manual-flag event surfaced by fn_obligation_list (mig 500). */
+  flaggedAt?: string | null;
+  flaggedByName?: string | null;
+  flaggedNote?: string | null;
+}
+
+export interface FlagObligationResult {
+  eventId: number;
+  roleCodes: string[];
+  notifiedUserIds: number[];
+  notificationCount: number;
 }
 
 export const listObligations = (
@@ -292,6 +406,17 @@ export const listObligations = (
       limit ?? 100,
       offset ?? 0,
     ],
+    { actorId },
+  );
+
+export const flagObligation = (
+  actorId: number,
+  obligationId: number,
+  note?: string | null,
+): Promise<FlagObligationResult> =>
+  db.callFunction<FlagObligationResult>(
+    'fn_obligation_flag',
+    [actorId, obligationId, note ?? null],
     { actorId },
   );
 

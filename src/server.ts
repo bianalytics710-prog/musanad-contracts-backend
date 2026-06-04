@@ -96,6 +96,11 @@ import {
   startNotificationRetryWorker,
   stopNotificationRetryWorker,
 } from './workers/notification-retry.worker';
+// M22 (CR-MIG-DRIVE) — Migration sync worker
+import {
+  startMigrationSyncWorker,
+  stopMigrationSyncWorker,
+} from './workers/migration-sync.worker';
 // M19 (CR-K) — Risk Case Escalation worker (node-cron every-5-min)
 import {
   startRiskCaseEscalationWorker,
@@ -121,6 +126,11 @@ import {
   startMarginRecomputeWorker,
   stopMarginRecomputeWorker,
 } from './workers/margin-recompute.worker';
+// Obligation SLA Escalation worker (mig 500 — daily cron)
+import {
+  startObligationSlaEscalationWorker,
+  stopObligationSlaEscalationWorker,
+} from './workers/obligation-sla-escalation.worker';
 
 const app = express();
 
@@ -255,6 +265,10 @@ const server = app.listen(port, () => {
   //   AND requires SMTP_RETRY_WORKER_ENABLED=true (default off in dev).
   void startNotificationRetryWorker();
 
+  // M22 (CR-MIG-DRIVE) — Migration sync worker (every 10s).
+  // Disabled by default unless MIGRATION_SYNC_WORKER_ENABLED=true.
+  startMigrationSyncWorker();
+
   // M19 (CR-K) — Risk Case Escalation worker.
   // Runs every 5 min via node-cron. fn_risk_case_escalation_check enumerates
   //   cross-tenant; worker sets per-row tenant GUC before fn_risk_case_escalate.
@@ -288,6 +302,13 @@ const server = app.listen(port, () => {
   // Demo path is the synchronous POST /price-benchmarks/recompute — this worker
   // is the production async wiring.
   void startMarginRecomputeWorker();
+
+  // Obligation SLA Escalation worker (mig 500).
+  // Daily at 05:00 UTC. fn_obligation_sla_check enumerates {obligation,tier}
+  // pairs that crossed T+3/7/14/21d; fn_obligation_sla_dispatch fans
+  // in-app notifications + writes obligation_escalation_event.
+  // No-op in test AND requires OBLIGATION_SLA_WORKER_ENABLED=true (default off).
+  startObligationSlaEscalationWorker();
 });
 
 // --- Graceful shutdown ---
@@ -306,6 +327,8 @@ const shutdown = async (signal: string): Promise<void> => {
     stopSourceHealthWorker();
     // M11 (CR-D0) — stop ingestion worker.
     stopIngestionWorker();
+    // M22 — stop migration sync worker.
+    stopMigrationSyncWorker();
     // M12 (CR-D) — stop clause extraction worker.
     stopClauseExtractionWorker();
     // M13 (CR-E) — stop correlation evaluator worker + rule cache listener.
@@ -323,6 +346,8 @@ const shutdown = async (signal: string): Promise<void> => {
     stopReportScheduler();
     // M21 (CR-O) — stop margin recompute worker (PG LISTEN + cron).
     stopMarginRecomputeWorker();
+    // Obligation SLA escalation worker (mig 500).
+    stopObligationSlaEscalationWorker();
 
     await new Promise<void>((resolve, reject) => {
       server.close((err) => (err ? reject(err) : resolve()));
@@ -367,6 +392,24 @@ process.on('unhandledRejection', (reason: unknown) => {
 });
 
 process.on('uncaughtException', (err: Error) => {
+  // M22 — Tesseract.js / Leptonica throws asynchronous Lepton errors when
+  // it can't parse a particular PDF (scanned with unusual encoding,
+  // corrupted, etc.). These bubble up as uncaughtException with messages
+  // like "Error attempting to read image" / "Pdf reading is not supported".
+  // The per-file failure is already recorded in migration_record by the
+  // orchestrator's try/catch — we MUST NOT take the whole BE down for one
+  // unparsable PDF, otherwise a single bad file halts an entire batch and
+  // we lose the rest of the run.
+  const msg = err.message || '';
+  if (
+    /attempting to read image|Pdf reading is not supported|pixRead|pixReadStream|tesseract|leptonica/i.test(msg)
+  ) {
+    logger.warn(
+      { action: 'process.uncaughtException.tolerated', errorType: err.name, message: msg },
+      'Tolerating Tesseract/Leptonica async failure — per-file error already recorded',
+    );
+    return;
+  }
   logger.fatal(
     { action: 'process.uncaughtException', errorType: err.name, message: err.message },
     'Uncaught exception — exiting',

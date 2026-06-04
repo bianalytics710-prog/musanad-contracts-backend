@@ -399,6 +399,27 @@ export const dashboardsController = {
   },
 
   /**
+   * GET /api/v1/dashboards/executive/expiring-contracts?windowDays=30
+   * E-rev-3 — drilldown list for the expiry-cliff modal.
+   */
+  async executiveExpiringContracts(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const windowDays = Math.min(
+        365,
+        Math.max(1, Number((req.query.windowDays as string) ?? 30)),
+      );
+      const raw = await (await import('../database/client')).db.callFunction<unknown>(
+        'fn_dashboard_executive_expiring_contracts',
+        [windowDays],
+        { actorId: req.user!.id },
+      );
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
    * GET /api/v1/dashboards/executive/anomalies-history →
    * fn_dashboard_executive_anomalies_history (S8).
    *

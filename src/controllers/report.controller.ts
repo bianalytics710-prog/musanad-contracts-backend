@@ -49,6 +49,7 @@ import {
   reportDataRequestSchema,
 } from '../schemas/report.schemas';
 import { signDownloadUrl } from '../services/supabase-storage.service';
+import { executeReportRunRow } from '../services/report-run-executor.service';
 
 // All 24 valid data-fn slugs, mirrored from types.ts ReportDataSourceSlug.
 // Used as a path param allow-list for the worker-only data-fn endpoint.
@@ -419,7 +420,7 @@ export const reportController = {
       // DEFECT-CRKL-INT-2 fix (2026-05-15): format and parameters were swapped
       // — the JSONB parameters got bound to p_format TEXT → 400 on every call.
       // Keep this comment + named tags inline.
-      const result = await db.callFunction(
+      const triggerResult = await db.callFunction<{ runId: number; status: string }>(
         'fn_report_run_trigger',
         [
           req.user!.id,                                              // p_actor_id
@@ -431,13 +432,83 @@ export const reportController = {
         { actorId: req.user!.id, tenantId: req.tenantId },
       );
 
+      const runId = triggerResult?.runId;
+      if (!runId) {
+        throw new ApiError(500, 'trigger_failed', 'Report run could not be created');
+      }
+
+      // Inline-render — bypass the queue/poll flow so the user can download
+      // immediately. The shared executor flips the row to status='complete'
+      // (or 'failed') and uploads bytes to Supabase Storage. The worker
+      // remains responsible for scheduled runs.
+      const execResult = await executeReportRunRow(
+        {
+          id: runId,
+          tenantId: req.tenantId ?? '00000000-0000-0000-0000-000000000001',
+          reportTemplateId: id,
+          format: data.format,
+          parameters: data.parameters ?? {},
+          triggeredBy: 'manual',
+        },
+        { actorId: req.user!.id },
+      );
+
+      if (!execResult.ok || !execResult.storagePath) {
+        req.logger.error({
+          action: 'fn_report_run_trigger.executeFailed',
+          userId: req.user?.id,
+          runId,
+          error: execResult.error,
+          duration: Date.now() - startTime,
+        });
+        // Surface the run-id so the FE can show the failure detail page if needed.
+        res.status(500).json({
+          runId,
+          status: 'failed',
+          error: execResult.error ?? 'render_failed',
+        });
+        return;
+      }
+
+      // Mint a 60-second signed URL the FE can immediately fetch + download.
+      const fileName = execResult.storagePath.split('/').pop() ?? 'report';
+      let signedUrl: string | null = null;
+      let signedUrlExpiresAt: string | null = null;
+      try {
+        signedUrl = await signDownloadUrl({
+          storagePath: execResult.storagePath,
+          filename: fileName,
+          ttlSeconds: 60,
+        });
+        signedUrlExpiresAt = new Date(Date.now() + 60_000).toISOString();
+      } catch (mintErr) {
+        req.logger.warn({
+          action: 'fn_report_run_trigger.signFailed',
+          userId: req.user?.id,
+          runId,
+          errorType: (mintErr as Error).name,
+        });
+      }
+
       req.logger.info({
         action: 'fn_report_run_trigger',
         userId: req.user?.id,
+        runId,
+        format: data.format,
+        sizeBytes: execResult.sizeBytes,
         duration: Date.now() - startTime,
-        statusCode: 202,
+        statusCode: 201,
       });
-      res.status(202).json(result);
+
+      res.status(201).json({
+        runId,
+        status: 'complete',
+        format: data.format,
+        outputSizeBytes: execResult.sizeBytes ?? null,
+        signedUrl,
+        signedUrlExpiresAt,
+        fileName,
+      });
     } catch (error) {
       req.logger.error({
         action: 'fn_report_run_trigger',

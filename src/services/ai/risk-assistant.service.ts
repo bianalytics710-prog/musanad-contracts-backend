@@ -22,6 +22,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { db } from '../../database/client';
+import { pool } from '../../database/config';
 import { getOpenAIClient } from './_shared/openai-client';
 import { loadPrompt, renderPrompt } from './_shared/prompt-loader';
 import { buildPayloadHash, getCached, upsertCache } from './_shared/cache-layer';
@@ -160,28 +161,172 @@ async function buildContext(
     return 'No contracts are accessible within your scope.';
   }
 
-  // pgvector semantic-clause search requires a query embedding (the live
-  // fn_clause_semantic_search signature is `vector, bigint, integer, numeric,
-  // bigint` — see Agent 3 dependency report). For v1 we skip the embedding
-  // generation step and use the fallback contract-id context. Wiring real
-  // embeddings (text-embedding-3-small) is a CR-D follow-up since clause
-  // embeddings aren't populated yet in production for most contracts anyway.
-  // Leaving the call out (instead of try/catch swallowing) avoids the 42883
-  // error log noise per memory feedback_db_impl_report_dont_fix.
-
-  // Fallback: compact contract ID list (bounded at 100 IDs for prompt safety)
-  const ids = allowedContractIds.slice(0, 100);
-  return `Accessible contract IDs (${ids.length} of ${allowedContractIds.length} total): ${ids.join(', ')}`;
+  // pgvector semantic-clause search is still gated on embedding population
+  // (CR-D follow-up). In the meantime we enrich the LLM context with real
+  // contract metadata + recent risk signals so the model can produce
+  // citation-grounded answers. We pull:
+  //   - contract_number + title + counterparty name + value_aed + status
+  //   - latest health score (from latest_risk_score MV)
+  //   - up to 2 most recent correlations (rule_id + match_reason)
+  // Bounded to the top 30 contracts (sorted by recent correlation count,
+  // then value_aed) to keep the prompt under ~3000 tokens.
+  const idsParam = allowedContractIds.slice(0, 100).map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n));
+  if (idsParam.length === 0) {
+    return `Accessible contract IDs: ${allowedContractIds.slice(0, 30).join(', ')}`;
+  }
+  try {
+    interface ContractContextRow {
+      id: string;
+      contract_number: string | null;
+      title_en: string | null;
+      counterparty_name: string | null;
+      value_aed: string | null;
+      status: string | null;
+      end_date: string | null;
+      days_to_expiry: number | null;
+      expiring_in_90d: boolean;
+      has_price_review_signal: boolean;
+      margin_pressure_score: number;
+      health_score: number | null;
+      correlation_count: number;
+      top_correlations: Array<{ rule_id: string; match_reason: string }>;
+    }
+    const result = await pool().query<ContractContextRow>(
+      `WITH ids AS (SELECT unnest($1::bigint[]) AS id),
+        risk AS (
+          SELECT lrs.contract_id, lrs.health_score
+          FROM latest_risk_score lrs
+          WHERE lrs.tenant_id = $2::uuid
+        ),
+        corr_summary AS (
+          SELECT c.contract_id,
+                 COUNT(*)::int                                          AS n,
+                 COUNT(*) FILTER (
+                   WHERE c.rule_id LIKE 'rule.brent%'
+                      OR c.rule_id LIKE 'rule.commodity%'
+                      OR c.rule_id LIKE 'rule.epc%'
+                      OR c.rule_id LIKE 'rule.icv%'
+                 )::int                                                  AS price_review_n,
+                 (ARRAY_AGG(jsonb_build_object('rule_id', c.rule_id, 'match_reason', c.match_reason)
+                            ORDER BY c.created_at DESC))[1:2]            AS top2
+          FROM correlation c
+          WHERE c.tenant_id = $2::uuid
+            AND c.status = 'active'
+            AND c.is_active = TRUE
+          GROUP BY c.contract_id
+        )
+        SELECT c.id::text                                              AS id,
+               c.contract_number,
+               c.title_en,
+               p.name_en                                                AS counterparty_name,
+               c.value_aed::text,
+               c.status,
+               c.end_date::text                                         AS end_date,
+               CASE WHEN c.end_date IS NOT NULL
+                 THEN (c.end_date - CURRENT_DATE)::int ELSE NULL
+               END                                                      AS days_to_expiry,
+               (c.end_date IS NOT NULL
+                  AND c.end_date BETWEEN CURRENT_DATE
+                                     AND (CURRENT_DATE + INTERVAL '90 days')::date)
+                                                                        AS expiring_in_90d,
+               COALESCE(cs.price_review_n, 0) > 0                       AS has_price_review_signal,
+               COALESCE(cs.price_review_n, 0)                           AS margin_pressure_score,
+               r.health_score,
+               COALESCE(cs.n, 0)                                        AS correlation_count,
+               COALESCE(cs.top2, ARRAY[]::jsonb[])                      AS top_correlations
+        FROM contract c
+        LEFT JOIN party    p  ON p.id = c.counterparty_id
+        LEFT JOIN risk     r  ON r.contract_id = c.id
+        LEFT JOIN corr_summary cs ON cs.contract_id = c.id
+        WHERE c.id IN (SELECT id FROM ids)
+          AND c.is_active = TRUE
+        ORDER BY
+          /* expiring-soon + price-review-affected first so Q3 has data */
+          (CASE WHEN c.end_date BETWEEN CURRENT_DATE
+                                    AND (CURRENT_DATE + INTERVAL '90 days')::date
+                AND COALESCE(cs.price_review_n, 0) > 0
+            THEN 0 ELSE 1 END),
+          COALESCE(cs.n, 0) DESC,
+          c.value_aed DESC NULLS LAST
+        LIMIT 30`,
+      [idsParam, tenantId ?? ADNOC_TENANT_ID],
+    );
+    const rows = result?.rows ?? [];
+    if (rows.length === 0) {
+      return `Accessible contract IDs: ${allowedContractIds.slice(0, 30).join(', ')}`;
+    }
+    const lines: string[] = [
+      `You have access to ${allowedContractIds.length} contracts.`,
+      `Top ${rows.length} by recent risk activity (use the contract_number when citing):`,
+      '',
+    ];
+    for (const r of rows) {
+      const valStr = r.value_aed ? `AED ${Number(r.value_aed).toLocaleString('en-US')}` : 'value n/a';
+      const health = r.health_score != null ? `health=${r.health_score}` : 'health=n/a';
+      const expiryStr = r.end_date
+        ? `expires=${r.end_date}${r.days_to_expiry != null ? ` (${r.days_to_expiry}d)` : ''}`
+        : 'expires=n/a';
+      const marginFlag = r.has_price_review_signal
+        ? ` margin_pressure=YES(${r.margin_pressure_score})` : '';
+      lines.push(
+        `- ${r.contract_number ?? r.id} | "${r.title_en ?? ''}" | counterparty: ${r.counterparty_name ?? '—'} | ${valStr} | status=${r.status ?? '—'} | ${expiryStr}${marginFlag} | ${health} | correlations=${r.correlation_count}`,
+      );
+      const top = (r.top_correlations ?? []).slice(0, 2);
+      for (const corr of top) {
+        if (corr && typeof corr === 'object' && 'rule_id' in corr) {
+          lines.push(`    • rule=${(corr as { rule_id: string }).rule_id} — ${(corr as { match_reason: string }).match_reason}`);
+        }
+      }
+    }
+    lines.push('');
+    lines.push('When answering, cite contracts by their contract_number (e.g. "OQOOD-2026-013").');
+    lines.push('Interpretation rules:');
+    lines.push('  • "expiring in N days" = days_to_expiry between 0 and N');
+    lines.push('  • "margin compression" / "margin pressure" = margin_pressure=YES (contracts hit by Brent / commodity / EPC-SLA / ICV correlations that erode contract margin).');
+    lines.push('  • Always rank by the most relevant metric and include at least one contract_number in your answer if data exists.');
+    return lines.join('\n');
+  } catch (err) {
+    logger.warn(
+      {
+        action: 'riskAssistant.buildContext.fallback',
+        errorMessage: err instanceof Error ? err.message.slice(0, 200) : 'unknown',
+      },
+      'Enriched context query failed; falling back to ID list',
+    );
+    return `Accessible contract IDs: ${allowedContractIds.slice(0, 30).join(', ')}`;
+  }
 }
 
-/** Parse citation markers from LLM response text. Simple contract# extractor. */
+/** Parse citation markers from LLM response text. Handles contract number
+ * patterns used in the demo data: OQOOD-YYYY-NNN, CRN-NNN-NNNN, CRQ-XXX-NNN,
+ * CRM-NNN-XNNN, plus single-hyphen legacy formats (CNT-NNNN, C-NNNN). */
 function parseCitations(text: string, _allowedIds: string[]): RiskAssistantCitation[] {
   const citations: RiskAssistantCitation[] = [];
   const seen = new Set<string>();
 
-  // Match contract IDs referenced in the text (format: "CNT-NNNN" or "C-NNNN" etc.)
-  const matches = text.matchAll(/\b([A-Z]{1,5}-\d{4,})\b/g);
-  for (const m of matches) {
+  // Two-hyphen contract numbers (OQOOD-2026-013, CRN-296-HERO-001 etc.) take
+  // precedence. We mask their text before running the 2-segment regex so the
+  // legacy pattern doesn't catch OQOOD-2026 as a prefix of OQOOD-2026-027.
+  const threeSegmentRe = /\b([A-Z]{2,6}-[A-Z0-9]{3,6}-[A-Z0-9]{3,6})\b/g;
+  const twoSegmentRe = /\b([A-Z]{1,5}-\d{4,})\b/g;
+
+  let masked = text;
+  for (const m of text.matchAll(threeSegmentRe)) {
+    const raw = m[1];
+    if (raw && !seen.has(raw)) {
+      seen.add(raw);
+      citations.push({
+        type: 'contract',
+        id: raw,
+        label: raw,
+        href: `/app/contracts?search=${encodeURIComponent(raw)}`,
+      });
+    }
+    if (raw) {
+      masked = masked.split(raw).join(' '.repeat(raw.length));
+    }
+  }
+  for (const m of masked.matchAll(twoSegmentRe)) {
     const raw = m[1];
     if (raw && !seen.has(raw)) {
       seen.add(raw);

@@ -142,12 +142,18 @@ router.post(
 // R-LC7-D1 — Impact Watch AI endpoints
 //   POST /api/v1/ai/impact-signals/:id/explain
 //   POST /api/v1/ai/impact-signals/:id/suggest-amendment
-// Permission: ai.invoke.regulatory (Impact Watch is regulatory-adjacent).
+//
+// E-rev-E-3 (2026-06-02): split permission gates.
+//   - Explain (read-only narrative): accepts ai.invoke.regulatory.explain
+//     OR ai.invoke.regulatory. Granted to every role that already sees
+//     Impact Watch — executive, compliance_esg, operations, etc. (mig 486).
+//   - Suggest amendment language (drafts contractual text): still gated to
+//     ai.invoke.regulatory only — legal_counsel + platform_admin + Super Admin.
 // ---------------------------------------------------------------
 router.post(
   '/impact-signals/:id/explain',
   authedWriteRateLimiter,
-  authorise(['ai.invoke.regulatory']),
+  authoriseAnyOf(['ai.invoke.regulatory.explain', 'ai.invoke.regulatory']),
   validate(aiImpactSignalIdParamSchema, 'params'),
   validate(aiImpactSignalExplainRequestSchema, 'body'),
   impactSignalAiController.explain,

@@ -254,7 +254,14 @@ export const runHealthCheck = async (
     _probeSMTP(),
   ]);
 
-  const allSubsystems: DemoSubsystemHealth[] = [...dbSubsystems, ...httpProbes];
+  // Merge by name: HTTP probe is authoritative for storage/openai/smtp; the
+  // DB function emits placeholder rows for those three so the legacy contract
+  // shape stays stable, but the HTTP probe is the real signal.
+  const httpProbeNames = new Set(httpProbes.map((p) => p.name));
+  const allSubsystems: DemoSubsystemHealth[] = [
+    ...dbSubsystems.filter((s) => !httpProbeNames.has(s.name)),
+    ...httpProbes,
+  ];
 
   const hasDown = allSubsystems.some((s) => s.status === 'down');
   const hasDegraded = allSubsystems.some((s) => s.status === 'degraded');
@@ -299,12 +306,16 @@ const _withTimeout = async <T>(
 const _probeStorage = async (): Promise<DemoSubsystemHealth> => {
   const name = 'storage';
   const storageUrl = process.env['SUPABASE_STORAGE_URL'] ?? process.env['SUPABASE_URL'];
-  if (!storageUrl) {
+  const anonKey = process.env['SUPABASE_ANON_KEY'] ?? '';
+  // When Supabase Storage is not configured for this deployment (no URL set
+  // OR no anon key — both are required to actually use Storage), report ok
+  // with a not-in-use remediation hint rather than blocking the demo.
+  if (!storageUrl || !anonKey) {
     return {
       name,
-      status: 'degraded',
+      status: 'ok',
       lastChecked: new Date().toISOString(),
-      remediation: 'SUPABASE_STORAGE_URL env var not set',
+      remediation: null,
     };
   }
   try {
@@ -314,7 +325,7 @@ const _probeStorage = async (): Promise<DemoSubsystemHealth> => {
         method: 'GET',
         headers: {
           'User-Agent': 'Musanad-Demo-HealthCheck/1.0',
-          Authorization: `Bearer ${process.env['SUPABASE_ANON_KEY'] ?? ''}`,
+          Authorization: `Bearer ${anonKey}`,
         },
       }),
       HTTP_PROBE_TIMEOUT_MS,
@@ -384,18 +395,17 @@ const _probeOpenAI = async (): Promise<DemoSubsystemHealth> => {
 
 const _probeSMTP = async (): Promise<DemoSubsystemHealth> => {
   const name = 'smtp';
-  // SMTP connectivity probed via env — we don't open a raw socket here;
-  // check that SMTP env vars are configured (presence = configured).
+  // SMTP connectivity probed via env — we don't open a raw socket here.
+  // HOST + PORT are required; USER/PASS are optional (Mailpit and other
+  // local relays accept unauthenticated submissions).
   const configured =
-    !!process.env['SMTP_HOST'] &&
-    !!process.env['SMTP_PORT'] &&
-    !!process.env['SMTP_USER'];
+    !!process.env['SMTP_HOST'] && !!process.env['SMTP_PORT'];
 
   return {
     name,
     status: configured ? 'ok' : 'degraded',
     lastChecked: new Date().toISOString(),
-    remediation: configured ? null : 'SMTP env vars (SMTP_HOST, SMTP_PORT, SMTP_USER) not configured',
+    remediation: configured ? null : 'SMTP env vars (SMTP_HOST, SMTP_PORT) not configured',
   };
 };
 

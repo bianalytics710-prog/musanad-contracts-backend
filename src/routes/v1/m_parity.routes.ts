@@ -34,8 +34,12 @@ import { partyGraphController } from '../../controllers/party-graph.controller';
 import {
   CreatePartySchema,
   CreateTemplateSchema,
+  UpdateTemplateSchema,
+  ExtractTemplateFromContractSchema,
+  ExtractClausesFromContractSchema,
   CreateClauseSchema,
   CreateObligationSchema,
+  FlagObligationSchema,
   IdParamSchema,
 } from '../../schemas/m_parity.schemas';
 import {
@@ -129,18 +133,60 @@ const templatesRouter = Router();
 templatesRouter.use(authenticate);
 templatesRouter.get('/', authedReadRateLimiter, templatesController.list);
 templatesRouter.post('/', authedWriteRateLimiter, validate(CreateTemplateSchema, 'body'), templatesController.create);
+// AI-assisted template generation from an uploaded contract's extracted text.
+// Mounted BEFORE /:id so the literal path segment wins over the dynamic param.
+templatesRouter.post(
+  '/extract-from-contract',
+  authedWriteRateLimiter,
+  validate(ExtractTemplateFromContractSchema, 'body'),
+  templatesController.extractFromContract,
+);
 templatesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), templatesController.getById);
+templatesRouter.get(
+  '/:id/default-clauses',
+  authedReadRateLimiter,
+  validate(IdParamSchema, 'params'),
+  templatesController.defaultClauses,
+);
+templatesRouter.patch(
+  '/:id',
+  authedWriteRateLimiter,
+  validate(IdParamSchema, 'params'),
+  validate(UpdateTemplateSchema, 'body'),
+  templatesController.update,
+);
+templatesRouter.delete(
+  '/:id',
+  authedWriteRateLimiter,
+  validate(IdParamSchema, 'params'),
+  templatesController.remove,
+);
 
 const clausesRouter = Router();
 clausesRouter.use(authenticate);
 clausesRouter.get('/', authedReadRateLimiter, clausesController.list);
 clausesRouter.post('/', authedWriteRateLimiter, validate(CreateClauseSchema, 'body'), clausesController.create);
+// AI-assisted clause extraction from an uploaded contract's extracted text.
+// Mounted BEFORE /:id so the literal path segment wins over the dynamic param.
+clausesRouter.post(
+  '/extract-from-contract',
+  authedWriteRateLimiter,
+  validate(ExtractClausesFromContractSchema, 'body'),
+  clausesController.extractFromContract,
+);
 clausesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), clausesController.getById);
 
 const obligationsRouter = Router();
 obligationsRouter.use(authenticate);
 obligationsRouter.get('/', authedReadRateLimiter, obligationsController.list);
 obligationsRouter.post('/', authedWriteRateLimiter, validate(CreateObligationSchema, 'body'), obligationsController.create);
+obligationsRouter.post(
+  '/:id/flag',
+  authedWriteRateLimiter,
+  validate(IdParamSchema, 'params'),
+  validate(FlagObligationSchema, 'body'),
+  obligationsController.flag,
+);
 
 export {
   partiesRouter,

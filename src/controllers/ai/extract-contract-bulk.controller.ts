@@ -28,7 +28,7 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { ApiError } from '../../utils/errors.util';
-import { buildStubExtraction } from '../../services/ai/extract-contract-bulk.service';
+import { extractContractData } from '../../services/ai/extract-contract-bulk.service';
 import type { ExtractContractBulkInferred } from '../../schemas/import-batch.schemas';
 import type { ExtractContractBulkResponse } from '../../types/import-batch.types';
 
@@ -72,7 +72,7 @@ export const extractContractBulkController = {
     );
 
     try {
-      const result: ExtractContractBulkResponse = buildStubExtraction({
+      const result: ExtractContractBulkResponse = await extractContractData({
         filename: body.filename,
         fileSize: body.fileSize,
         extractedText: body.extractedText,

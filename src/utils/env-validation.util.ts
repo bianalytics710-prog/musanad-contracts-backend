@@ -101,6 +101,20 @@ const envSchema = z.object({
   SIGNED_PDF_TOKEN_SECRET: z.string().optional(),
   SIGNED_PDF_TOKEN_ISSUER: z.string().default('musanad-contracts-pdf'),
   SIGNED_PDF_TOKEN_AUDIENCE: z.string().default('regulatory-impact-pdf'),
+
+  // M22 / CR-MIG-DRIVE — Google Drive connector + token cipher
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_OAUTH_REDIRECT_URI: z
+    .string()
+    .url()
+    .default('http://localhost:4000/api/v1/integrations/google-drive/callback'),
+  TOKEN_CIPHER_KEY: z.string().optional(),
+  OAUTH_STATE_HMAC_SECRET: z.string().optional(),
+  MIGRATION_SYNC_WORKER_ENABLED: z
+    .union([z.literal('true'), z.literal('false')])
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type Env = z.infer<typeof envSchema>;

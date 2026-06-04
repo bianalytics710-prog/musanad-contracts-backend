@@ -312,7 +312,10 @@ async function uploadExtractedText(args: {
   const buffer = Buffer.from(args.text, 'utf-8');
 
   const { error } = await client.storage.from(BUCKET).upload(storagePath, buffer, {
-    contentType: 'text/plain; charset=utf-8',
+    // Supabase bucket MIME policy allows 'text/plain' but not
+    // 'text/plain; charset=utf-8'. The buffer is already UTF-8 by
+    // construction (Buffer.from(text, 'utf-8') above).
+    contentType: 'text/plain',
     upsert: false,
   });
 

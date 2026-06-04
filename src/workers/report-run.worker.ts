@@ -24,15 +24,7 @@ import cron, { type ScheduledTask } from 'node-cron';
 import pLimit from 'p-limit';
 import { db } from '../database/client';
 import { logger } from '../utils/logger.util';
-import {
-  renderReportPdf,
-  renderReportXlsx,
-  type ReportRenderEnvelope,
-} from '../services/report-renderer.service';
-import {
-  buildReportOutputPath,
-  uploadReportOutput,
-} from '../services/supabase-storage.service';
+import { executeReportRunRow } from '../services/report-run-executor.service';
 
 const SYSTEM_ACTOR_ID = 0;
 const BATCH_SIZE = 5;
@@ -58,22 +50,11 @@ interface PendingRunsResult {
   runs?: PendingRunRow[];
 }
 
-interface ReportTemplate {
-  id: number;
-  templateId: string;
-  displayNameEn: string;
-  dataSource: string;
-  reportKind: 'pdf' | 'excel' | 'both';
-  isScheduled?: boolean;
-  scheduleRecipients?: string[] | null;
-}
-
 // ----------------------------------------------------------------
 // Per-run pipeline
 // ----------------------------------------------------------------
 
 async function processRun(row: PendingRunRow): Promise<void> {
-  const startMs = Date.now();
   const runId = row.id;
   const tenantId = row.tenantId;
 
@@ -90,204 +71,55 @@ async function processRun(row: PendingRunRow): Promise<void> {
       return;
     }
   } catch (guardErr) {
-    // Non-fatal: if fn_module_enabled itself errors (e.g. migration not yet applied on test branch),
-    // log and continue rather than blocking the worker entirely.
     logger.warn({ action: 'reportRunWorker.moduleGuardError', runId,
       errorType: guardErr instanceof Error ? guardErr.name : 'UNKNOWN' },
       'module guard check failed — continuing (fail-open)');
   }
 
-  logger.info(
-    {
-      action: 'reportRunWorker.processRun',
-      runId,
-      templateId: row.reportTemplateId,
-      format: row.format,
-      triggeredBy: row.triggeredBy,
-    },
-    'Processing report run',
-  );
+  // Render + persist via shared executor (terminal-state transitions are done there)
+  const result = await executeReportRunRow(row);
+  if (!result.ok) return;
 
-  try {
-    // 1. Fetch template for slug + displayName
-    const template = await db.callFunction<ReportTemplate | null>(
-      'fn_report_template_get_by_id',
-      [SYSTEM_ACTOR_ID, row.reportTemplateId],
-      { actorId: SYSTEM_ACTOR_ID, tenantId },
-    );
-    if (!template) {
-      await markFailed(runId, tenantId, 'template_not_found');
-      return;
-    }
-
-    // 2. Invoke fn_report_data_<slug> to fetch envelope
-    const fnName = `fn_report_data_${template.dataSource}`;
-    if (!/^fn_report_data_[a-z0-9_]+$/i.test(fnName)) {
-      await markFailed(runId, tenantId, 'invalid_data_source_slug');
-      return;
-    }
-
-    let envelope: ReportRenderEnvelope;
-    try {
-      const raw = await db.callFunction<ReportRenderEnvelope | null>(
-        fnName,
-        [SYSTEM_ACTOR_ID, row.parameters ? JSON.stringify(row.parameters) : '{}'],
-        { actorId: SYSTEM_ACTOR_ID, tenantId },
-      );
-      if (!raw || typeof raw !== 'object') {
-        throw new Error('data fn returned empty envelope');
-      }
-      envelope = raw;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
-      await markFailed(runId, tenantId, `data_fn_failed: ${msg}`);
-      return;
-    }
-
-    // 3. Render
-    const triggeredAt = new Date().toISOString();
-    let buffer: Buffer;
-    let mimeType: string;
-    try {
-      if (row.format === 'pdf') {
-        buffer = await renderReportPdf(envelope, {
-          slug: template.dataSource,
-          displayNameEn: template.displayNameEn,
-          triggeredAt,
-        });
-        mimeType = 'application/pdf';
-      } else {
-        buffer = await renderReportXlsx(envelope, {
-          slug: template.dataSource,
-          displayNameEn: template.displayNameEn,
-          triggeredAt,
-        });
-        mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
-      await markFailed(runId, tenantId, `render_failed: ${msg}`);
-      return;
-    }
-
-    // 4. Upload to Supabase Storage
-    const storagePath = buildReportOutputPath({
-      tenantId,
-      templateId: row.reportTemplateId,
-      runId,
-      format: row.format,
-    });
-    try {
-      await uploadReportOutput({ storagePath, buffer, mimeType });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
-      await markFailed(runId, tenantId, `upload_failed: ${msg}`);
-      return;
-    }
-
-    // 5. Mark complete
-    try {
-      await db.callFunction(
-        'fn_report_run_complete',
-        [runId, 'complete', storagePath, buffer.byteLength, null],
-        { actorId: SYSTEM_ACTOR_ID, tenantId },
-      );
-    } catch (err) {
-      logger.error(
-        {
-          action: 'reportRunWorker.completeFnFailed',
-          runId,
-          errorType: err instanceof Error ? err.name : 'UNKNOWN',
-        },
-        'fn_report_run_complete (success path) failed',
-      );
-      return;
-    }
-
-    // 6. Scheduled dispatch — wire to existing M16 notification stack.
-    //    Best-effort: a dispatch failure does not roll back the report run.
-    if (
-      row.triggeredBy === 'scheduled' &&
-      template.isScheduled &&
-      Array.isArray(template.scheduleRecipients) &&
-      template.scheduleRecipients.length > 0
-    ) {
-      for (const recipient of template.scheduleRecipients) {
-        try {
-          await db.callFunction(
-            'fn_notification_send',
-            [
-              SYSTEM_ACTOR_ID,
-              tenantId,
-              recipient,
-              'email',
-              'report_scheduled_delivery',
-              JSON.stringify({
-                runId,
-                templateId: template.templateId,
-                displayNameEn: template.displayNameEn,
-                format: row.format,
-                storagePath,
-              }),
-            ],
-            { actorId: SYSTEM_ACTOR_ID, tenantId },
-          );
-        } catch (notifErr) {
-          logger.warn(
-            {
-              action: 'reportRunWorker.dispatchFailed',
+  // Scheduled dispatch — wire to existing M16 notification stack.
+  if (
+    row.triggeredBy === 'scheduled' &&
+    result.template?.isScheduled &&
+    Array.isArray(result.template?.scheduleRecipients) &&
+    result.template.scheduleRecipients.length > 0 &&
+    result.storagePath
+  ) {
+    for (const recipient of result.template.scheduleRecipients) {
+      try {
+        await db.callFunction(
+          'fn_notification_send',
+          [
+            SYSTEM_ACTOR_ID,
+            tenantId,
+            recipient,
+            'email',
+            'report_scheduled_delivery',
+            JSON.stringify({
               runId,
-              recipient,
-              errorType: notifErr instanceof Error ? notifErr.name : 'UNKNOWN',
-            },
-            'Scheduled report dispatch failed (non-fatal)',
-          );
-        }
+              templateId: result.template.templateId,
+              displayNameEn: result.template.displayNameEn,
+              format: row.format,
+              storagePath: result.storagePath,
+            }),
+          ],
+          { actorId: SYSTEM_ACTOR_ID, tenantId },
+        );
+      } catch (notifErr) {
+        logger.warn(
+          {
+            action: 'reportRunWorker.dispatchFailed',
+            runId,
+            recipient,
+            errorType: notifErr instanceof Error ? notifErr.name : 'UNKNOWN',
+          },
+          'Scheduled report dispatch failed (non-fatal)',
+        );
       }
     }
-
-    logger.info(
-      {
-        action: 'reportRunWorker.processRunComplete',
-        runId,
-        format: row.format,
-        sizeBytes: buffer.byteLength,
-        durationMs: Date.now() - startMs,
-      },
-      'Report run complete',
-    );
-  } catch (err) {
-    // Defensive — every internal step has its own catch. This handles
-    // anything that slipped through.
-    const msg = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
-    logger.error(
-      {
-        action: 'reportRunWorker.processRunUnhandled',
-        runId,
-        errorType: err instanceof Error ? err.name : 'UNKNOWN',
-      },
-      'Unhandled error processing report run',
-    );
-    await markFailed(runId, tenantId, `unhandled: ${msg}`).catch(() => {});
-  }
-}
-
-async function markFailed(runId: number, tenantId: string, errorMessage: string): Promise<void> {
-  try {
-    await db.callFunction(
-      'fn_report_run_complete',
-      [runId, 'failed', null, null, errorMessage],
-      { actorId: SYSTEM_ACTOR_ID, tenantId },
-    );
-  } catch (err) {
-    logger.error(
-      {
-        action: 'reportRunWorker.markFailedError',
-        runId,
-        errorType: err instanceof Error ? err.name : 'UNKNOWN',
-      },
-      'Failed to record failed terminal state',
-    );
   }
 }
 

@@ -47,6 +47,7 @@ export const buildSystemPrompt = async (
     stats: stringifyStats(ctx.stats),
     fromDate: ctx.dateRange?.fromDate ?? '',
     toDate: ctx.dateRange?.toDate ?? '',
+    todayIso: new Date().toISOString().slice(0, 10),
   });
 };
 
