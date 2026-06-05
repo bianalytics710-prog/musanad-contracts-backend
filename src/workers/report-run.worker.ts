@@ -90,21 +90,29 @@ async function processRun(row: PendingRunRow): Promise<void> {
   ) {
     for (const recipient of result.template.scheduleRecipients) {
       try {
+        // v2 (mig 582) — go through fn_notification_dispatch instead of
+        // calling fn_notification_send directly. The 'report.delivered'
+        // seed rule has recipient_type='context' value='caller', so the
+        // recipient email passed in is honored. Admin can add more
+        // recipients via /admin/notification-rules without touching code.
         await db.callFunction(
-          'fn_notification_send',
+          'fn_notification_dispatch',
           [
             SYSTEM_ACTOR_ID,
-            tenantId,
-            recipient,
-            'email',
-            'report_scheduled_delivery',
+            'report.delivered',
             JSON.stringify({
+              subject: `Scheduled report ready: ${result.template.displayNameEn}`,
+              bodyRendered: `Your scheduled report (${result.template.displayNameEn}) is ready at ${result.storagePath ?? ''}.`,
               runId,
               templateId: result.template.templateId,
               displayNameEn: result.template.displayNameEn,
               format: row.format,
               storagePath: result.storagePath,
             }),
+            'system',
+            'medium',
+            null,
+            recipient,
           ],
           { actorId: SYSTEM_ACTOR_ID, tenantId },
         );

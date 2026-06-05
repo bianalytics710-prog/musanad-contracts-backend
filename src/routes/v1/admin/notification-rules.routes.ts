@@ -30,7 +30,7 @@ router.use(rlsMiddleware);
 router.use(authorise(['platform.notifications.manage']));
 
 router.get('/', authedReadRateLimiter, notificationRulesController.list);
-router.post('/', authedWriteRateLimiter, notificationRulesController.create);
+router.post('/', authedWriteRateLimiter, notificationRulesController.upsertV2);
 
 // Literal paths before generic /:id.
 router.get(
@@ -38,13 +38,28 @@ router.get(
   authedReadRateLimiter,
   notificationRulesController.eventTypes,
 );
+router.get(
+  '/modules',
+  authedReadRateLimiter,
+  notificationRulesController.modules,
+);
+router.get(
+  '/context-resolvers',
+  authedReadRateLimiter,
+  notificationRulesController.contextResolvers,
+);
 router.patch(
   '/:id/enabled',
   authedWriteRateLimiter,
   notificationRulesController.setEnabled,
 );
 
-router.put('/:id', authedWriteRateLimiter, notificationRulesController.update);
+router.get(
+  '/:id/detail',
+  authedReadRateLimiter,
+  notificationRulesController.getDetail,
+);
+router.put('/:id', authedWriteRateLimiter, notificationRulesController.upsertV2);
 router.delete(
   '/:id',
   authedWriteRateLimiter,
