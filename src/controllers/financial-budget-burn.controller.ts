@@ -319,6 +319,44 @@ export const financialBudgetBurnController = {
   },
 
   // -------------------------------------------------------------------------
+  // GET /api/v1/financial/budget-burn/:contractId/milestones
+  // mig 594 — event-based milestone list (separate from per-period burn).
+  // -------------------------------------------------------------------------
+  listMilestones: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const startTime = Date.now();
+    req.logger.info({
+      action: 'fn_contract_milestone_list',
+      method: req.method,
+      path: req.path,
+      userId: req.user?.id,
+    });
+    try {
+      const { contractId } = contractIdParamSchema.parse(req.params);
+      const result = await db.callFunction(
+        'fn_contract_milestone_list',
+        [contractId],
+        { actorId: req.user!.id, tenantId: req.tenantId },
+      );
+      req.logger.info({
+        action: 'fn_contract_milestone_list',
+        userId: req.user?.id,
+        contractId,
+        duration: Date.now() - startTime,
+        statusCode: 200,
+      });
+      res.json(result);
+    } catch (error) {
+      req.logger.error({
+        action: 'fn_contract_milestone_list',
+        userId: req.user?.id,
+        duration: Date.now() - startTime,
+        errorType: (error as Error).name,
+      });
+      next(error);
+    }
+  },
+
+  // -------------------------------------------------------------------------
   // GET /api/v1/financial/budget-burn/:contractId/projection
   // -------------------------------------------------------------------------
   getProjection: async (req: Request, res: Response, next: NextFunction): Promise<void> => {

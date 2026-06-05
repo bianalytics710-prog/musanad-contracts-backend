@@ -126,6 +126,16 @@ router.get(
   financialBudgetBurnController.getProjection,
 );
 
+// GET /api/v1/financial/budget-burn/:contractId/milestones
+// mig 594 — event-based milestone list
+router.get(
+  '/:contractId/milestones',
+  authenticate,
+  rlsMiddleware,
+  authorise(['finance.budget.read']),
+  financialBudgetBurnController.listMilestones,
+);
+
 // POST /api/v1/financial/budget-burn/:contractId/cost-actuals
 router.post(
   '/:contractId/cost-actuals',
