@@ -154,16 +154,44 @@ export const getDashboardRouter = (
  * caller lacks 'ai.observability.read' (gate inside the fn_ — wrapper
  * returns the JSONB verbatim).
  */
-export const getExecutiveDashboard = (
+export const getExecutiveDashboard = async (
   actorId: number,
   windowDays: number | undefined,
   tenantId?: string,
-): Promise<ExecutiveDashboardSnapshot> =>
-  db.callFunction<ExecutiveDashboardSnapshot>(
-    'fn_dashboard_executive',
-    [windowDays ?? null],
-    { actorId, tenantId: tenantId ?? '00000000-0000-0000-0000-000000000001' },
-  );
+): Promise<ExecutiveDashboardSnapshot> => {
+  const ctx = { actorId, tenantId: tenantId ?? '00000000-0000-0000-0000-000000000001' };
+
+  // mig 592 — fold in fn_executive_index_linked_outside_band so the FE can
+  // render the action-oriented "Outside band / unprotected" rollup instead
+  // of the misleading "0 at-risk" the upstream fn_dashboard_executive
+  // infers from recentMarginChange. Run both fns in parallel; if the sidecar
+  // fails for any reason, we still ship the rest of the dashboard.
+  const [snapshot, outsideBand] = await Promise.all([
+    db.callFunction<ExecutiveDashboardSnapshot>(
+      'fn_dashboard_executive',
+      [windowDays ?? null],
+      ctx,
+    ),
+    db
+      .callFunction<Record<string, unknown>>(
+        'fn_executive_index_linked_outside_band',
+        [],
+        ctx,
+      )
+      .catch(() => null),
+  ]);
+
+  if (outsideBand) {
+    // ExecutiveDashboardSnapshot is the M0 core type; the CR-O additive keys
+    // (tradeMarginSummary etc.) are intersected at the FE consumer per
+    // trade-margin.types.ts §9. Cast through Record to avoid bloating the
+    // upstream snapshot type with every additive key.
+    const extended = snapshot as unknown as Record<string, unknown>;
+    const tms = extended.tradeMarginSummary as Record<string, unknown> | undefined;
+    if (tms) tms.outsideBand = outsideBand;
+  }
+  return snapshot;
+};
 
 /**
  * GET /api/v1/dashboards/executive/anomalies-history →
