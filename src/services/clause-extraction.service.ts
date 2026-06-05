@@ -249,9 +249,9 @@ async function classifyRegion(
       modelUsed: 'gpt-4o',
       tokensInput,
       tokensOutput,
-      costUsdMicros: tokensInput != null && tokensOutput != null
-        ? Math.round((tokensInput * 5 + tokensOutput * 15) / 1_000_000 * 1_000_000)
-        : null,
+      // mig 590 — cost is auto-filled from ai_model_pricing inside
+      // fn_ai_request_log_create when this is null. Don't hardcode prices.
+      costUsdMicros: null,
       latencyMs,
       cacheHit: false,
       streamMode: false,
@@ -311,7 +311,7 @@ async function generateEmbedding(
       modelUsed: 'text-embedding-3-small',
       tokensInput,
       tokensOutput: null,
-      costUsdMicros: tokensInput != null ? Math.round(tokensInput * 0.02 / 1_000_000 * 1_000_000) : null,
+      costUsdMicros: null, // auto-filled by fn_ai_request_log_create (mig 590)
       latencyMs,
       cacheHit: false,
       streamMode: false,
@@ -553,7 +553,7 @@ export async function embedQueryText(
       modelUsed: 'text-embedding-3-small',
       tokensInput,
       tokensOutput: null,
-      costUsdMicros: tokensInput != null ? Math.round(tokensInput * 0.02 / 1_000_000 * 1_000_000) : null,
+      costUsdMicros: null, // auto-filled by fn_ai_request_log_create (mig 590)
       latencyMs,
       cacheHit: false,
       streamMode: false,

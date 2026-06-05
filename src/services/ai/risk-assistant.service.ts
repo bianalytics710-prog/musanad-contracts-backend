@@ -358,6 +358,7 @@ export const riskAssistantService = {
 
     let telemetryOutcome: 'success' | 'error' | 'rate_limited' | 'cancelled' = 'error';
     let modelUsed = 'gpt-4o';
+    let tokensInput = 0;
     let tokensOutput = 0;
     let cacheHit = false;
     let scopeHash = '';
@@ -473,6 +474,9 @@ export const riskAssistantService = {
             { role: 'user', content: query },
           ],
           stream: true,
+          // mig 590 — request the trailing usage chunk so we can write real
+          // tokens_input/output to ai_request_log instead of leaving them NULL.
+          stream_options: { include_usage: true },
         },
         { signal: abortSignal },
       );
@@ -486,10 +490,12 @@ export const riskAssistantService = {
         const token = chunk.choices[0]?.delta?.content ?? '';
         if (token) {
           fullText += token;
-          tokensOutput += 1; // approximate; refined below
           yield { event: 'token', data: { token } };
         }
+        // Final chunk under include_usage carries empty choices[] + populated
+        // usage; capture it. Authoritative — overrides per-chunk approximation.
         if (chunk.usage) {
+          tokensInput  = chunk.usage.prompt_tokens     ?? tokensInput;
           tokensOutput = chunk.usage.completion_tokens ?? tokensOutput;
         }
       }
@@ -519,7 +525,7 @@ export const riskAssistantService = {
         payload: { insightType: 'qa_response', answer: fullText, citations },
         payloadHash,
         promptId,
-        tokensInput: null,
+        tokensInput: tokensInput || null,
         tokensOutput,
         ttlSeconds: 300,
         actorUserId: userId,
@@ -527,16 +533,30 @@ export const riskAssistantService = {
         logger.warn({ action: 'riskAssistant.cache_upsert_failed', errorType: (e as Error).name }),
       );
 
-      // UPDATE ai_request_log with scope_hash + acl_filtered_count (best-effort)
+      // UPDATE ai_request_log with scope_hash + acl_filtered_count + tokens
+      // (best-effort). Cost re-derives from ai_model_pricing in a small SQL
+      // expression so the cost column stays in sync with the new tokens.
       if (aiRequestLogId) {
         const logLatency = Date.now() - startTime;
         db.executeInTransaction(async (client) => {
           await client.query(
             `UPDATE ai_request_log
-               SET scope_hash = $1, acl_filtered_count = $2,
-                   outcome = 'success', latency_ms = $3
-             WHERE request_id = $4`,
-            [scopeHash, aclFilteredCount, logLatency, aiRequestLogId],
+               SET scope_hash         = $1,
+                   acl_filtered_count = $2,
+                   outcome            = 'success',
+                   latency_ms         = $3,
+                   tokens_input       = $4,
+                   tokens_output      = $5,
+                   cost_usd_micros    = fn_ai_compute_cost_micros(model_used, $4, $5, created_at)
+             WHERE request_id = $6`,
+            [
+              scopeHash,
+              aclFilteredCount,
+              logLatency,
+              tokensInput || null,
+              tokensOutput || null,
+              aiRequestLogId,
+            ],
           );
         }).catch((e) =>
           logger.warn({ action: 'riskAssistant.log_update_failed', errorType: (e as Error).name }),

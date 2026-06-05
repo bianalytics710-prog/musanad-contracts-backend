@@ -131,6 +131,12 @@ export class OpenAIProvider implements AIProvider {
           temperature: opts.temperature ?? 0.2,
           ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
           stream: true,
+          // mig 590 — request the trailing usage chunk so direct consumers
+          // of the inline `openai` SDK call (e.g. risk-assistant.service.ts)
+          // can capture authoritative token counts. The abstraction here
+          // yields raw string deltas; the final chunk has empty choices[]
+          // so it doesn't leak into the yield loop.
+          stream_options: { include_usage: true },
           messages: [
             ...(opts.system ? [{ role: 'system' as const, content: opts.system }] : []),
             { role: 'user', content: prompt },
