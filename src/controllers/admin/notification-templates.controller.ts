@@ -170,6 +170,63 @@ export const adminNotificationTemplatesController = {
     }
   },
 
+  async create(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'admin.notificationTemplates.create',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const body = req.body as {
+        templateId?: string;
+        channel?: NotificationTemplateChannel;
+        subjectEn?: string | null;
+        subjectAr?: string | null;
+        bodyEn?: string;
+        bodyAr?: string | null;
+        parameterSchema?: Record<string, unknown> | null;
+      };
+      if (!body.templateId || !body.channel || !body.bodyEn) {
+        throw new ApiError(400, 'BAD_REQUEST', 'templateId, channel, and bodyEn are required');
+      }
+      const result = await svc.createNotificationTemplate(req.user!.id, req.tenantId, {
+        templateId: body.templateId,
+        channel: body.channel as NotificationTemplateChannel,
+        subjectEn: body.subjectEn ?? null,
+        subjectAr: body.subjectAr ?? null,
+        bodyEn: body.bodyEn,
+        bodyAr: body.bodyAr ?? null,
+        parameterSchema: body.parameterSchema ?? null,
+      });
+      req.logger.info(
+        {
+          action: 'admin.notificationTemplates.create',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 201,
+        },
+        'Controller exit',
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      req.logger.error(
+        {
+          action: 'admin.notificationTemplates.create',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorTypeOf(err),
+        },
+        'Controller error',
+      );
+      next(err);
+    }
+  },
+
   async render(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
     req.logger.info(

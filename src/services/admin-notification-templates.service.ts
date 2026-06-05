@@ -58,6 +58,33 @@ export const updateNotificationTemplate = (
     { actorId, tenantId },
   );
 
+export const createNotificationTemplate = (
+  actorId: number,
+  tenantId: string | undefined,
+  dto: {
+    templateId: string;
+    channel: NotificationTemplateChannel;
+    subjectEn: string | null;
+    subjectAr: string | null;
+    bodyEn: string;
+    bodyAr: string | null;
+    parameterSchema: Record<string, unknown> | null;
+  },
+): Promise<NotificationTemplate> =>
+  db.callFunction<NotificationTemplate>(
+    'fn_notification_template_create',
+    [
+      dto.templateId,
+      dto.channel,
+      dto.subjectEn ?? null,
+      dto.subjectAr ?? null,
+      dto.bodyEn,
+      dto.bodyAr ?? null,
+      dto.parameterSchema ?? null,
+    ],
+    { actorId, tenantId },
+  );
+
 export const renderNotificationTemplate = (
   actorId: number,
   tenantId: string | undefined,

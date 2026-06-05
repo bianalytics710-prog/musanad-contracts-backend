@@ -50,6 +50,16 @@ router.get(
   adminNotificationTemplatesController.list,
 );
 
+// POST / — create a new template. Schema is permissive at the validation
+// layer; the fn body enforces template_id format, channel enum, and
+// uniqueness per (tenant, template_id).
+router.post(
+  '/',
+  authedWriteRateLimiter,
+  authorise(['notification.template.manage']),
+  adminNotificationTemplatesController.create,
+);
+
 router.get(
   '/:id',
   authedReadRateLimiter,
