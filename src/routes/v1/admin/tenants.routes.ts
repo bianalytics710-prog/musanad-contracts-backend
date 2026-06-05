@@ -9,7 +9,10 @@
 import { Router } from 'express';
 import { adminTenantsController } from '../../../controllers/admin/tenants.controller';
 import { authenticate, authorise } from '../../../middleware/auth.middleware';
-import { authedReadRateLimiter } from '../../../middleware/rate-limit.middleware';
+import {
+  authedReadRateLimiter,
+  authedWriteRateLimiter,
+} from '../../../middleware/rate-limit.middleware';
 import { validate } from '../../../middleware/validation.middleware';
 import {
   tenantIdParamSchema,
@@ -26,6 +29,14 @@ router.get(
   authorise(['tenant.read']),
   validate(tenantListQuerySchema, 'query'),
   adminTenantsController.list,
+);
+
+// R-IL Phase G (mig 573) — create a new tenant tagged to an industry.
+router.post(
+  '/',
+  authedWriteRateLimiter,
+  authorise(['tenant.manage']),
+  adminTenantsController.create,
 );
 
 router.get(

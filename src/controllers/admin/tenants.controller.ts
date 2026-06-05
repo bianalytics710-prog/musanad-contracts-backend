@@ -62,6 +62,37 @@ export const adminTenantsController = {
     }
   },
 
+  async create(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'admin.tenants.create', userId: req.user?.id },
+      'Controller entry',
+    );
+    try {
+      const b = req.body as Record<string, unknown>;
+      const result = await svc.createTenant(req.user!.id, {
+        slug: String(b.slug ?? ''),
+        displayName: String(b.displayName ?? ''),
+        name: String(b.name ?? ''),
+        industryId: Number(b.industryId),
+        configPack: typeof b.configPack === 'string' ? b.configPack : null,
+        riskAppetite: typeof b.riskAppetite === 'string' ? b.riskAppetite : null,
+        dataRegion: typeof b.dataRegion === 'string' ? b.dataRegion : null,
+      });
+      req.logger.info(
+        { action: 'admin.tenants.create', userId: req.user?.id, duration: Date.now() - startTime, statusCode: 201 },
+        'Controller exit',
+      );
+      res.status(201).json(result);
+    } catch (err) {
+      req.logger.error(
+        { action: 'admin.tenants.create', userId: req.user?.id, duration: Date.now() - startTime, errorType: errorTypeOf(err) },
+        'Controller error',
+      );
+      next(err);
+    }
+  },
+
   async getById(req: Request, res: Response, next: NextFunction): Promise<void> {
     const startTime = Date.now();
     req.logger.info(

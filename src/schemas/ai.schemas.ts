@@ -484,6 +484,17 @@ export type AiImpactSignalSuggestAmendmentPayload = z.infer<
   typeof aiImpactSignalSuggestAmendmentToolSchema
 >;
 
+// ------------------------------------------------------------
+// 7b. Title translate — POST /api/v1/ai/translate-title
+// Compose Step 2 fires this on EN-title blur to auto-fill AR.
+// ------------------------------------------------------------
+export const aiTranslateTitleRequestSchema = z.object({
+  text: z.string().trim().min(1).max(200),
+  source: z.enum(['en', 'ar']),
+  target: z.enum(['en', 'ar']),
+});
+export type AiTranslateTitleRequestInput = z.infer<typeof aiTranslateTitleRequestSchema>;
+
 // ============================================================
 // 8. Inferred types (re-exports for convenience)
 // ============================================================

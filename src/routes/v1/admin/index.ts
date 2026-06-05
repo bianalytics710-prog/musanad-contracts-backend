@@ -195,4 +195,26 @@ router.use('/reports', adminReportsRouter);
 import migrationPurgeRouter from './migration-purge.routes';
 router.use('/migration/purge-all', migrationPurgeRouter);
 
+// ============================================================
+// R-IL (mig 566-572) — Index-Linked Contracts repositioning.
+// Platform Admin catalog management for industries, pricing benchmarks,
+// and cost components. Gated by platform.catalog.manage.
+// ============================================================
+import industryCatalogsRouter from './industry-catalogs.routes';
+router.use('/industry-catalogs', industryCatalogsRouter);
+
+// ============================================================
+// Internal Systems registry — Platform Admin inventory of ERP / Finance /
+// HRMS / CRM / etc. integrations. Gated by platform.integrations.manage.
+// ============================================================
+import internalSystemsRouter from './internal-systems.routes';
+router.use('/internal-systems', internalSystemsRouter);
+
+// ============================================================
+// Notification trigger rules — Platform Admin registry of which event fires
+// which template via which channel. Gated by platform.notifications.manage.
+// ============================================================
+import notificationRulesRouter from './notification-rules.routes';
+router.use('/notification-rules', notificationRulesRouter);
+
 export default router;

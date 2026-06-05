@@ -361,6 +361,17 @@ v1Router.use('/financial/price-benchmarks', authenticate, rlsMiddleware, require
 v1Router.use('/financial/price-benchmarks', priceBenchmarksRouter);
 
 // ============================================================
+// R-IL (mig 566-572) — Index-Linked Contracts tenant-side catalog.
+// Drives FE labels for the module (formerly "Trade Margin"). Same
+// gating as the trade-margin module (financial.trade_margin enabled).
+//   GET /api/v1/index-linked/catalog/benchmarks       (finance.margin.read)
+//   GET /api/v1/index-linked/catalog/cost-components  (finance.margin.read)
+// ============================================================
+import indexLinkedCatalogRouter from './index-linked-catalog.routes';
+v1Router.use('/index-linked', authenticate, rlsMiddleware, requireModuleEnabled('financial.trade_margin'));
+v1Router.use('/index-linked', indexLinkedCatalogRouter);
+
+// ============================================================
 // TPA — Third-Party Agreement Assessment (Legal Counsel).
 //   GET    /api/v1/tpa/playbooks                  — list ADNOC playbooks (tpa.review.read)
 //   GET    /api/v1/tpa/playbooks/:id              — playbook + clauses

@@ -11,6 +11,7 @@ import type {
   CreateTemplateInferred,
   UpdateTemplateInferred,
   ExtractTemplateFromContractInferred,
+  AnalyzeTemplateUploadInferred,
   CreateClauseInferred,
   CreateObligationInferred,
   ExtractClausesFromContractInferred,
@@ -18,6 +19,8 @@ import type {
 } from '../schemas/m_parity.schemas';
 import { extractTemplateFromContract } from '../services/ai/extract-template-from-contract.service';
 import { extractClausesFromContract } from '../services/ai/extract-clauses-from-contract.service';
+import { analyzeTemplateUpload } from '../services/ai/analyze-template-upload.service';
+import { embedAndSetTemplate, embedAndSetClause } from '../services/library-embedding.service';
 
 const errorType = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
@@ -229,6 +232,8 @@ export const templatesController = {
         placeholders: body.placeholders ?? [],
         regulatoryReference: body.regulatoryReference ?? null,
       });
+      // Background-ish embed — don't block the response on it.
+      void embedAndSetTemplate(req.user!.id, result.id, body.nameEn, body.bodyEn ?? null);
       req.logger.info(
         { action: 'templates.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
         'Controller exit',
@@ -336,6 +341,54 @@ export const templatesController = {
       req.logger.error(
         {
           action: 'templates.extractFromContract',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          errorType: errorType(e),
+        },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  async analyzeUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    const body = req.body as AnalyzeTemplateUploadInferred;
+    req.logger.info(
+      {
+        action: 'templates.analyzeUpload',
+        userId: req.user?.id,
+        filename: body.filename,
+        textLength: body.extractedText.length,
+      },
+      'Controller entry',
+    );
+    try {
+      const result = await analyzeTemplateUpload({
+        actorId: req.user!.id,
+        filename: body.filename,
+        extractedText: body.extractedText,
+        contractTypeHint: body.contractTypeHint ?? null,
+      });
+      req.logger.info(
+        {
+          action: 'templates.analyzeUpload',
+          userId: req.user?.id,
+          duration: Date.now() - start,
+          statusCode: 200,
+          matches: result.templateMatches.length,
+          topMatchClassification: result.topMatchClassification,
+          clauseCount: result.clauseCrossCheck.length,
+          newClauseCount: result.clauseCrossCheck.filter((c) => c.isNewToLibrary).length,
+          warningCount: result.warnings.length,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        {
+          action: 'templates.analyzeUpload',
           userId: req.user?.id,
           duration: Date.now() - start,
           errorType: errorType(e),
@@ -462,6 +515,7 @@ export const clausesController = {
         legalCommentaryAr: body.legalCommentaryAr ?? null,
         regulatoryRefs: body.regulatoryRefs ?? [],
       });
+      void embedAndSetClause(req.user!.id, result.id, body.titleEn, body.bodyEn);
       req.logger.info(
         { action: 'clauses.create', userId: req.user?.id, duration: Date.now() - start, statusCode: 201 },
         'Controller exit',

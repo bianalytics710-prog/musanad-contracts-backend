@@ -36,6 +36,7 @@ import {
   CreateTemplateSchema,
   UpdateTemplateSchema,
   ExtractTemplateFromContractSchema,
+  AnalyzeTemplateUploadSchema,
   ExtractClausesFromContractSchema,
   CreateClauseSchema,
   CreateObligationSchema,
@@ -140,6 +141,15 @@ templatesRouter.post(
   authedWriteRateLimiter,
   validate(ExtractTemplateFromContractSchema, 'body'),
   templatesController.extractFromContract,
+);
+// AI-assisted analyze: extract + similarity match against library templates
+// + clause cross-check against library clauses. One round-trip drives the
+// "Match results" step on the New Template upload page.
+templatesRouter.post(
+  '/analyze-upload',
+  authedWriteRateLimiter,
+  validate(AnalyzeTemplateUploadSchema, 'body'),
+  templatesController.analyzeUpload,
 );
 templatesRouter.get('/:id', authedReadRateLimiter, validate(IdParamSchema, 'params'), templatesController.getById);
 templatesRouter.get(

@@ -100,6 +100,16 @@ export type ExtractTemplateFromContractInferred = z.infer<
   typeof ExtractTemplateFromContractSchema
 >;
 
+// POST /api/v1/templates/analyze-upload
+// Same input shape as extract-from-contract — controller fan-outs to both
+// extractors + similarity matching internally.
+export const AnalyzeTemplateUploadSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  extractedText: z.string().min(50).max(200000),
+  contractTypeHint: z.string().trim().max(50).nullable().optional(),
+});
+export type AnalyzeTemplateUploadInferred = z.infer<typeof AnalyzeTemplateUploadSchema>;
+
 // POST /api/v1/clauses/extract-from-contract
 export const ExtractClausesFromContractSchema = z.object({
   filename: z.string().trim().min(1).max(255),

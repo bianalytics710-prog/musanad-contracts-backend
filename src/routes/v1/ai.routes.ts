@@ -34,6 +34,7 @@ import { regulatoryImpactController } from '../../controllers/ai/regulatory-impa
 import { regulatoryImpactSummaryController } from '../../controllers/ai/regulatory-impact-summary.controller';
 import { versionDiffSummaryController } from '../../controllers/ai/version-diff-summary.controller';
 import { impactSignalAiController } from '../../controllers/ai/impact-signal-ai.controller';
+import { translateTitleController } from '../../controllers/ai/translate-title.controller';
 import {
   aiContractInsightsRequestSchema,
   aiDraftingAssistantRequestSchema,
@@ -44,6 +45,7 @@ import {
   aiImpactSignalIdParamSchema,
   aiImpactSignalExplainRequestSchema,
   aiImpactSignalSuggestAmendmentRequestSchema,
+  aiTranslateTitleRequestSchema,
 } from '../../schemas/ai.schemas';
 import { verifySignedPdfTokenMiddleware } from '../../middleware/signed-pdf-token.middleware';
 
@@ -102,6 +104,20 @@ router.post(
   authoriseAnyOf(['contract.draft', 'contract.edit']),
   validate(aiDraftingAssistantRequestSchema, 'body'),
   draftingAssistantController.invoke,
+);
+
+// ---------------------------------------------------------------
+// POST /api/v1/ai/translate-title — EN ↔ AR contract title translation.
+// Used by Compose Step 2 to auto-fill the AR title on EN blur.
+// Permission: contract.draft OR contract.edit (anyone who can author a
+// contract can translate its title).
+// ---------------------------------------------------------------
+router.post(
+  '/translate-title',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.draft', 'contract.edit']),
+  validate(aiTranslateTitleRequestSchema, 'body'),
+  translateTitleController.invoke,
 );
 
 // ---------------------------------------------------------------

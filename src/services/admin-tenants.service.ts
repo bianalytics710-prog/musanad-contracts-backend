@@ -31,3 +31,41 @@ export const getTenantById = (
     [id],
     { actorId },
   );
+
+// R-IL — Platform Admin tenant creation (mig 573).
+export interface CreateTenantInput {
+  slug: string;
+  displayName: string;
+  name: string;
+  industryId: number;
+  configPack?: string | null;
+  riskAppetite?: string | null;
+  dataRegion?: string | null;
+}
+
+export interface CreateTenantResult {
+  id: string;
+  slug: string;
+  displayName: string;
+  name: string;
+  industryId: number;
+  industryCode: string;
+}
+
+export const createTenant = (
+  actorId: number,
+  input: CreateTenantInput,
+): Promise<CreateTenantResult> =>
+  db.callFunction<CreateTenantResult>(
+    'fn_tenant_create',
+    [
+      input.slug,
+      input.displayName,
+      input.name,
+      input.industryId,
+      input.configPack ?? 'default',
+      input.riskAppetite ?? 'standard',
+      input.dataRegion ?? null,
+    ],
+    { actorId },
+  );
