@@ -85,6 +85,25 @@ export const aiCostSummaryQuerySchema = z
   .strict();
 export type AiCostSummaryQueryInput = z.infer<typeof aiCostSummaryQuerySchema>;
 
+/** POST /executive/expiring-contracts/escalate — body validation. */
+export const expiringContractsEscalateBodySchema = z
+  .object({
+    contractIds: z
+      .array(z.coerce.number().int().positive())
+      .min(1, { message: 'contractIds must contain at least one id' })
+      .max(200, { message: 'contractIds capped at 200 per request' }),
+    windowDays: z
+      .union([z.literal(30), z.literal(60), z.literal(90)])
+      .or(z.coerce.number().int().refine((n) => [30, 60, 90].includes(n), {
+        message: 'windowDays must be 30, 60 or 90',
+      })),
+    note: z.string().max(500, { message: 'note must be 500 chars or fewer' }).optional(),
+  })
+  .strict();
+export type ExpiringContractsEscalateBodyInput = z.infer<
+  typeof expiringContractsEscalateBodySchema
+>;
+
 /** fn_dashboard_executive_anomalies_history — limit param 1..50. */
 export const executiveAnomaliesHistoryQuerySchema = z
   .object({

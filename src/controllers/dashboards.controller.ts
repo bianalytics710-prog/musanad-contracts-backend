@@ -420,6 +420,166 @@ export const dashboardsController = {
   },
 
   /**
+   * POST /api/v1/dashboards/executive/expiring-contracts/escalate
+   *
+   * Persists renewal-alert escalations for the executive expiry-cliff frame.
+   * Body { contractIds: number[1..200], windowDays: 30|60|90, note?: string<=500 }.
+   * Calls fn_contract_renewal_alert_send which fans fn_notification_send to
+   * each contract's drafter and inserts a contract_renewal_alert_event row
+   * per contract. Skips contracts whose drafter is NULL or holds a platform
+   * role.
+   */
+  async executiveExpiringContractsEscalate(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const body = req.body as {
+        contractIds: number[];
+        windowDays: number;
+        note?: string;
+      };
+      // Use a raw query with explicit ::jsonb cast on the contractIds arg.
+      // The shared callFunction() helper can't add per-arg casts, and PG
+      // refuses to implicitly coerce text→jsonb when matching the (BIGINT,
+      // JSONB, INTEGER, TEXT) signature. Mirrors the pattern in
+      // services/ai/risk-assistant.service.ts which uses $1::bigint[].
+      const { pool } = await import('../database/config');
+      const client = await pool().connect();
+      let raw: unknown;
+      try {
+        await client.query('BEGIN');
+        await client.query("SELECT set_config('app.current_user_id', $1, true)", [
+          String(req.user!.id),
+        ]);
+        // Dashboards routes don't apply rlsMiddleware so req.tenantId is
+        // undefined here; mirror its fallback (ADNOC seed UUID) so the
+        // DEFINER fn's tenant-GUC read succeeds.
+        const { ADNOC_TENANT_ID } = await import('../middleware/rls.middleware');
+        const tenantId = req.tenantId ?? ADNOC_TENANT_ID;
+        await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [
+          tenantId,
+        ]);
+        const r = await client.query(
+          'SELECT fn_contract_renewal_alert_send($1, $2::jsonb, $3, $4) AS result',
+          [
+            req.user!.id,
+            JSON.stringify(body.contractIds),
+            body.windowDays,
+            body.note ?? null,
+          ],
+        );
+        await client.query('COMMIT');
+        raw = r.rows[0]?.result;
+      } catch (e) {
+        try { await client.query('ROLLBACK'); } catch { /* swallow */ }
+        throw e;
+      } finally {
+        client.release();
+      }
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/dashboards/executive/trends-extended?months=6
+   *
+   * Side-car fn (mig 559) — returns valueOverTimeByMonth +
+   * contractsCreatedByMonth for the requested month count so the FE
+   * charts can show the last 2 quarters independent of the KPI windowDays.
+   */
+  async executiveTrendsExtended(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const months = Math.min(24, Math.max(2, Number((req.query.months as string) ?? 6)));
+      const raw = await (await import('../database/client')).db.callFunction<unknown>(
+        'fn_dashboard_executive_trends_extended',
+        [months],
+        { actorId: req.user!.id },
+      );
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/dashboards/executive/high-risk?limit=8
+   *
+   * Side-car fn (mig 560) — extended replacement for the inline
+   * highRiskContracts8 slice of fn_dashboard_executive. Adds
+   * counterpartyName + riskType (slug from fn_classify_risk on the
+   * dominant open risk_case) so the executive view shows a complete
+   * row rather than just {contract, value, score}. Role gate inside
+   * the fn body.
+   */
+  async executiveHighRisk(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const limit = Math.min(50, Math.max(1, Number((req.query.limit as string) ?? 8)));
+      const raw = await (await import('../database/client')).db.callFunction<unknown>(
+        'fn_dashboard_executive_high_risk_extended',
+        [limit],
+        { actorId: req.user!.id },
+      );
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/dashboards/executive/top-counterparty-contracts/:counterpartyId
+   *
+   * Drilldown for the executive "Top Business Partners" table — returns
+   * each contract belonging to the counterparty {contractId,
+   * contractNumber, titleEn, titleAr, valueAed, currency, status, endDate}
+   * sorted by value desc. Role gate inside the fn body.
+   */
+  async executiveCounterpartyContracts(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const counterpartyId = Number(req.params.counterpartyId);
+      if (!Number.isFinite(counterpartyId) || counterpartyId < 1) {
+        throw new ApiError(400, 'VALIDATION_ERROR', 'counterpartyId must be a positive integer');
+      }
+      const raw = await (await import('../database/client')).db.callFunction<unknown>(
+        'fn_dashboard_executive_counterparty_contracts',
+        [counterpartyId],
+        { actorId: req.user!.id },
+      );
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/dashboards/executive/critical-impacts?windowDays=7
+   *
+   * Merged feed of critical impacts for the executive Critical Impact tile:
+   * (a) osint_signal rows with severity='critical' and
+   * (b) open risk_case rows with priority='critical', each pre-joined to
+   * the affected contracts so the FE can render the inline drill-down
+   * without a second round-trip.
+   *
+   * windowDays default 7, range 1..90. Role gate enforced inside the fn:
+   * executive / platform_admin / Super Admin OR insights.executive.
+   */
+  async executiveCriticalImpacts(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const windowDays = Math.min(
+        90,
+        Math.max(1, Number((req.query.windowDays as string) ?? 7)),
+      );
+      const raw = await (await import('../database/client')).db.callFunction<unknown>(
+        'fn_dashboard_executive_critical_impacts',
+        [windowDays],
+        { actorId: req.user!.id },
+      );
+      res.status(200).json({ success: true, data: raw, requestId: req.requestId });
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
    * GET /api/v1/dashboards/executive/anomalies-history →
    * fn_dashboard_executive_anomalies_history (S8).
    *

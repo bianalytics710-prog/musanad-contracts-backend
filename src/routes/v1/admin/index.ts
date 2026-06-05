@@ -129,6 +129,18 @@ import devLoginPersonasRouter from './dev-login-personas.routes';
 router.use('/dev-login-personas', devLoginPersonasRouter);
 
 // ============================================================
+// Mig 539 — Sidebar Role Order (per-role module reordering)
+// ============================================================
+import sidebarOrderRouter from './sidebar-order.routes';
+router.use('/sidebar-order', sidebarOrderRouter);
+
+// ============================================================
+// Phase B.2 (mig 549/550) — Risk routing matrix admin
+// ============================================================
+import riskRoutingRouter from './risk-routing.routes';
+router.use('/risk-routing', riskRoutingRouter);
+
+// ============================================================
 // M16 (CR-H) — Advisory Drafter + Notification Delivery.
 // GET/POST/PATCH/DELETE /admin/advisory-templates   (advisory.template.manage)
 // GET /admin/notification-dispatch-log              (notification.dispatch_log.read)

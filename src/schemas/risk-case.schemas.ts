@@ -58,6 +58,8 @@ export const listRiskCasesSchema = z.object({
   search: z.string().trim().max(200).optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
+  // Phase A — server-side "Assigned to" filter for the Risk Cases list.
+  assignedUserId: z.coerce.number().int().positive().optional(),
 });
 
 // ----------------------------------------------------------------

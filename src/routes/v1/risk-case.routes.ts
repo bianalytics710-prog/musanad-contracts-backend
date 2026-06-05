@@ -108,6 +108,27 @@ router.get(
   riskCaseController.list,
 );
 
+// Phase A — GET /risk-cases/assignable-users
+// Returns active users in risk-eligible roles for the inline reassignment
+// dropdown + the new "Assigned to" filter. Mounted BEFORE /:id so the
+// literal path doesn't get captured as the id parameter.
+router.get(
+  '/assignable-users',
+  authedReadRateLimiter,
+  riskCaseController.assignableUsers,
+);
+
+// Phase C — Risk Review bulk action. Literal path BEFORE /:id wildcards
+// so it doesn't get captured. Per-case promote / dismiss-as-noise are
+// /:id/promote and /:id/dismiss-as-noise — wildcards match below.
+import { riskReviewController } from '../../controllers/risk-review.controller';
+router.post(
+  '/risk-review/bulk',
+  authedWriteRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.bulk,
+);
+
 router.post(
   '/',
   authedWriteRateLimiter,
@@ -202,6 +223,24 @@ router.post(
   authorise(['risk.case.close']),
   validate(closeRiskCaseSchema, 'body'),
   riskCaseController.close,
+);
+
+// Phase C — Risk Review per-case actions. Executive (and any role
+// holding risk.review.manage) can promote a Tier 2 case to Tier 1
+// (which then auto-routes through the matrix), or dismiss it as noise
+// (closes with closure_outcome='no_action').
+router.post(
+  '/:id/promote',
+  authedWriteRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.promote,
+);
+
+router.post(
+  '/:id/dismiss-as-noise',
+  authedWriteRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.dismiss,
 );
 
 export default router;

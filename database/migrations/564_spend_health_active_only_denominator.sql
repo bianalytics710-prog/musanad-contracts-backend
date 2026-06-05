@@ -1,0 +1,348 @@
+-- MIGRATION: 564_spend_health_active_only_denominator.sql
+-- Date: 2026-06-05
+-- Description:
+--   The Contract Spend Health rollup says "13 of N contracts" — but N
+--   was sourced from contract.is_active = TRUE alone, which counts drafts,
+--   awaiting-signature, expired-soft-delete-retained etc. (371 rows).
+--   The user-facing "Active contracts" KPI uses contract.status = 'active'
+--   (184 rows). Mismatched denominators are misleading: a finance lead
+--   reading "13 of 371" will under-rate the coverage; "13 of 184" is the
+--   honest number.
+--
+--   Change is one line inside fn_budget_burn_portfolio — count
+--   contractsTotalCount using the SAME predicate the dashboard's
+--   "Active contracts" tile uses (status = 'active'). No callers break.
+
+BEGIN;
+
+CREATE OR REPLACE FUNCTION public.fn_budget_burn_portfolio(
+  p_actor_id bigint,
+  p_filters jsonb DEFAULT '{}'::jsonb
+) RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path TO 'public', 'pg_temp'
+AS $function$
+DECLARE
+  v_fiscal_year        INTEGER;
+  v_min_variance_pct   NUMERIC;
+  v_cost_category      TEXT;
+  v_page               INTEGER;
+  v_limit              INTEGER;
+  v_offset             INTEGER;
+  v_total              INTEGER;
+  v_data               JSONB;
+  v_top_over_budget    JSONB;
+  v_top_projected      JSONB;
+  v_total_budget_aed   NUMERIC(18,2);
+  v_total_actual_aed   NUMERIC(18,2);
+  v_over_budget_count  INTEGER;
+  v_proj_overrun       NUMERIC(18,2);
+  v_trending_over_count INTEGER;
+  v_months_in_fy       INTEGER := 12;
+  v_as_of_period       TEXT;
+  v_contracts_total            INTEGER;
+  v_contracts_without_budget   INTEGER;
+BEGIN
+  v_fiscal_year      := COALESCE((p_filters->>'fiscalYear')::INTEGER, EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER);
+  v_min_variance_pct := (p_filters->>'minVariancePct')::NUMERIC;
+  v_cost_category    := p_filters->>'costCategory';
+  v_page             := GREATEST(COALESCE((p_filters->>'page')::INTEGER, 1), 1);
+  v_limit            := LEAST(GREATEST(COALESCE((p_filters->>'limit')::INTEGER, 20), 1), 100);
+  v_offset           := (v_page - 1) * v_limit;
+
+  IF v_fiscal_year = EXTRACT(YEAR FROM CURRENT_DATE)::INTEGER THEN
+    v_as_of_period := TO_CHAR(CURRENT_DATE, 'YYYY-MM');
+  ELSE
+    v_as_of_period := v_fiscal_year::text || '-12';
+  END IF;
+
+  -- mig 564 — use status = 'active' so the denominator matches the
+  -- dashboard's "Active contracts" KPI (184), not the soft-delete-retained
+  -- pool of all is_active=TRUE rows (371).
+  SELECT COUNT(*) INTO v_contracts_total
+  FROM contract c
+  WHERE c.is_active = TRUE AND c.status = 'active';
+
+  WITH budget_by_contract AS (
+    SELECT contract_id, SUM(allocated_amount_aed) AS budget_aed
+    FROM contract_budget
+    WHERE is_active = TRUE AND fiscal_year = v_fiscal_year
+      AND (v_cost_category IS NULL OR cost_category = v_cost_category)
+    GROUP BY contract_id
+  ),
+  actual_by_contract AS (
+    SELECT
+      contract_id,
+      SUM(actual_amount_aed) AS actual_aed,
+      COUNT(DISTINCT period_label) AS months_elapsed
+    FROM contract_cost_actual
+    WHERE is_active = TRUE AND fiscal_year = v_fiscal_year AND period_type = 'month'
+      AND (v_cost_category IS NULL OR cost_category = v_cost_category)
+      AND period_label <= v_as_of_period
+    GROUP BY contract_id
+  ),
+  joined AS (
+    SELECT
+      bbc.contract_id,
+      bbc.budget_aed,
+      COALESCE(abc.actual_aed, 0) AS actual_aed,
+      COALESCE(abc.actual_aed, 0) - bbc.budget_aed AS variance_aed,
+      ROUND(
+        LEAST(
+          GREATEST(
+            (COALESCE(abc.actual_aed, 0) +
+             (COALESCE(abc.actual_aed, 0) / NULLIF(COALESCE(abc.months_elapsed, 0), 0)) *
+              (v_months_in_fy - COALESCE(abc.months_elapsed, 0))
+            ) - bbc.budget_aed,
+            (COALESCE(abc.actual_aed, 0) - bbc.budget_aed)
+          ),
+          bbc.budget_aed * 2.0
+        ),
+        2
+      ) AS projected_over_under_aed,
+      CASE WHEN bbc.budget_aed > 0
+           THEN ROUND(((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100)::NUMERIC, 2)
+           ELSE 0 END AS variance_pct,
+      CASE WHEN bbc.budget_aed > 0
+           THEN ROUND((COALESCE(abc.actual_aed, 0) / bbc.budget_aed * 100)::NUMERIC, 2)
+           ELSE 0 END AS pct_consumed
+    FROM budget_by_contract bbc
+    LEFT JOIN actual_by_contract abc ON abc.contract_id = bbc.contract_id
+    WHERE (v_min_variance_pct IS NULL OR
+           CASE WHEN bbc.budget_aed > 0
+                THEN ((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100) >= v_min_variance_pct
+                ELSE FALSE END)
+  ),
+  contract_rows AS (
+    SELECT j.*, c.contract_number, c.title_en, c.title_ar,
+           cp.name_en AS counterparty_name, cp.name_ar AS counterparty_name_ar
+    FROM joined j
+    JOIN contract c ON c.id = j.contract_id AND c.is_active = TRUE
+    LEFT JOIN party cp ON cp.id = c.counterparty_id
+  )
+  SELECT
+    COUNT(*)::INTEGER,
+    COALESCE(SUM(budget_aed), 0)::NUMERIC(18,2),
+    COALESCE(SUM(actual_aed), 0)::NUMERIC(18,2),
+    COUNT(*) FILTER (WHERE actual_aed > budget_aed)::INTEGER,
+    COALESCE(SUM(GREATEST(projected_over_under_aed, 0)), 0)::NUMERIC(18,2),
+    COUNT(*) FILTER (WHERE actual_aed <= budget_aed AND projected_over_under_aed > 0)::INTEGER
+  INTO v_total, v_total_budget_aed, v_total_actual_aed, v_over_budget_count, v_proj_overrun, v_trending_over_count
+  FROM contract_rows;
+
+  v_contracts_without_budget := GREATEST(v_contracts_total - COALESCE(v_total, 0), 0);
+
+  WITH budget_by_contract AS (
+    SELECT contract_id, SUM(allocated_amount_aed) AS budget_aed
+    FROM contract_budget WHERE is_active = TRUE AND fiscal_year = v_fiscal_year
+      AND (v_cost_category IS NULL OR cost_category = v_cost_category)
+    GROUP BY contract_id
+  ),
+  actual_by_contract AS (
+    SELECT contract_id, SUM(actual_amount_aed) AS actual_aed,
+           COUNT(DISTINCT period_label) AS months_elapsed
+    FROM contract_cost_actual
+    WHERE is_active = TRUE AND fiscal_year = v_fiscal_year AND period_type = 'month'
+      AND (v_cost_category IS NULL OR cost_category = v_cost_category)
+      AND period_label <= v_as_of_period
+    GROUP BY contract_id
+  ),
+  joined AS (
+    SELECT
+      bbc.contract_id, bbc.budget_aed,
+      COALESCE(abc.actual_aed, 0) AS actual_aed,
+      COALESCE(abc.actual_aed, 0) - bbc.budget_aed AS variance_aed,
+      ROUND(
+        LEAST(
+          GREATEST(
+            (COALESCE(abc.actual_aed, 0) +
+             (COALESCE(abc.actual_aed, 0) / NULLIF(COALESCE(abc.months_elapsed, 0), 0)) *
+              (v_months_in_fy - COALESCE(abc.months_elapsed, 0))
+            ) - bbc.budget_aed,
+            (COALESCE(abc.actual_aed, 0) - bbc.budget_aed)
+          ),
+          bbc.budget_aed * 2.0
+        ),
+        2
+      ) AS projected_over_under_aed,
+      CASE WHEN bbc.budget_aed > 0
+           THEN ROUND(((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100)::NUMERIC, 2)
+           ELSE 0 END AS variance_pct,
+      CASE WHEN bbc.budget_aed > 0
+           THEN ROUND((COALESCE(abc.actual_aed, 0) / bbc.budget_aed * 100)::NUMERIC, 2)
+           ELSE 0 END AS pct_consumed
+    FROM budget_by_contract bbc LEFT JOIN actual_by_contract abc ON abc.contract_id = bbc.contract_id
+    WHERE (v_min_variance_pct IS NULL OR
+           CASE WHEN bbc.budget_aed > 0
+                THEN ((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100) >= v_min_variance_pct
+                ELSE FALSE END)
+  )
+  SELECT COALESCE(jsonb_agg(row_data ORDER BY (row_data->>'variancePct')::NUMERIC DESC NULLS LAST), '[]'::jsonb)
+  INTO v_data
+  FROM (
+    SELECT jsonb_build_object(
+      'contractId',            j.contract_id,
+      'contractNumber',        c.contract_number,
+      'titleEn',               c.title_en,
+      'titleAr',               c.title_ar,
+      'counterpartyName',      cp.name_en,
+      'counterpartyNameAr',    cp.name_ar,
+      'budgetAed',             j.budget_aed::text,
+      'actualAed',             j.actual_aed::text,
+      'varianceAed',           j.variance_aed::text,
+      'variancePct',           j.variance_pct,
+      'pctConsumed',           j.pct_consumed,
+      'projectedOverUnderAed', j.projected_over_under_aed::text,
+      'varianceFlag',          (j.actual_aed > j.budget_aed)
+    ) AS row_data
+    FROM joined j
+    JOIN contract c ON c.id = j.contract_id AND c.is_active = TRUE
+    LEFT JOIN party cp ON cp.id = c.counterparty_id
+    ORDER BY j.variance_pct DESC NULLS LAST
+    LIMIT v_limit OFFSET v_offset
+  ) sub;
+
+  WITH budget_by_contract AS (
+    SELECT contract_id, SUM(allocated_amount_aed) AS budget_aed
+    FROM contract_budget WHERE is_active = TRUE AND fiscal_year = v_fiscal_year
+    GROUP BY contract_id
+  ),
+  actual_by_contract AS (
+    SELECT contract_id, SUM(actual_amount_aed) AS actual_aed,
+           COUNT(DISTINCT period_label) AS months_elapsed
+    FROM contract_cost_actual
+    WHERE is_active = TRUE AND fiscal_year = v_fiscal_year AND period_type = 'month'
+      AND period_label <= v_as_of_period
+    GROUP BY contract_id
+  )
+  SELECT COALESCE(jsonb_agg(row_data ORDER BY (row_data->>'variancePct')::NUMERIC DESC NULLS LAST), '[]'::jsonb)
+  INTO v_top_over_budget
+  FROM (
+    SELECT jsonb_build_object(
+      'contractId',            bbc.contract_id,
+      'contractNumber',        c.contract_number,
+      'titleEn',               c.title_en,
+      'titleAr',               c.title_ar,
+      'counterpartyName',      cp.name_en,
+      'counterpartyNameAr',    cp.name_ar,
+      'budgetAed',             bbc.budget_aed::text,
+      'actualAed',             COALESCE(abc.actual_aed, 0)::text,
+      'varianceAed',           (COALESCE(abc.actual_aed, 0) - bbc.budget_aed)::text,
+      'variancePct',           CASE WHEN bbc.budget_aed > 0
+                                    THEN ROUND(((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100)::NUMERIC, 2)
+                                    ELSE 0 END,
+      'pctConsumed',           CASE WHEN bbc.budget_aed > 0
+                                    THEN ROUND((COALESCE(abc.actual_aed, 0) / bbc.budget_aed * 100)::NUMERIC, 2)
+                                    ELSE 0 END,
+      'projectedOverUnderAed', ROUND(
+                                 LEAST(
+                                   GREATEST(
+                                     (COALESCE(abc.actual_aed, 0) +
+                                      (COALESCE(abc.actual_aed, 0) / NULLIF(COALESCE(abc.months_elapsed, 0), 0)) *
+                                       (v_months_in_fy - COALESCE(abc.months_elapsed, 0))
+                                     ) - bbc.budget_aed,
+                                     (COALESCE(abc.actual_aed, 0) - bbc.budget_aed)
+                                   ),
+                                   bbc.budget_aed * 2.0
+                                 ),
+                                 2
+                               )::text,
+      'varianceFlag',          TRUE
+    ) AS row_data
+    FROM budget_by_contract bbc
+    JOIN actual_by_contract abc ON abc.contract_id = bbc.contract_id
+    JOIN contract c ON c.id = bbc.contract_id AND c.is_active = TRUE
+    LEFT JOIN party cp ON cp.id = c.counterparty_id
+    WHERE COALESCE(abc.actual_aed, 0) > bbc.budget_aed
+    ORDER BY (COALESCE(abc.actual_aed, 0) - bbc.budget_aed) DESC
+    LIMIT 10
+  ) sub;
+
+  WITH budget_by_contract AS (
+    SELECT contract_id, SUM(allocated_amount_aed) AS budget_aed
+    FROM contract_budget WHERE is_active = TRUE AND fiscal_year = v_fiscal_year
+    GROUP BY contract_id
+  ),
+  actual_by_contract AS (
+    SELECT contract_id, SUM(actual_amount_aed) AS actual_aed,
+           COUNT(DISTINCT period_label) AS months_elapsed
+    FROM contract_cost_actual
+    WHERE is_active = TRUE AND fiscal_year = v_fiscal_year AND period_type = 'month'
+      AND period_label <= v_as_of_period
+    GROUP BY contract_id
+  ),
+  joined AS (
+    SELECT
+      bbc.contract_id, bbc.budget_aed,
+      COALESCE(abc.actual_aed, 0) AS actual_aed,
+      COALESCE(abc.actual_aed, 0) - bbc.budget_aed AS variance_aed,
+      ROUND(
+        LEAST(
+          GREATEST(
+            (COALESCE(abc.actual_aed, 0) +
+             (COALESCE(abc.actual_aed, 0) / NULLIF(COALESCE(abc.months_elapsed, 0), 0)) *
+              (v_months_in_fy - COALESCE(abc.months_elapsed, 0))
+            ) - bbc.budget_aed,
+            (COALESCE(abc.actual_aed, 0) - bbc.budget_aed)
+          ),
+          bbc.budget_aed * 2.0
+        ),
+        2
+      ) AS projected_over_under_aed,
+      CASE WHEN bbc.budget_aed > 0
+           THEN ROUND(((COALESCE(abc.actual_aed, 0) - bbc.budget_aed) / bbc.budget_aed * 100)::NUMERIC, 2)
+           ELSE 0 END AS variance_pct
+    FROM budget_by_contract bbc
+    LEFT JOIN actual_by_contract abc ON abc.contract_id = bbc.contract_id
+  )
+  SELECT COALESCE(jsonb_agg(row_data ORDER BY (row_data->>'projectedOverUnderAed')::NUMERIC DESC NULLS LAST), '[]'::jsonb)
+  INTO v_top_projected
+  FROM (
+    SELECT jsonb_build_object(
+      'contractId',            j.contract_id,
+      'contractNumber',        c.contract_number,
+      'titleEn',               c.title_en,
+      'titleAr',               c.title_ar,
+      'budgetAed',             j.budget_aed::text,
+      'actualAed',             j.actual_aed::text,
+      'variancePct',           j.variance_pct,
+      'projectedOverUnderAed', j.projected_over_under_aed::text,
+      'varianceFlag',          (j.actual_aed > j.budget_aed)
+    ) AS row_data
+    FROM joined j
+    JOIN contract c ON c.id = j.contract_id AND c.is_active = TRUE
+    WHERE j.projected_over_under_aed > 0
+    ORDER BY j.projected_over_under_aed DESC
+    LIMIT 3
+  ) sub;
+
+  RETURN jsonb_build_object(
+    'summary',       jsonb_build_object(
+                       'contractsWithBudget',          COALESCE(v_total, 0),
+                       'contractsTotalCount',          COALESCE(v_contracts_total, 0),
+                       'contractsWithoutBudgetCount',  COALESCE(v_contracts_without_budget, 0),
+                       'totalBudgetAed',               COALESCE(v_total_budget_aed, 0)::text,
+                       'totalActualAed',               COALESCE(v_total_actual_aed, 0)::text,
+                       'totalVarianceAed',             (COALESCE(v_total_actual_aed, 0) - COALESCE(v_total_budget_aed, 0))::text,
+                       'overBudgetContractCount',      COALESCE(v_over_budget_count, 0),
+                       'totalProjectedOverrunAed',     COALESCE(v_proj_overrun, 0)::text,
+                       'trendingOverContractCount',    COALESCE(v_trending_over_count, 0),
+                       'asOfPeriod',                   v_as_of_period,
+                       'fiscalYear',                   v_fiscal_year
+                     ),
+    'data',              v_data,
+    'topOverBudget',     v_top_over_budget,
+    'topProjectedOverrun3', v_top_projected,
+    'pagination',    jsonb_build_object('page', v_page, 'limit', v_limit, 'total', v_total)
+  );
+
+EXCEPTION WHEN OTHERS THEN
+  RAISE EXCEPTION 'fn_budget_burn_portfolio: %', SQLERRM USING ERRCODE = SQLSTATE;
+END;
+$function$;
+
+REVOKE ALL ON FUNCTION public.fn_budget_burn_portfolio(bigint, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.fn_budget_burn_portfolio(bigint, jsonb) TO neondb_owner;
+
+COMMIT;

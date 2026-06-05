@@ -472,7 +472,10 @@ export const ContractListQuerySchema = z.object({
   // ---- R5+ Lovable parity filters ----
   language: z.enum(['en', 'ar', 'bilingual']).optional(),
   governingLaw: z.string().trim().max(40).optional(),
-  sort: z.enum(['updated_at', 'created_at', 'end_date', 'value', 'alpha']).optional(),
+  sort: z.enum(['updated_at', 'created_at', 'end_date', 'value', 'alpha', 'risk']).optional(),
+  // ---- Mig 562 — risk filter for the executive "View all flagged" link ----
+  // high=score≥70 / medium=40-69 / low=1-39 / flagged=score>0 / unset=no filter.
+  risk: z.enum(['high', 'medium', 'low', 'flagged']).optional(),
 });
 export type ContractListQueryInferred = z.infer<typeof ContractListQuerySchema>;
 

@@ -96,6 +96,11 @@ import {
   startNotificationRetryWorker,
   stopNotificationRetryWorker,
 } from './workers/notification-retry.worker';
+// Phase C — Risk Case auto-dismiss (nightly stale-cleanup)
+import {
+  startRiskCaseAutoDismissWorker,
+  stopRiskCaseAutoDismissWorker,
+} from './workers/risk-case-auto-dismiss.worker';
 // M22 (CR-MIG-DRIVE) — Migration sync worker
 import {
   startMigrationSyncWorker,
@@ -265,6 +270,11 @@ const server = app.listen(port, () => {
   //   AND requires SMTP_RETRY_WORKER_ENABLED=true (default off in dev).
   void startNotificationRetryWorker();
 
+  // Phase C — Risk Case auto-dismiss worker. Nightly 02:30 UTC.
+  // Closes stale (>14d) open/in_review cases that nobody self-claimed.
+  // No-op in NODE_ENV=test; disable via RISK_CASE_AUTO_DISMISS_ENABLED=false.
+  startRiskCaseAutoDismissWorker();
+
   // M22 (CR-MIG-DRIVE) — Migration sync worker (every 10s).
   // Disabled by default unless MIGRATION_SYNC_WORKER_ENABLED=true.
   startMigrationSyncWorker();
@@ -338,6 +348,7 @@ const shutdown = async (signal: string): Promise<void> => {
     stopScoreRecomputeWorker();
     // M16 (CR-H) — stop notification retry worker.
     stopNotificationRetryWorker();
+    stopRiskCaseAutoDismissWorker();
     // M19 (CR-K) — stop risk case escalation + auto-create workers.
     stopRiskCaseEscalationWorker();
     stopRiskCaseAutoCreateWorker();

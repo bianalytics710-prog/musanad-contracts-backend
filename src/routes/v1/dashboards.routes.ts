@@ -64,6 +64,7 @@ import { dashboardsController } from '../../controllers/dashboards.controller';
 import {
   aiCostSummaryQuerySchema,
   executiveAnomaliesHistoryQuerySchema,
+  expiringContractsEscalateBodySchema,
   operationalDashboardQuerySchema,
 } from '../../schemas/dashboards.schemas';
 
@@ -171,6 +172,64 @@ dashboardsRouter.get(
   '/executive/expiring-contracts',
   authedReadRateLimiter,
   dashboardsController.executiveExpiringContracts,
+);
+
+// Mig 554 — POST /api/v1/dashboards/executive/expiring-contracts/escalate
+// Persists renewal-alert escalations for the expiry-cliff frame. Permission
+// gated at the route layer (contract.renewal_alert.send) and re-checked in
+// the fn body as defence-in-depth.
+dashboardsRouter.post(
+  '/executive/expiring-contracts/escalate',
+  authorise(['contract.renewal_alert.send']),
+  validate(expiringContractsEscalateBodySchema, 'body'),
+  dashboardsController.executiveExpiringContractsEscalate,
+);
+
+// Mig 559 — GET /api/v1/dashboards/executive/trends-extended?months=6
+// Side-car for the value-over-time + contracts-created-over-time charts.
+dashboardsRouter.get(
+  '/executive/trends-extended',
+  authedReadRateLimiter,
+  dashboardsController.executiveTrendsExtended,
+);
+
+// Mig 560 — GET /api/v1/dashboards/executive/high-risk?limit=8
+// Side-car for the ECIP "High-risk contracts" card. Returns each row
+// with counterpartyName + riskType in addition to the legacy fields.
+dashboardsRouter.get(
+  '/executive/high-risk',
+  authedReadRateLimiter,
+  dashboardsController.executiveHighRisk,
+);
+
+// Mig 558 — GET /api/v1/dashboards/executive/top-counterparty-contracts/:id
+// Drilldown for the executive "Top Business Partners" table.
+dashboardsRouter.get(
+  '/executive/top-counterparty-contracts/:counterpartyId',
+  authedReadRateLimiter,
+  dashboardsController.executiveCounterpartyContracts,
+);
+
+// GET /api/v1/dashboards/executive/critical-impacts
+// Merged feed for the "Critical impact" inline frame (osint_signal severity=critical
+// + open risk_case priority=critical, each pre-joined to affected contracts).
+// Role gate enforced inside fn_dashboard_executive_critical_impacts.
+dashboardsRouter.get(
+  '/executive/critical-impacts',
+  authedReadRateLimiter,
+  dashboardsController.executiveCriticalImpacts,
+);
+
+// Phase C — GET /api/v1/dashboards/executive/risk-review
+// Top N Tier 2 cases for the Executive Risk Review section. Permission
+// risk.review.manage enforced inside fn_risk_review_list (and at the
+// controller-side authorise gate as defense-in-depth).
+import { riskReviewController } from '../../controllers/risk-review.controller';
+dashboardsRouter.get(
+  '/executive/risk-review',
+  authedReadRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.list,
 );
 
 // ------------------------------------------------------------

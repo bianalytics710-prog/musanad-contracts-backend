@@ -122,6 +122,8 @@ export const riskCaseController = {
           params.search ?? null,
           params.page,
           params.limit,
+          // Phase A — new "Assigned to" filter passed through to fn.
+          params.assignedUserId ?? null,
         ],
         { actorId: req.user!.id, tenantId: req.tenantId },
       );
@@ -136,6 +138,44 @@ export const riskCaseController = {
     } catch (error) {
       req.logger.error({
         action: 'fn_risk_case_list',
+        userId: req.user?.id,
+        duration: Date.now() - startTime,
+        errorType: (error as Error).name,
+      });
+      next(error);
+    }
+  },
+
+  // ============================================================
+  // GET /api/v1/risk-cases/assignable-users (Phase A)
+  // ============================================================
+  // Returns active users in risk-eligible roles for the inline reassign
+  // dropdown + the new "Assigned to" filter. Thin pass-through to
+  // fn_risk_case_assignable_users — no business logic in this layer.
+  assignableUsers: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const startTime = Date.now();
+    req.logger.info({
+      action: 'fn_risk_case_assignable_users',
+      method: req.method,
+      path: req.path,
+      userId: req.user?.id,
+    });
+    try {
+      const result = await db.callFunction(
+        'fn_risk_case_assignable_users',
+        [req.user!.id],
+        { actorId: req.user!.id, tenantId: req.tenantId },
+      );
+      req.logger.info({
+        action: 'fn_risk_case_assignable_users',
+        userId: req.user?.id,
+        duration: Date.now() - startTime,
+        statusCode: 200,
+      });
+      res.json({ data: result });
+    } catch (error) {
+      req.logger.error({
+        action: 'fn_risk_case_assignable_users',
         userId: req.user?.id,
         duration: Date.now() - startTime,
         errorType: (error as Error).name,

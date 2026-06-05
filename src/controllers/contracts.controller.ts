@@ -129,6 +129,8 @@ export const contractsController = {
           q.language ?? null,
           q.governingLaw ?? null,
           q.sort ?? null,
+          // ---- Mig 562 — risk bucket filter ----
+          q.risk ?? null,
         ],
         { actorId: req.user!.id },
       );
