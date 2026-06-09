@@ -46,8 +46,34 @@ export interface TemplateMatchRow {
   nameAr: string | null;
   contractType: string;
   descriptionEn: string | null;
-  /** 0..1 cosine similarity (4-decimal precision). */
+  /**
+   * 0..1 cosine similarity of the uploaded body to this library template's
+   * body embedding. Captures *structural* / boilerplate similarity — section
+   * ordering, common phrases, scaffolding — not legal substance.
+   *
+   * Kept for backward compatibility. New code should prefer
+   * `compositeScore`, which blends this with `clauseCoverage` so a
+   * structurally-familiar contract with bespoke clauses no longer reads
+   * as "85% match".
+   */
   similarity: number;
+  /**
+   * v607 — composite match score = 0.4 × similarity (structure) +
+   *   0.6 × clauseCoverage (substance). Only populated on the TOP row
+   *   returned by analyzeTemplateUpload (other rows leave it null). FE
+   *   pill should render this when present.
+   */
+  compositeScore?: number | null;
+  /**
+   * v607 — share of the uploaded contract's extracted clauses that
+   * matched an existing library clause at or above the clauseMatch
+   * threshold. 0..1. Only populated on the TOP row.
+   */
+  clauseCoverage?: number | null;
+  /** v607 — total clauses extracted from the upload. Top row only. */
+  clauseTotal?: number | null;
+  /** v607 — number of those clauses found in the library. Top row only. */
+  clauseKnown?: number | null;
   usageCount: number;
 }
 
@@ -114,13 +140,27 @@ async function embed(input: string): Promise<number[] | null> {
 // reader (out-of-scope for v1).
 const DEFAULT_THRESHOLDS = { exact: 0.95, extend: 0.50, clauseMatch: 0.85 } as const;
 
+/**
+ * v607 — Composite-aware classifier.
+ *
+ * Before: classified using only `top.similarity` (the structure cosine).
+ * That let a contract with familiar boilerplate but bespoke clauses earn
+ * an 85% "exact / extend candidate" label.
+ *
+ * After: when `compositeScore` is populated, we classify against THAT.
+ * Falls back to `similarity` for callers that bypass clause extraction
+ * (e.g. OPENAI_API_KEY missing). Exact stays gated on the high bar so
+ * the "duplicate" message only fires when both structure and clauses
+ * strongly overlap.
+ */
 function classifyTopMatch(
   top: TemplateMatchRow | undefined,
   thresholds: { exact: number; extend: number },
 ): MatchClassification {
   if (!top) return 'no_match';
-  if (top.similarity >= thresholds.exact) return 'exact';
-  if (top.similarity >= thresholds.extend) return 'extend_candidate';
+  const score = typeof top.compositeScore === 'number' ? top.compositeScore : top.similarity;
+  if (score >= thresholds.exact) return 'exact';
+  if (score >= thresholds.extend) return 'extend_candidate';
   return 'no_match';
 }
 
@@ -267,6 +307,39 @@ export const analyzeTemplateUpload = async (
       );
       warnings.push('Clause-library cross-check failed — every clause is shown as new.');
     }
+  }
+
+  // v607 — composite score for the top template match.
+  //
+  // Mix:
+  //   compositeScore = 0.4 × structureSim + 0.6 × clauseCoverage
+  //
+  // where clauseCoverage = (known library clauses) / (total extracted).
+  // Clauses are weighted higher than structure because clauses carry the
+  // legal substance — structure is scaffolding. Special cases:
+  //   • Zero clauses extracted → fall back to structureSim (we have no
+  //     clause signal to blend in).
+  //   • No top template match → nothing to stamp.
+  //   • OPENAI_API_KEY missing path also skips this branch — top would
+  //     already be undefined or `similarity = 0`.
+  const STRUCTURE_WEIGHT = 0.4;
+  const CLAUSE_WEIGHT = 0.6;
+  if (templateMatches.length > 0) {
+    const top = templateMatches[0];
+    const clauseTotal = clauseCrossCheck.length;
+    const clauseKnown = clauseCrossCheck.filter((c) => !c.isNewToLibrary).length;
+    const clauseCoverage = clauseTotal > 0 ? clauseKnown / clauseTotal : null;
+    const composite =
+      clauseCoverage === null
+        ? top.similarity
+        : STRUCTURE_WEIGHT * top.similarity + CLAUSE_WEIGHT * clauseCoverage;
+    templateMatches[0] = {
+      ...top,
+      compositeScore: Number(composite.toFixed(4)),
+      clauseCoverage: clauseCoverage === null ? null : Number(clauseCoverage.toFixed(4)),
+      clauseTotal,
+      clauseKnown,
+    };
   }
 
   const topMatchClassification = classifyTopMatch(templateMatches[0], thresholds);
