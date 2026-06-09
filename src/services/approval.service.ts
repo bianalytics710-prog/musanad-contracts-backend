@@ -46,16 +46,22 @@ export const listMyPending = async (
   );
 };
 
-/** POST /api/v1/approvals/:stepId/decide → fn_approval_decide (S2) */
+/** POST /api/v1/approvals/:stepId/decide → fn_approval_decide (S2)
+ *
+ * v611 — pass tenantId through so the fn_approval_decide 611 fan-out
+ * (contract_comment + fn_notification_dispatch) can write its tenant-
+ * scoped rows. Without this, set_config('app.current_tenant_id') was
+ * not set on the connection, and the dispatch row failed silently. */
 export const decide = async (
   actorId: number,
   stepId: number,
   body: DecideApprovalDto,
+  tenantId?: string,
 ): Promise<DecideApprovalResponse> => {
   return db.callFunction<DecideApprovalResponse>(
     'fn_approval_decide',
     [stepId, actorId, body.decision, body.decisionNote ?? null],
-    { actorId },
+    { actorId, tenantId },
   );
 };
 

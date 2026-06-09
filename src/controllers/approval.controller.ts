@@ -85,10 +85,19 @@ export const approvalController = {
     try {
       const { stepId } = req.params as unknown as ApprovalStepIdParamInferred;
       const body = req.body as DecideApprovalInferred;
+      // v611 — fan-out (contract_comment + fn_notification_dispatch)
+      // requires app.current_tenant_id GUC. Resolve from req.tenantId
+      // first; fall back to req.user.tenantId for routes that haven't
+      // run rls.middleware. Hardcoded ADNOC fallback is single-tenant
+      // safe; drop when we onboard a second tenant.
+      const tenantId =
+        req.tenantId ??
+        (req.user as { tenantId?: string } | undefined)?.tenantId ??
+        '00000000-0000-0000-0000-000000000001';
       const result = await approvalService.decide(req.user!.id, stepId, {
         decision: body.decision,
         decisionNote: body.decisionNote,
-      });
+      }, tenantId);
       req.logger.info(
         {
           action: 'approval.decide',
