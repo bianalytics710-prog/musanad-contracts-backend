@@ -255,9 +255,21 @@ export type RouteInitPreviewInferred = z.infer<typeof RouteInitPreviewSchema>;
 // ------------------------------------------------------------
 
 /**
- * Empty body. fn_approval_route_init reads only p_contract_id (path)
- * + p_actor_id (JWT). z.object({}) is forward-extensible — swap to
- * z.object({}).strict() if a future extension needs strict body validation.
+ * v615 — accept an optional submissionNote. FE makes it required UX
+ * (drafter must explain what they changed before re-submitting); BE
+ * keeps it optional so non-UI callers (cron, integration test, future
+ * import job) aren't forced to populate it. When present, the FE
+ * also posts it as a contract_comment after submit succeeds — that
+ * fans out a notification to the first approver via mig 613.
  */
-export const SubmitForApprovalSchema = z.object({}).strict();
+export const SubmitForApprovalSchema = z
+  .object({
+    submissionNote: z
+      .string()
+      .trim()
+      .min(10, 'submissionNote must be at least 10 characters')
+      .max(2000, 'submissionNote must be at most 2000 characters')
+      .optional(),
+  })
+  .strict();
 export type SubmitForApprovalInferred = z.infer<typeof SubmitForApprovalSchema>;
