@@ -389,7 +389,11 @@ export const workOrderController = {
         bodyAr: string | null;
       } | null>(
         'fn_contract_get_by_id',
-        [req.user!.id, sourceContractId],
+        // 2026-06-12 — signature is (p_id, p_actor_id); we had these swapped,
+        // which made every Compose-draft extract from contract id = userId
+        // (so Hala = userId 5 always read OQOOD-2026-001's body, an MSA).
+        // That's why every MNDA Compose looked like an MSA in the wizard.
+        [sourceContractId, req.user!.id],
         { actorId: req.user!.id, tenantId: req.tenantId },
       );
       if (!sourceResult) {

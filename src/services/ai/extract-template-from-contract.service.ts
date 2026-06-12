@@ -1,7 +1,7 @@
 /**
  * extract-template-from-contract.service.ts
  *
- * Takes an uploaded contract's extracted text and asks gpt-4o-mini to
+ * Takes an uploaded contract's extracted text and asks gpt-4.1 to
  *   (1) identify entity-specific tokens (party names, addresses, dates,
  *       amounts, IDs, jurisdictions) and replace them with Mustache-style
  *       {{snake_case_key}} placeholders;
@@ -14,6 +14,17 @@
  *
  * The redacted body is returned as bodyEnRedacted (and bodyArRedacted if the
  * source was bilingual — currently we only single-track on EN).
+ *
+ * 2026-06-12 — Model + prompt overhaul. Was gpt-4o-mini with a 13-item
+ * "canonical keys when natural" suggestion that biased the model toward a
+ * generic services-style placeholder set regardless of input (an MNDA body
+ * produced `service_provider_name` + `fee_amount` despite the text using
+ * "Discloser" / "Recipient" and having no fee). The prompt and model are now
+ * tuned for grounded extraction: gpt-4.1 reads the document and names each
+ * placeholder after the role label the document actually uses. No canonical
+ * key suggestions, no list to pattern-match into. Two contracts of the same
+ * type with different content now produce different placeholder sets,
+ * preserving the "mirror this specific document" intent of Compose-draft.
  */
 
 import OpenAI from 'openai';
@@ -69,31 +80,54 @@ const KNOWN_KINDS: ReadonlyArray<TemplatePlaceholder['kind']> = [
   'text',
 ];
 
+// 2026-06-12 — Prompt rewritten for grounded extraction. The prior version
+// handed the model a 13-item "canonical keys when natural" list which biased
+// gpt-4o-mini to pattern-match into that list regardless of document content.
+// The new prompt instead instructs the model to NAME each placeholder after
+// the literal role label the document uses ("Discloser" → discloser_name;
+// "Service Provider" → service_provider_name) and to skip anything that
+// isn't actually in the body. No suggested key list, no canonical hint.
 const SYSTEM_PROMPT =
-  'You are a contract template extractor for a UAE contracts platform. ' +
-  'Given a contract document text, return a JSON object that redacts every entity-specific ' +
-  'field (party names, addresses, trade-licence numbers, Emirates IDs, dates, amounts, ' +
-  'jurisdictions, governing law citations specific to the parties) by replacing each one with a ' +
-  'Mustache placeholder of the form {{snake_case_key}}. Generic legal terms, boilerplate ' +
-  'clauses, headings and structure MUST be preserved verbatim. Do NOT invent placeholders ' +
-  'for content that is already generic.';
+  'You are a contract template extractor for a UAE contracts platform. Your job is to read a ' +
+  'specific contract document and produce a redacted template that mirrors THAT document — not a ' +
+  'generic template for its contract type. Two NDAs with different terms should produce different ' +
+  'placeholder sets.\n\n' +
+  'For every entity-specific value (party names, addresses, trade-licence numbers, Emirates IDs, ' +
+  'dates, monetary amounts, terms in years, jurisdictions, party-specific governing-law citations) ' +
+  'replace the value with a Mustache placeholder {{snake_case_key}}. Name each key after how the ' +
+  'document itself refers to that role. For example, if the document says "Discloser" / ' +
+  '"Recipient" use discloser_name / recipient_name; if it says "Service Provider" / "Client" use ' +
+  'service_provider_name / client_name; if it says "Employer" / "Employee" use employer_name / ' +
+  'employee_name; if it says "Contractor" / "Owner" use contractor_name / owner_name. Match the ' +
+  'document.\n\n' +
+  'Grounding rules:\n' +
+  '- DO NOT invent placeholders for content that is not in the document. If the document never ' +
+  'mentions a fee, do not emit fee_amount. If it never mentions a trade licence, do not emit ' +
+  'trade_license_number. Every placeholder you emit must correspond to a literal value you can ' +
+  'point to in the source text.\n' +
+  '- DO NOT redact: section headings, generic legal phrases, universal statute citations (e.g. ' +
+  '"Federal Decree-Law 33/2021"), or boilerplate that any contract of this type would carry.\n' +
+  '- Preserve markdown headings (# / ##), numbered clauses, paragraph structure, and the order of ' +
+  'the document.\n' +
+  '- Distinguish placeholders that the drafter MUST fill (required=true) from those that are ' +
+  'genuinely optional (required=false).';
 
 const buildUserPrompt = (req: ExtractTemplateRequest): string =>
   [
     'Source filename: ' + req.filename,
-    req.contractTypeHint ? 'User hint at contract type: ' + req.contractTypeHint : '',
+    req.contractTypeHint ? 'Source contract type (from our records): ' + req.contractTypeHint : '',
     '',
-    'Return a JSON object exactly matching:',
+    'Read the document below carefully, then return a JSON object exactly matching:',
     '{',
-    '  "nameEn": string (≤120 chars, an appropriate template name without party names),',
-    '  "descriptionEn": string (≤300 chars, what the template is used for),',
+    '  "nameEn": string (≤120 chars, a template name reflecting THIS document — no party names),',
+    '  "descriptionEn": string (≤300 chars, what THIS template is for),',
     '  "contractType": one of ' + KNOWN_CONTRACT_TYPES.join('|') + ',',
-    '  "language": "en" | "ar" | "bilingual" (based on which languages the source contained),',
-    '  "regulatoryReference": string | null (headline citation, e.g. "Federal Decree-Law 33/2021"),',
+    '  "language": "en" | "ar" | "bilingual",',
+    '  "regulatoryReference": string | null (headline citation if the document carries one),',
     '  "bodyEnRedacted": string (the FULL document body, with every entity-specific value swapped to {{snake_case_key}}),',
     '  "placeholders": [',
     '    {',
-    '      "key": "snake_case_key" (must appear at least once in bodyEnRedacted),',
+    '      "key": "snake_case_key" (named after the role the document uses; must appear in bodyEnRedacted),',
     '      "labelEn": "Human label",',
     '      "labelAr": "ترجمة بالعربية" (null if unsure),',
     '      "kind": one of ' + KNOWN_KINDS.join('|') + ',',
@@ -102,12 +136,11 @@ const buildUserPrompt = (req: ExtractTemplateRequest): string =>
     '  ]',
     '}',
     '',
-    'Rules:',
-    '- Each placeholder key must be unique, snake_case, and ACTUALLY APPEAR in bodyEnRedacted (no orphans).',
-    '- Use existing canonical keys when natural: discloser_name, recipient_name, employer_name, employee_name, effective_date, end_date, term_years, governing_emirate, fee_amount, currency_code, address, emirates_id, trade_license_number.',
-    '- Preserve all markdown headings (# / ##), numbered clauses, and paragraph structure.',
-    '- DO NOT redact: section headings, generic legal phrases, governing-law citations that are universal (e.g. "Federal Decree-Law 33/2021" itself).',
-    '- If the source is short (<400 chars), still return a usable structure with whatever placeholders make sense.',
+    'Final checks before you respond:',
+    '- Every placeholder key must be unique, snake_case, and ACTUALLY appear in bodyEnRedacted.',
+    '- Every placeholder you emit must be grounded in a specific span of the source text.',
+    '- If the document is short (<400 chars), still return a usable structure with whatever ' +
+      'placeholders are genuinely present.',
     '',
     'Document text:',
     '"""',
@@ -188,8 +221,13 @@ const callLlm = async (
   req: ExtractTemplateRequest,
   client: OpenAI,
 ): Promise<LlmExtraction> => {
+  // 2026-06-12 — gpt-4.1 for grounded extraction. The prior gpt-4o-mini was
+  // observed to pattern-match into a suggested canonical-key list (emitting
+  // service_provider_name + fee_amount on an MNDA with no fee mention) — this
+  // model + the rewritten prompt above name placeholders after the literal
+  // role labels in the source document instead.
   const completion = await client.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-4.1',
     response_format: { type: 'json_object' },
     temperature: 0,
     messages: [
