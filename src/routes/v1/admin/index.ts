@@ -27,6 +27,7 @@ import rolesMgmtRouter from './roles-mgmt.routes';
 import notificationTemplatesRouter from './notification-templates.routes';
 import emailConfigRouter from './email-config.routes';
 import brandingRouter from './branding.routes';
+import aiActionsAdminRouter from './ai-actions.routes';
 
 const router = Router();
 
@@ -84,6 +85,10 @@ router.use('/email-config', emailConfigRouter);
 
 // S11 — branding asset upload + color / footer edit.
 router.use('/branding', brandingRouter);
+
+// AI Chat Actions (mig 633/634/635) — Platform Admin catalog viewer +
+// per-tenant enable/disable for the prompt-driven actions surface.
+router.use('/ai-actions', aiActionsAdminRouter);
 
 // ============================================================
 // M11 (CR-D0) — Admin Ingestion Queue monitor + resolve.

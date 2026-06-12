@@ -288,6 +288,18 @@ v1Router.use('/risk-cases', authenticate, rlsMiddleware, requireModuleEnabled('r
 v1Router.use('/risk-cases', riskCaseRouter);
 
 // ============================================================
+// M21 — Work Order Queue.
+//   GET  /api/v1/work-orders                       — listMine
+//   GET  /api/v1/work-orders/assignable-drafters   — exec dropdown
+//   GET  /api/v1/work-orders/:id                   — getById
+//   POST /api/v1/work-orders/from-contract         — exec creates seeded draft + work_order
+//   POST /api/v1/work-orders/:id/complete          — manual complete
+//   POST /api/v1/work-orders/:id/cancel            — cancel
+// ============================================================
+import workOrdersRouter from './work-orders.routes';
+v1Router.use('/work-orders', workOrdersRouter);
+
+// ============================================================
 // M20 (CR-L) — Reports & Briefings — user-facing surface.
 //   GET    /api/v1/reports/templates                (report.read)
 //   POST   /api/v1/reports/templates/:id/run        (report.read)

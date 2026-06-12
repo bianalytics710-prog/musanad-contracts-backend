@@ -120,6 +120,7 @@ async function resolveAllowedContracts(
         null, // language
         filters?.emirate ?? null, // governingLaw as emirate proxy
         null, // sort
+        null, // riskBucket (mig 562 — additive; ACL pre-filter ignores risk tier)
       ],
       { actorId: userId, tenantId: tenantId ?? ADNOC_TENANT_ID },
     );

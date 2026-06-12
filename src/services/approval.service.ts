@@ -142,15 +142,26 @@ export const routeInitPreview = async (
   );
 };
 
-/** POST /api/v1/contracts/:id/submit-for-approval → fn_approval_route_init (S7) */
+/**
+ * POST /api/v1/contracts/:id/submit-for-approval → fn_approval_route_init (S7)
+ *
+ * 2026-06-11 — tenantId is REQUIRED. The fn inserts into approval_chain +
+ * approval_step, both of which fire the audit trigger → fn_audit_log_record_v2
+ * → audit_log INSERT. Audit_log's policies (or canonicalisation) read
+ * `current_setting('app.current_tenant_id', true)::UUID` — if the GUC is
+ * unset, casting "" → UUID raises 22P02 which surfaces as a 400 with the
+ * misleading message "fn_approval_route_init: invalid value type". Every new
+ * contract submitted via the wizard failed silently because of this.
+ */
 export const routeInit = async (
   actorId: number,
   contractId: number,
+  tenantId: string,
 ): Promise<SubmitForApprovalResponse> => {
   return db.callFunction<SubmitForApprovalResponse>(
     'fn_approval_route_init',
     [contractId, actorId],
-    { actorId },
+    { actorId, tenantId },
   );
 };
 

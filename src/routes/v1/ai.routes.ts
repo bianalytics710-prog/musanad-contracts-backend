@@ -23,10 +23,13 @@
  */
 import { Router } from 'express';
 import { authenticate, authorise, authoriseAnyOf } from '../../middleware/auth.middleware';
+import { rlsMiddleware } from '../../middleware/rls.middleware';
 import { validate } from '../../middleware/validation.middleware';
 import { authedWriteRateLimiter } from '../../middleware/rate-limit.middleware';
 import { extractContractBulkController } from '../../controllers/ai/extract-contract-bulk.controller';
 import { ExtractContractBulkSchema } from '../../schemas/import-batch.schemas';
+import { chatOrchestratorController } from '../../controllers/ai/chat-orchestrator.controller';
+import { chatMentionsController } from '../../controllers/ai/chat-mentions.controller';
 import { contractInsightsController } from '../../controllers/ai/contract-insights.controller';
 import { draftingAssistantController } from '../../controllers/ai/drafting-assistant.controller';
 import { executiveAnomaliesController } from '../../controllers/ai/executive-anomalies.controller';
@@ -182,6 +185,53 @@ router.post(
   validate(aiImpactSignalIdParamSchema, 'params'),
   validate(aiImpactSignalSuggestAmendmentRequestSchema, 'body'),
   impactSignalAiController.suggestAmendment,
+);
+
+// ---------------------------------------------------------------
+// Chat Orchestrator (mig 633/634/635) — prompt-driven actions via
+// the floating chatbot. All gated by ai.invoke.risk_assistant
+// (existing module-wide gate). Per-action permissions are checked
+// inside the orchestrator service + each handler.
+// ---------------------------------------------------------------
+router.post(
+  '/chat/ask',
+  rlsMiddleware,
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.risk_assistant']),
+  chatOrchestratorController.ask,
+);
+router.post(
+  '/chat/execute',
+  rlsMiddleware,
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.risk_assistant']),
+  chatOrchestratorController.execute,
+);
+router.post(
+  '/chat/reject',
+  rlsMiddleware,
+  authedWriteRateLimiter,
+  authorise(['ai.invoke.risk_assistant']),
+  chatOrchestratorController.reject,
+);
+
+router.get(
+  '/chat/mentions/users',
+  rlsMiddleware,
+  authorise(['ai.invoke.risk_assistant']),
+  chatMentionsController.users,
+);
+router.get(
+  '/chat/mentions/contracts',
+  rlsMiddleware,
+  authorise(['ai.invoke.risk_assistant']),
+  chatMentionsController.contracts,
+);
+router.get(
+  '/chat/mentions/parties',
+  rlsMiddleware,
+  authorise(['ai.invoke.risk_assistant']),
+  chatMentionsController.parties,
 );
 
 export default router;

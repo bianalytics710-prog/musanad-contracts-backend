@@ -311,7 +311,18 @@ export const approvalController = {
     );
     try {
       const { id } = req.params as unknown as ContractIdParamInferred;
-      const result = await approvalService.routeInit(req.user!.id, id);
+      // 2026-06-11 — pass tenantId so the audit trigger that fires on
+      // approval_chain / approval_step INSERT doesn't blow up casting an empty
+      // tenant GUC to UUID. The /api/v1/contracts router doesn't apply
+      // rls.middleware, so req.tenantId is undefined — use the same fallback
+      // chain the decide controller already established (v611). Without this,
+      // every "Send for approval" call returned 400 with the misleading
+      // message "fn_approval_route_init: invalid value type".
+      const tenantId =
+        req.tenantId ??
+        (req.user as { tenantId?: string } | undefined)?.tenantId ??
+        '00000000-0000-0000-0000-000000000001';
+      const result = await approvalService.routeInit(req.user!.id, id, tenantId);
       req.logger.info(
         {
           action: 'approval.submitForApproval',
