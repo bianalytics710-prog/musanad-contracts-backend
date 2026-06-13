@@ -300,6 +300,16 @@ import workOrdersRouter from './work-orders.routes';
 v1Router.use('/work-orders', workOrdersRouter);
 
 // ============================================================
+// Phase A (mig 640, 2026-06-13) — My Work unified inbox.
+//   GET /api/v1/my-work — UNION of work_order + approval_step + risk_case +
+//                         tpa_review + advisory_draft for the actor. Used by
+//                         Legal Counsel + Contract Approver; drafter's
+//                         existing /work-orders surface stays untouched.
+// ============================================================
+import myWorkRouter from './my-work.routes';
+v1Router.use('/my-work', myWorkRouter);
+
+// ============================================================
 // M20 (CR-L) — Reports & Briefings — user-facing surface.
 //   GET    /api/v1/reports/templates                (report.read)
 //   POST   /api/v1/reports/templates/:id/run        (report.read)
