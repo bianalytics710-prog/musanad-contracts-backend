@@ -136,6 +136,11 @@ import {
   startObligationSlaEscalationWorker,
   stopObligationSlaEscalationWorker,
 } from './workers/obligation-sla-escalation.worker';
+// Phase D (mig 647, 2026-06-13) — Risk Triage Auto-Escalate worker (daily cron)
+import {
+  startRiskTriageAutoEscalateWorker,
+  stopRiskTriageAutoEscalateWorker,
+} from './workers/risk-triage-auto-escalate.worker';
 
 const app = express();
 
@@ -285,6 +290,13 @@ const server = app.listen(port, () => {
   // No-op in test AND requires RISK_CASE_ESCALATION_WORKER_ENABLED=true.
   startRiskCaseEscalationWorker();
 
+  // Phase D (mig 647, 2026-06-13) — Risk Triage Auto-Escalate worker.
+  // Daily at 06:00 UTC. fn_risk_triage_auto_escalate marks Tier-2 cases that
+  // have been unactioned past tier2AutoEscalateDays + writes a
+  // tier2_auto_escalated risk_case_event row. No-op in test AND requires
+  // RISK_TRIAGE_AUTO_ESCALATE_WORKER_ENABLED=true.
+  startRiskTriageAutoEscalateWorker();
+
   // M19 (CR-K) — Risk Case Auto-Create worker.
   // PG LISTEN 'correlation_inserted' (shared channel from CR-F mig 172).
   // Calls fn_risk_case_auto_create_from_correlation for each new correlation;
@@ -352,6 +364,8 @@ const shutdown = async (signal: string): Promise<void> => {
     // M19 (CR-K) — stop risk case escalation + auto-create workers.
     stopRiskCaseEscalationWorker();
     stopRiskCaseAutoCreateWorker();
+    // Phase D (mig 647) — stop risk triage auto-escalate worker.
+    stopRiskTriageAutoEscalateWorker();
     // M20 (CR-L) — stop report run worker + scheduler.
     stopReportRunWorker();
     stopReportScheduler();
