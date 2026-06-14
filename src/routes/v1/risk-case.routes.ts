@@ -243,4 +243,14 @@ router.post(
   riskReviewController.dismiss,
 );
 
+// Phase E.4 — executive reassign override on a Tier-1 case while
+// status='open'. Body: { newUserId }. fn_risk_triage_reassign returns
+// P0001 'reassign_locked' once the receiver has moved past 'open'.
+router.post(
+  '/:id/reassign',
+  authedWriteRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.reassign,
+);
+
 export default router;

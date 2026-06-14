@@ -232,6 +232,27 @@ dashboardsRouter.get(
   riskReviewController.list,
 );
 
+// Phase E.3 — GET /api/v1/dashboards/executive/risk-triage/tier1
+// Tier-1 auto-routed cases (status=open + assigned_role + assigned_user_id)
+// for executive oversight in the Risk Triage tab strip. Permission
+// risk.review.manage enforced inside fn_risk_triage_tier1_list.
+dashboardsRouter.get(
+  '/executive/risk-triage/tier1',
+  authedReadRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.tier1List,
+);
+
+// Phase E.1 — GET /api/v1/dashboards/executive/risk-triage/assignee-suggest?role=…
+// Returns ranked active users in the target role for the confirm-risk modal
+// dropdown. Row 1 carries suggested=true (lightest current open-case load).
+dashboardsRouter.get(
+  '/executive/risk-triage/assignee-suggest',
+  authedReadRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.assigneeSuggest,
+);
+
 // ------------------------------------------------------------
 // S7 — GET /api/v1/dashboards/executive
 // ------------------------------------------------------------
