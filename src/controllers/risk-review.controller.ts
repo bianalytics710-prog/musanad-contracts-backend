@@ -116,6 +116,25 @@ export const riskReviewController = {
     }
   },
 
+  // Gap 3 (mig 658) — executive reverse-view: risk cases I assigned.
+  assignedByMe: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const startTime = Date.now();
+    req.logger.info({ action: 'fn_risk_case_list_assigned_by_actor', userId: req.user?.id });
+    try {
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit ?? 25)));
+      const result = await db.callFunction(
+        'fn_risk_case_list_assigned_by_actor',
+        [req.user!.id, limit],
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
+      );
+      req.logger.info({ action: 'fn_risk_case_list_assigned_by_actor', duration: Date.now() - startTime, statusCode: 200 });
+      res.json({ success: true, data: result });
+    } catch (e) {
+      req.logger.error({ action: 'fn_risk_case_list_assigned_by_actor', errorType: (e as Error).name });
+      next(e);
+    }
+  },
+
   // Phase E.4 — executive reassign override for Tier-1 cases.
   reassign: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const startTime = Date.now();

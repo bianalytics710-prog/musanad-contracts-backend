@@ -253,6 +253,17 @@ dashboardsRouter.get(
   riskReviewController.assigneeSuggest,
 );
 
+// Gap 3 (mig 658) — GET /api/v1/dashboards/executive/risk-triage/assigned-by-me
+// Returns the recent set of risk cases whose routing the actor initiated
+// (promoted / reassigned / created). Powers the executive's reverse-view
+// section in AssignedByMeView.
+dashboardsRouter.get(
+  '/executive/risk-triage/assigned-by-me',
+  authedReadRateLimiter,
+  authorise(['risk.review.manage']),
+  riskReviewController.assignedByMe,
+);
+
 // ------------------------------------------------------------
 // S7 — GET /api/v1/dashboards/executive
 // ------------------------------------------------------------
