@@ -54,6 +54,7 @@ import type {
   ExecutiveDashboardSnapshot,
   HealthCheckSnapshot,
   LegalCounselDashboardSnapshot,
+  LegalCounselInsightsSnapshot,
   RecipientDashboardSnapshot,
 } from '../types/dashboards.types';
 
@@ -110,6 +111,24 @@ export const getLegalCounselDashboard = (
     'fn_dashboard_legal_counsel',
     [windowDays ?? null],
     { actorId },
+  );
+
+/**
+ * GET /api/v1/dashboards/legal-counsel/insights → fn_dashboard_legal_counsel_insights (mig 685).
+ *
+ * LC-specific metrics: advisory/notices pipeline, TPA pipeline, template/clause
+ * library stats, and the actor's open risk cases. Takes p_actor_id as the sole
+ * positional arg; tenant context is set via GUC (callFunction opts.actorId +
+ * opts.tenantId). Role gate mirrors fn_dashboard_legal_counsel (42501 → 403).
+ */
+export const getLegalCounselInsights = (
+  actorId: number,
+  tenantId: string,
+): Promise<LegalCounselInsightsSnapshot> =>
+  db.callFunction<LegalCounselInsightsSnapshot>(
+    'fn_dashboard_legal_counsel_insights',
+    [actorId],
+    { actorId, tenantId },
   );
 
 /** GET /api/v1/dashboards/recipient → fn_dashboard_recipient (S5). */

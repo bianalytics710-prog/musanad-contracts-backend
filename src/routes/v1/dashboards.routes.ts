@@ -111,6 +111,21 @@ dashboardsRouter.get(
 );
 
 // ------------------------------------------------------------
+// S4b — GET /api/v1/dashboards/legal-counsel/insights  (mig 685)
+// ------------------------------------------------------------
+//
+// Registered BEFORE /legal-counsel (exact-match deeper-first ordering;
+// defensive against future param-route refactors — mirrors the pattern
+// used for /executive/anomalies-history before /executive).
+// Role gate: legal_counsel / platform_admin / Super Admin (fn body).
+// Tenant context resolved in controller (req.tenantId ?? ADNOC singleton).
+dashboardsRouter.get(
+  '/legal-counsel/insights',
+  authedReadRateLimiter,
+  dashboardsController.legalCounselInsights,
+);
+
+// ------------------------------------------------------------
 // S4 — GET /api/v1/dashboards/legal-counsel
 // ------------------------------------------------------------
 //

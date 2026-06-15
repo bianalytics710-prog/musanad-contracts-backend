@@ -37,6 +37,7 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { ApiError } from '../utils/errors.util';
+import { ADNOC_TENANT_ID } from '../middleware/rls.middleware';
 import * as dashboardsService from '../services/dashboards.service';
 import type {
   ExecutiveAnomaliesHistoryQueryInput,
@@ -239,6 +240,57 @@ export const dashboardsController = {
       req.logger.error(
         {
           action: 'dashboard.legalCounsel',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType: errorType(error),
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /**
+   * GET /api/v1/dashboards/legal-counsel/insights → fn_dashboard_legal_counsel_insights (mig 685).
+   *
+   * LC-specific insights sidecar: advisory/notices pipeline, TPA pipeline,
+   * template & clause library counts, and actor's open risk cases.
+   * Role gate (in fn_): legal_counsel OR platform_admin OR Super Admin.
+   * Tenant: falls back to ADNOC singleton UUID when req.tenantId is unset
+   * (dashboards routes don't apply rlsMiddleware — mirrors the pattern used
+   * by the expiring-contracts/escalate endpoint).
+   */
+  async legalCounselInsights(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      {
+        action: 'dashboard.legalCounselInsights',
+        userId: req.user?.id,
+        method: req.method,
+        path: req.path,
+      },
+      'Controller entry',
+    );
+    try {
+      const tenantId = req.tenantId ?? ADNOC_TENANT_ID;
+      const result = await dashboardsService.getLegalCounselInsights(
+        req.user!.id,
+        tenantId,
+      );
+      req.logger.info(
+        {
+          action: 'dashboard.legalCounselInsights',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'dashboard.legalCounselInsights',
           userId: req.user?.id,
           duration: Date.now() - startTime,
           errorType: errorType(error),

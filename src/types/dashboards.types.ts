@@ -434,6 +434,51 @@ export interface LegalCounselDashboardSnapshot {
 }
 
 // ------------------------------------------------------------
+// 11b. fn_dashboard_legal_counsel_insights (mig 685) response shape
+// ------------------------------------------------------------
+
+export interface LegalCounselInsightsKpis {
+  contractsPendingMyReview: number;
+  advisoriesInProgress: number;
+  tpaReviewsAwaitingMe: number;
+  myOpenRiskCases: number;
+}
+
+export interface LegalCounselAdvisoryPipeline {
+  draft: number;
+  inExecReview: number;
+  approvedReady: number;
+  sentThisMonth: number;
+}
+
+export interface LegalCounselTpaPipelineRow {
+  status: string;
+  count: number;
+}
+
+export interface LegalCounselTemplateClause {
+  templateCount: number;
+  clauseCount: number;
+  approvedClauseCount: number;
+}
+
+export interface LegalCounselRiskCaseRow {
+  id: number;
+  title: string;
+  caseType: string;
+  status: string;
+  priority: string;
+}
+
+export interface LegalCounselInsightsSnapshot {
+  kpis: LegalCounselInsightsKpis;
+  advisoryPipeline: LegalCounselAdvisoryPipeline;
+  tpaPipeline: LegalCounselTpaPipelineRow[];
+  templateClause: LegalCounselTemplateClause;
+  myRiskCases: LegalCounselRiskCaseRow[];
+}
+
+// ------------------------------------------------------------
 // 12. fn_dashboard_recipient (S5) response shape
 // ------------------------------------------------------------
 

@@ -9,7 +9,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../database/client';
 import { ApiError } from '../utils/errors.util';
-import { listMyWorkQuerySchema } from '../schemas/my-work.schemas';
+import { listMyWorkQuerySchema, setMyWorkStatusSchema } from '../schemas/my-work.schemas';
 
 const errorType = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
@@ -58,6 +58,44 @@ export const myWorkController = {
         duration: Date.now() - startTime,
         errorType: errorType(error),
       });
+      next(error);
+    }
+  },
+
+  // ============================================================
+  // GET /api/v1/my-work/statuses  (mig 684)
+  // ============================================================
+  // The actor's personal work-status overlay as [{workItemId,status}].
+  // Items without a row default to to_do on the FE.
+  listStatuses: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const result = await db.callFunction(
+        'fn_my_work_status_list',
+        [req.user!.id],
+        { actorId: req.user!.id, tenantId: req.tenantId },
+      );
+      res.json(result);
+    } catch (error) {
+      req.logger.error({ action: 'fn_my_work_status_list', userId: req.user?.id, errorType: errorType(error) });
+      next(error);
+    }
+  },
+
+  // ============================================================
+  // POST /api/v1/my-work/status  (mig 684)
+  // ============================================================
+  // Upsert the actor's personal status for one unified My Work row.
+  setStatus: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { workItemId, status } = setMyWorkStatusSchema.parse(req.body);
+      const result = await db.callFunction(
+        'fn_my_work_status_set',
+        [req.user!.id, workItemId, status],
+        { actorId: req.user!.id, tenantId: req.tenantId },
+      );
+      res.json(result);
+    } catch (error) {
+      req.logger.error({ action: 'fn_my_work_status_set', userId: req.user?.id, errorType: errorType(error) });
       next(error);
     }
   },

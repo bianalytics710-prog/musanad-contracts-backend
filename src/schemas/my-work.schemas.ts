@@ -45,3 +45,20 @@ export const listMyWorkQuerySchema = z.object({
 });
 
 export type ListMyWorkQuery = z.infer<typeof listMyWorkQuerySchema>;
+
+// mig 684 — personal work-status overlay (to_do/in_progress/done/blocked).
+// workItemId is the synthesized My Work row id (negative for synthesized
+// rows per mig 640), so int but NOT necessarily positive.
+export const PERSONAL_WORK_STATUSES = [
+  'to_do',
+  'in_progress',
+  'done',
+  'blocked',
+] as const;
+
+export const setMyWorkStatusSchema = z.object({
+  workItemId: z.coerce.number().int(),
+  status: z.enum(PERSONAL_WORK_STATUSES),
+});
+
+export type SetMyWorkStatus = z.infer<typeof setMyWorkStatusSchema>;

@@ -23,4 +23,19 @@ router.get(
   myWorkController.list,
 );
 
+// mig 684 — personal work-status overlay. Same permission as the list:
+// anyone who owns a My Work queue can annotate their own rows.
+router.get(
+  '/statuses',
+  authedReadRateLimiter,
+  authorise(['work.read.assigned']),
+  myWorkController.listStatuses,
+);
+
+router.post(
+  '/status',
+  authorise(['work.read.assigned']),
+  myWorkController.setStatus,
+);
+
 export default router;
