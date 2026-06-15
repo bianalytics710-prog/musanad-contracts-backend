@@ -46,6 +46,42 @@ router.post(
   advisoryDraftsController.generate,
 );
 
+// 2026-06-14 — must be mounted BEFORE /:id for the same reason as /generate.
+// Express matches in declaration order; /:id would otherwise capture
+// 'from-risk-case', 'by-contract', 'recipient' as the id param.
+router.post(
+  '/from-risk-case',
+  authenticate,
+  rlsMiddleware,
+  authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.generateFromRiskCase,
+);
+
+router.get(
+  '/by-contract/:contractId',
+  authenticate,
+  rlsMiddleware,
+  authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.listForContract,
+);
+
+// 2026-06-15 — Phase 2: drafts awaiting executive review.
+router.get(
+  '/pending-for-executive',
+  authenticate,
+  rlsMiddleware,
+  authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.pendingForExecutive,
+);
+
+router.get(
+  '/recipient/:contractId',
+  authenticate,
+  rlsMiddleware,
+  authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.resolveRecipient,
+);
+
 // GET /advisory-drafts — list (query params parsed inside controller)
 router.get(
   '/',
@@ -111,6 +147,38 @@ router.get(
   rlsMiddleware,
   authoriseAnyOf(DISPATCH_LOG_PERMISSIONS),
   advisoryDraftsController.dispatchLog,
+);
+
+// ─── 2026-06-14 — Risk-case workflow /:id/* sub-routes (after /:id) ─────
+router.post(
+  '/:id/send-directly',
+  authenticate, rlsMiddleware, authorise(DISPATCH_PERMISSION),
+  advisoryDraftsController.sendDirectly,
+);
+router.post(
+  '/:id/route-for-review',
+  authenticate, rlsMiddleware, authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.routeForReview,
+);
+router.post(
+  '/:id/exec-approve',
+  authenticate, rlsMiddleware, authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.execApprove,
+);
+router.post(
+  '/:id/exec-modify',
+  authenticate, rlsMiddleware, authorise(DRAFT_REVIEW_PERMISSION),
+  advisoryDraftsController.execModify,
+);
+router.post(
+  '/:id/send-after-review',
+  authenticate, rlsMiddleware, authorise(DISPATCH_PERMISSION),
+  advisoryDraftsController.sendAfterReview,
+);
+router.post(
+  '/:id/resend',
+  authenticate, rlsMiddleware, authorise(DISPATCH_PERMISSION),
+  advisoryDraftsController.resend,
 );
 
 export default router;
