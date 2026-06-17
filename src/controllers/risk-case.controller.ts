@@ -124,6 +124,8 @@ export const riskCaseController = {
           params.limit,
           // Phase A — new "Assigned to" filter passed through to fn.
           params.assignedUserId ?? null,
+          // 698 — contract filter (contract detail Risk tab).
+          params.contractId ?? null,
         ],
         { actorId: req.user!.id, tenantId: req.tenantId },
       );

@@ -60,6 +60,8 @@ export const listRiskCasesSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
   // Phase A — server-side "Assigned to" filter for the Risk Cases list.
   assignedUserId: z.coerce.number().int().positive().optional(),
+  // 698 — filter to a single contract (drives the contract detail Risk tab).
+  contractId: z.coerce.number().int().positive().optional(),
 });
 
 // ----------------------------------------------------------------
