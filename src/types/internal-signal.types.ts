@@ -179,6 +179,19 @@ export interface InternalSignalIngestPayload {
   severity?: Severity;
   /** Optional. Defaults to 'demo'. */
   dataClassification?: DataClassification;
+  /**
+   * 689 — provenance. The internal_system_source.system_code the signal came
+   * from (e.g. 'sap_s4_finance'). When omitted, fn_internal_signal_ingest
+   * auto-derives it from signalType. An explicit unknown code is a 400.
+   */
+  sourceSystemCode?: string;
+  /**
+   * 689 — the originating record id in the source system (invoice #, ticket #,
+   * milestone ref). When omitted, derived from invoiceRef / milestoneRef / etc.
+   */
+  sourceRecordRef?: string;
+  /** 689 — optional deep-link into the source system for that record. */
+  sourceRecordUrl?: string;
 }
 
 /**
@@ -192,6 +205,11 @@ export interface InternalSignalIngestResponse {
   inserted: boolean;
   dedupHashHit: boolean;
   signalKindSubtype: InternalSignalType;
+  /** 689 — resolved provenance echoed back to the caller. */
+  internalSystemId: number | null;
+  sourceSystemCode: string | null;
+  sourceRecordRef: string | null;
+  sourceRecordUrl: string | null;
 }
 
 // ============================================================

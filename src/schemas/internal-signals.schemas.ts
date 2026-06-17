@@ -82,6 +82,13 @@ export const internalSignalIngestSchema = z.object({
   severityCalcInput: z.record(z.unknown()).optional(),
   severity: severityEnumSchema.optional(),
   dataClassification: dataClassificationSchema.optional(),
+  // 689 — provenance. All optional: fn_internal_signal_ingest auto-derives the
+  // system (from signalType) and record ref (from invoiceRef/milestoneRef/…)
+  // when omitted. An explicitly-supplied unknown system code is rejected (400)
+  // inside the fn body.
+  sourceSystemCode: z.string().trim().min(1).max(120).optional(),
+  sourceRecordRef: z.string().trim().min(1).max(200).optional(),
+  sourceRecordUrl: z.string().trim().url('sourceRecordUrl must be a URL').max(2000).optional(),
 });
 export type InternalSignalIngestInferred = z.infer<typeof internalSignalIngestSchema>;
 
