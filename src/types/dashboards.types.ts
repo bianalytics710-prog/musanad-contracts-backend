@@ -451,9 +451,14 @@ export interface LegalCounselAdvisoryPipeline {
   sentThisMonth: number;
 }
 
-export interface LegalCounselTpaPipelineRow {
-  status: string;
-  count: number;
+// mig 686 — named lifecycle buckets.
+export interface LegalCounselTpaPipeline {
+  received: number;
+  awaitingOurReview: number;
+  reviewed: number;
+  awaitingCounterparty: number;
+  accepted: number;
+  rejected: number;
 }
 
 export interface LegalCounselTemplateClause {
@@ -470,12 +475,20 @@ export interface LegalCounselRiskCaseRow {
   priority: string;
 }
 
+// mig 686 — avg legal review time, days, glitch-filtered.
+export interface LegalCounselAvgReview {
+  avgDays: number;
+  sampleSize: number;
+  series12w: Array<{ weekIndex: number; avgDays: number }>;
+}
+
 export interface LegalCounselInsightsSnapshot {
   kpis: LegalCounselInsightsKpis;
   advisoryPipeline: LegalCounselAdvisoryPipeline;
-  tpaPipeline: LegalCounselTpaPipelineRow[];
+  tpaPipeline: LegalCounselTpaPipeline;
   templateClause: LegalCounselTemplateClause;
   myRiskCases: LegalCounselRiskCaseRow[];
+  avgReview: LegalCounselAvgReview;
 }
 
 // ------------------------------------------------------------

@@ -14,6 +14,12 @@
  */
 import type { NextFunction, Request, Response } from 'express';
 import { db } from '../database/client';
+// 687 — the contracts router applies `authenticate` but not `rlsMiddleware`,
+// so `req.tenantId` is undefined here. A comment INSERT fires the
+// work-order-on-comment trigger (fn_work_order_auto_insert) which casts the
+// `app.current_tenant_id` GUC to uuid — empty GUC → 22P02. Fall back to the
+// same single-tenant id rlsMiddleware uses so the GUC is always populated.
+import { ADNOC_TENANT_ID } from '../middleware/rls.middleware';
 import type {
   ContractCommentIdParamsInferred,
   CommentListQueryInferred,
@@ -32,7 +38,7 @@ export const contractCommentController = {
       const result = await db.callFunction<CommentRowEnvelope<unknown[]>>(
         'fn_contract_comment_list',
         [req.user!.id, contractId, filter],
-        { actorId: req.user!.id },
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
       );
       res.json({ success: true, data: result.data, requestId: req.requestId });
     } catch (err) {
@@ -53,8 +59,15 @@ export const contractCommentController = {
           body.body,
           body.parentId ?? null,
           body.mentionedUserIds ?? [],
+          // 687 — anchored redline fields (default to general/no-anchor).
+          body.commentKind ?? 'general',
+          body.anchorClauseId ?? null,
+          body.anchorClauseHeading ?? null,
+          body.anchorQuote ?? null,
+          body.anchorSide ?? null,
+          body.anchorVersionNumber ?? null,
         ],
-        { actorId: req.user!.id },
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
       );
       res.status(201).json({ success: true, data: result.data, requestId: req.requestId });
     } catch (err) {
@@ -69,7 +82,22 @@ export const contractCommentController = {
       const result = await db.callFunction<CommentRowEnvelope<{ id: number; resolved: boolean }>>(
         'fn_contract_comment_resolve',
         [req.user!.id, commentId],
-        { actorId: req.user!.id },
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
+      );
+      res.json({ success: true, data: result.data, requestId: req.requestId });
+    } catch (err) {
+      next(err);
+    }
+  },
+
+  /** POST /api/v1/contracts/:id/comments/:commentId/reopen (687) */
+  async reopen(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { commentId } = req.params as unknown as ContractCommentIdParamsInferred;
+      const result = await db.callFunction<CommentRowEnvelope<{ id: number; resolved: boolean }>>(
+        'fn_contract_comment_reopen',
+        [req.user!.id, commentId],
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
       );
       res.json({ success: true, data: result.data, requestId: req.requestId });
     } catch (err) {
@@ -84,7 +112,7 @@ export const contractCommentController = {
       const result = await db.callFunction<CommentRowEnvelope<{ id: number; deleted: boolean }>>(
         'fn_contract_comment_delete',
         [req.user!.id, commentId],
-        { actorId: req.user!.id },
+        { actorId: req.user!.id, tenantId: req.tenantId ?? ADNOC_TENANT_ID },
       );
       res.json({ success: true, data: result.data, requestId: req.requestId });
     } catch (err) {

@@ -440,6 +440,16 @@ router.post(
   contractCommentController.resolve,
 );
 
+// 687 — reopen a resolved comment thread (reviewer re-opens a redline the
+// drafter marked done but didn't satisfy). Same access model as resolve.
+router.post(
+  '/:id/comments/:commentId/reopen',
+  authedWriteRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractCommentIdParamsSchema, 'params'),
+  contractCommentController.reopen,
+);
+
 router.delete(
   '/:id/comments/:commentId',
   authedWriteRateLimiter,
