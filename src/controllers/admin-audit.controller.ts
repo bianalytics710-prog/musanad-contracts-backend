@@ -19,6 +19,7 @@ interface AuditLogRow {
   changedAt: string;
   contractId: number | null;
   contractNumber: string | null;
+  changes: Array<{ field: string; from: string | null; to: string | null }>;
   oldValues: unknown;
   newValues: unknown;
 }
@@ -66,12 +67,21 @@ const HEADER = [
   'contractId',
   'contractNumber',
   'action',
+  'changes',
   'changedBy',
   'changedByName',
   'changedByEmail',
   'oldValues',
   'newValues',
 ];
+
+// Human-readable one-line rendering of a row's field-level changes for CSV.
+const formatChanges = (changes: AuditLogRow['changes']): string =>
+  Array.isArray(changes) && changes.length > 0
+    ? changes
+        .map((c) => `${c.field}: ${c.from ?? '∅'} → ${c.to ?? '∅'}`)
+        .join('; ')
+    : '';
 
 export const adminAuditController = {
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -179,6 +189,7 @@ export const adminAuditController = {
               row.contractId,
               row.contractNumber,
               row.action,
+              formatChanges(row.changes),
               row.changedBy,
               row.changedByName,
               row.changedByEmail,
