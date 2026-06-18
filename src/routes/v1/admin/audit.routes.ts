@@ -26,6 +26,7 @@ const listQuerySchema = z.object({
   changedBy:  z.coerce.number().int().positive().optional(),
   dateFrom:   z.coerce.date().optional(),
   dateTo:     z.coerce.date().optional(),
+  contractId: z.coerce.number().int().positive().optional(),
 });
 
 router.get(

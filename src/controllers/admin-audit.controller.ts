@@ -17,6 +17,8 @@ interface AuditLogRow {
   changedByName: string | null;
   changedByEmail: string | null;
   changedAt: string;
+  contractId: number | null;
+  contractNumber: string | null;
   oldValues: unknown;
   newValues: unknown;
 }
@@ -34,6 +36,7 @@ interface ListQuery {
   changedBy?: number;
   dateFrom?: Date;
   dateTo?: Date;
+  contractId?: number;
 }
 
 const CSV_PAGE_SIZE = 200;
@@ -60,6 +63,8 @@ const HEADER = [
   'changedAt',
   'tableName',
   'recordId',
+  'contractId',
+  'contractNumber',
   'action',
   'changedBy',
   'changedByName',
@@ -88,6 +93,7 @@ export const adminAuditController = {
           q.changedBy ?? null,
           q.dateFrom ?? null,
           q.dateTo ?? null,
+          q.contractId ?? null,
         ],
         { actorId: req.user!.id },
       );
@@ -158,6 +164,7 @@ export const adminAuditController = {
             q.changedBy ?? null,
             q.dateFrom ?? null,
             q.dateTo ?? null,
+            q.contractId ?? null,
           ],
           { actorId: req.user!.id },
         );
@@ -169,6 +176,8 @@ export const adminAuditController = {
               row.changedAt,
               row.tableName,
               row.recordId,
+              row.contractId,
+              row.contractNumber,
               row.action,
               row.changedBy,
               row.changedByName,
