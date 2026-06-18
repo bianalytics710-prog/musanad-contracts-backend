@@ -134,6 +134,56 @@ export const adminAuditController = {
     }
   },
 
+  // Consolidated cross-contract activity feed (the simplified "Audit log" view).
+  async activityFeed(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'admin.activity.list', userId: req.user?.id, method: req.method, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const q = req.query as unknown as {
+        page?: number;
+        limit?: number;
+        contractId?: number;
+        actorId?: number;
+        activityType?: string;
+        dateFrom?: Date;
+        dateTo?: Date;
+      };
+      const result = await db.callFunction(
+        'fn_activity_feed_list',
+        [
+          q.page ?? 1,
+          q.limit ?? 50,
+          q.contractId ?? null,
+          q.actorId ?? null,
+          q.activityType ?? null,
+          q.dateFrom ?? null,
+          q.dateTo ?? null,
+        ],
+        { actorId: req.user!.id },
+      );
+      req.logger.info(
+        { action: 'admin.activity.list', userId: req.user?.id, duration: Date.now() - startTime, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        {
+          action: 'admin.activity.list',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          errorType:
+            error instanceof ApiError ? error.code : error instanceof Error ? error.name : 'UNKNOWN',
+        },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
   // R-PA7: BE-02 documented waiver — this method calls db.callFunction() in a
   // loop (up to ~250 calls per export, paged at 200 rows/call). Streaming
   // a single fn_audit_log_export wrapping a cursor would be the canonical

@@ -29,6 +29,17 @@ const listQuerySchema = z.object({
   contractId: z.coerce.number().int().positive().optional(),
 });
 
+// Consolidated activity feed (simplified, human-readable "Audit log" view).
+const activityQuerySchema = z.object({
+  page:         z.coerce.number().int().min(1).max(100000).optional(),
+  limit:        z.coerce.number().int().min(1).max(200).optional(),
+  contractId:   z.coerce.number().int().positive().optional(),
+  actorId:      z.coerce.number().int().positive().optional(),
+  activityType: z.string().trim().min(1).max(60).optional(),
+  dateFrom:     z.coerce.date().optional(),
+  dateTo:       z.coerce.date().optional(),
+});
+
 router.get(
   '/',
   authedReadRateLimiter,
@@ -43,6 +54,14 @@ router.get(
   authorise(['audit.read']),
   validate(listQuerySchema, 'query'),
   adminAuditController.exportCsv,
+);
+
+router.get(
+  '/activity',
+  authedReadRateLimiter,
+  authorise(['audit.read']),
+  validate(activityQuerySchema, 'query'),
+  adminAuditController.activityFeed,
 );
 
 export default router;
