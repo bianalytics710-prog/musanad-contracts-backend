@@ -373,6 +373,47 @@ const uploadMulter = multer({
   limits: { fileSize: 50 * 1024 * 1024 }, // 50MB hard cap; matches CHECK on contract_attachment.size_bytes
 });
 
+// ============================================================
+// Counterparty redline upload + diff (Scenario 2, mig 710)
+// ============================================================
+// Upload the counterparty's returned .docx/.pdf → extract text → clause-section
+// diff vs current version → accept/reject → apply accepted as a new version.
+router.post(
+  '/:id/redline-imports',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  validate(ContractIdParamSchema, 'params'),
+  uploadMulter.single('file'),
+  contractsController.redlineImportUpload,
+);
+router.get(
+  '/:id/redline-imports',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  validate(ContractIdParamSchema, 'params'),
+  contractsController.redlineImportList,
+);
+// Note: no params Zod here — ContractIdParamSchema is strict to { id } and
+// would 400 on the extra :importId / :changeId. The controller coerces them.
+router.get(
+  '/:id/redline-imports/:importId',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  contractsController.redlineImportGet,
+);
+router.patch(
+  '/:id/redline-imports/:importId/changes/:changeId',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  contractsController.redlineChangeDecide,
+);
+router.post(
+  '/:id/redline-imports/:importId/apply',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  contractsController.redlineImportApply,
+);
+
 router.get(
   '/:id/attachments',
   authedReadRateLimiter,

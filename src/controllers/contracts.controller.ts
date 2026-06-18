@@ -69,6 +69,7 @@ import type {
 } from '../types/payment-schedule.types';
 import { renderContractPdf } from '../services/export/contract-pdf.service';
 import { renderContractXlsx } from '../services/export/contract-xlsx.service';
+import * as redlineImport from '../services/contract-redline-import.service';
 
 const READ_PERMISSION_CODES: ReadonlyArray<string> = [
   'contract.read.all',
@@ -597,6 +598,110 @@ export const contractsController = {
           duration: Date.now() - startTime,
           errorType: errorType(error),
         },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  // ── Counterparty redline upload + diff (Scenario 2, mig 710) ──────────────
+
+  /** POST /:id/redline-imports — upload the counterparty's returned file, diff it. */
+  async redlineImportUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const file = (req as Request & { file?: Express.Multer.File }).file;
+      if (!file) {
+        res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'No file uploaded (field "file").' } });
+        return;
+      }
+      const result = await redlineImport.importRedline({
+        actorId: req.user!.id,
+        role: req.user!.role,
+        contractId: id,
+        filename: file.originalname,
+        mime: file.mimetype,
+        buffer: file.buffer,
+      });
+      req.logger.info(
+        { action: 'contract.redlineImport.upload', userId: req.user?.id, targetId: id, duration: Date.now() - start, statusCode: 201 },
+        'Controller exit',
+      );
+      res.status(201).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.upload', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** GET /:id/redline-imports — list imports for a contract. */
+  async redlineImportList(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params as unknown as ContractIdParamInferred;
+      const result = await redlineImport.listImports(req.user!.id, id);
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.list', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** GET /:id/redline-imports/:importId — full import + changes. */
+  async redlineImportGet(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const importId = Number((req.params as { importId: string }).importId);
+      const result = await redlineImport.getImport(req.user!.id, importId);
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.get', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** PATCH /:id/redline-imports/:importId/changes/:changeId — accept/reject. */
+  async redlineChangeDecide(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const changeId = Number((req.params as { changeId: string }).changeId);
+      const decision = String((req.body as { decision?: string }).decision ?? '');
+      const result = await redlineImport.decideChange(req.user!.id, changeId, decision);
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.decide', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** POST /:id/redline-imports/:importId/apply — accepted changes → new version. */
+  async redlineImportApply(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    try {
+      const importId = Number((req.params as { importId: string }).importId);
+      const result = await redlineImport.applyImport({
+        actorId: req.user!.id,
+        role: req.user!.role,
+        importId,
+      });
+      req.logger.info(
+        { action: 'contract.redlineImport.apply', userId: req.user?.id, importId, newVersion: result.versionNumber, duration: Date.now() - start, statusCode: 200 },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.apply', userId: req.user?.id, errorType: errorType(error) },
         'Controller error',
       );
       next(error);
