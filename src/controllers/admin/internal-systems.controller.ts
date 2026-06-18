@@ -21,6 +21,7 @@ import { probeInternalSystem } from '../../services/internal-system-probe.servic
 import {
   fetchConnectorRecords,
   hasConnectorAdapter,
+  getConnectorMappings,
 } from '../../services/internal-system-connectors.service';
 
 const ADNOC_TENANT_ID = '00000000-0000-0000-0000-000000000001';
@@ -63,6 +64,23 @@ const errorType = (e: unknown): string =>
   e instanceof Error ? e.name : 'UNKNOWN';
 
 export const internalSystemsController = {
+  /**
+   * GET /field-mappings — the declarative "their model → our model" contract
+   * for every wired connector. Static config (no DB); the same specs drive the
+   * pull, so the view can't drift from what actually gets ingested.
+   */
+  fieldMappings(req: Request, res: Response, next: NextFunction): void {
+    try {
+      res.status(200).json({ data: getConnectorMappings() });
+    } catch (e) {
+      req.logger.error(
+        { action: 'admin.internalSystems.fieldMappings', errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
   async list(req: Request, res: Response, next: NextFunction): Promise<void> {
     const start = Date.now();
     req.logger.info(

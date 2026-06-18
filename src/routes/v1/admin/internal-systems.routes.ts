@@ -33,6 +33,9 @@ router.use(authorise(['platform.integrations.manage']));
 router.get('/', authedReadRateLimiter, internalSystemsController.list);
 router.post('/', authedWriteRateLimiter, internalSystemsController.create);
 
+// Literal /field-mappings BEFORE the bare /:id GET so it isn't captured as an id.
+router.get('/field-mappings', authedReadRateLimiter, internalSystemsController.fieldMappings);
+
 // Literal /:id/test-connection + /:id/sync BEFORE the bare /:id PUT/DELETE.
 router.post(
   '/:id/test-connection',
