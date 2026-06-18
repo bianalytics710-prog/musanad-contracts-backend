@@ -18,6 +18,10 @@
 import type { Request, Response, NextFunction } from 'express';
 import { db } from '../../database/client';
 import { probeInternalSystem } from '../../services/internal-system-probe.service';
+import {
+  fetchConnectorRecords,
+  hasConnectorAdapter,
+} from '../../services/internal-system-connectors.service';
 
 const ADNOC_TENANT_ID = '00000000-0000-0000-0000-000000000001';
 
@@ -249,6 +253,60 @@ export const internalSystemsController = {
     } catch (e) {
       req.logger.error(
         { action: 'admin.internalSystems.testConnection', errorType: errorType(e) },
+        'Controller error',
+      );
+      next(e);
+    }
+  },
+
+  /**
+   * POST /:id/sync — "Sync now". Runs the connector's adapter (sample/sandbox
+   * pull for the demo; real vendor API in production), then lands the
+   * normalised records via fn_internal_system_sync_run (signal → correlation →
+   * risk case). Idempotent — re-pulled findings report as deduped.
+   */
+  async sync(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const start = Date.now();
+    try {
+      const id = Number(req.params.id);
+      const row = (await db.callFunction(
+        'fn_internal_system_get',
+        [id],
+        ctx(req),
+      )) as { id: number; systemCode: string };
+
+      if (!hasConnectorAdapter(row.systemCode)) {
+        res.status(422).json({
+          error: {
+            code: 'CONNECTOR_NOT_AVAILABLE',
+            message:
+              'This connector is registry-only — no data adapter is configured yet. Sync is available for SAP S/4HANA Finance, ServiceNow ITSM, and Oracle Primavera P6.',
+          },
+        });
+        return;
+      }
+
+      const records = fetchConnectorRecords(row.systemCode) ?? [];
+      const result = await db.callFunction(
+        'fn_internal_system_sync_run',
+        [req.user!.id, id, records],
+        ctx(req),
+      );
+
+      req.logger.info(
+        {
+          action: 'admin.internalSystems.sync',
+          userId: req.user?.id,
+          systemCode: row.systemCode,
+          duration: Date.now() - start,
+          statusCode: 200,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (e) {
+      req.logger.error(
+        { action: 'admin.internalSystems.sync', errorType: errorType(e) },
         'Controller error',
       );
       next(e);

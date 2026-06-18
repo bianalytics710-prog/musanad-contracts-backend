@@ -33,11 +33,16 @@ router.use(authorise(['platform.integrations.manage']));
 router.get('/', authedReadRateLimiter, internalSystemsController.list);
 router.post('/', authedWriteRateLimiter, internalSystemsController.create);
 
-// Literal /:id/test-connection BEFORE the bare /:id PUT/DELETE.
+// Literal /:id/test-connection + /:id/sync BEFORE the bare /:id PUT/DELETE.
 router.post(
   '/:id/test-connection',
   authedWriteRateLimiter,
   internalSystemsController.testConnection,
+);
+router.post(
+  '/:id/sync',
+  authedWriteRateLimiter,
+  internalSystemsController.sync,
 );
 
 router.get('/:id', authedReadRateLimiter, internalSystemsController.get);
