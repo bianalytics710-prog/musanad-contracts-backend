@@ -78,6 +78,14 @@ partiesRouter.patch(
   partyGraphController.updateParty,
 );
 
+// GET /api/v1/parties/:id/intelligence — counterparty drafting/review intel.
+partiesRouter.get(
+  '/:id/intelligence',
+  authedReadRateLimiter,
+  validate(partyIdParamSchema, 'params'),
+  partyGraphController.intelligence,
+);
+
 // GET /api/v1/parties/:id/chain
 partiesRouter.get(
   '/:id/chain',

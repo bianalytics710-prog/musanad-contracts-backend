@@ -20,6 +20,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { ApiError } from '../utils/errors.util';
 import * as svc from '../services/party-graph.service';
+import { getPartyIntelligence } from '../services/party-intelligence.service';
 import type {
   CreateRelationshipInferred,
   PartyChainSummaryQueryInferred,
@@ -38,6 +39,48 @@ const errorTypeOf = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : 'UNKNOWN';
 
 export const partyGraphController = {
+  // ----------------------------------------------------------
+  // GET /api/v1/parties/:id/intelligence?excludeContractId=&lang=
+  // Counterparty drafting/review intelligence (metrics + short AI note).
+  // ----------------------------------------------------------
+  async intelligence(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const startTime = Date.now();
+    req.logger.info(
+      { action: 'partyGraph.intelligence', userId: req.user?.id, path: req.path },
+      'Controller entry',
+    );
+    try {
+      const partyId = Number((req.params as { id: number | string }).id);
+      const excludeRaw = (req.query as { excludeContractId?: string }).excludeContractId;
+      const excludeContractId =
+        excludeRaw !== undefined && excludeRaw !== '' ? Number(excludeRaw) : null;
+      const lang = (req.query as { lang?: string }).lang === 'ar' ? 'ar' : 'en';
+      const result = await getPartyIntelligence({
+        actorId: req.user!.id,
+        partyId,
+        excludeContractId,
+        language: lang,
+      });
+      req.logger.info(
+        {
+          action: 'partyGraph.intelligence',
+          userId: req.user?.id,
+          duration: Date.now() - startTime,
+          statusCode: 200,
+          hasSummary: result.summary !== null,
+        },
+        'Controller exit',
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      req.logger.error(
+        { action: 'partyGraph.intelligence', userId: req.user?.id, errorType: errorTypeOf(err) },
+        'Controller error',
+      );
+      next(err);
+    }
+  },
+
   // ----------------------------------------------------------
   // GET /api/v1/parties/:id/relationships
   // ----------------------------------------------------------
