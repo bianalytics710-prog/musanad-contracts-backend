@@ -95,10 +95,16 @@ function alignByOurHeadings(theirText: string, ourSections: ClauseSegment[]): Cl
     if (!sec.heading) continue;
     const target = headingKey(sec.heading);
     if (target.length < 4) continue;
-    // Match a line that equals the heading or contains it (ignoring leading
-    // numbering like "18." that mammoth keeps from the Word doc).
+    // Match the heading LINE only — exact, or the heading followed by more
+    // words. We must NOT use a loose `includes`: clause bodies often reference
+    // other clauses by number/title (e.g. "...Clauses 12 (Governing Law), and
+    // 13 (Notices)..."), which would otherwise be mis-anchored as headings and
+    // produce phantom diffs on those clauses.
     const idx = lineKeys.findIndex(
-      (k, i) => !usedLines.has(i) && k.length > 0 && (k === target || k.endsWith(target) || (target.length > 6 && k.includes(target))),
+      (k, i) =>
+        !usedLines.has(i) &&
+        k.length > 0 &&
+        (k === target || k.startsWith(target + ' ')),
     );
     if (idx >= 0) {
       usedLines.add(idx);
