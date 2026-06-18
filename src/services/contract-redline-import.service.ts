@@ -257,8 +257,28 @@ export const decideChange = (
   actorId: number,
   changeId: number,
   decision: string,
+  comment?: string | null,
 ): Promise<unknown> =>
-  db.callFunction('fn_contract_redline_change_decide', [actorId, changeId, decision], { actorId });
+  db.callFunction(
+    'fn_contract_redline_change_decide',
+    [actorId, changeId, decision, comment ?? null],
+    { actorId },
+  );
+
+export const assignChange = (
+  actorId: number,
+  changeId: number,
+  assigneeId: number,
+): Promise<unknown> =>
+  db.callFunction('fn_contract_redline_change_assign', [actorId, changeId, assigneeId], {
+    actorId,
+  });
+
+export const unassignChange = (actorId: number, changeId: number): Promise<unknown> =>
+  db.callFunction('fn_contract_redline_change_unassign', [actorId, changeId], { actorId });
+
+export const listAssignableApprovers = (actorId: number): Promise<unknown> =>
+  db.callFunction('fn_redline_assignable_approvers', [actorId], { actorId });
 
 interface ImportDetail {
   contractId: number;

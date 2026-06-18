@@ -393,24 +393,41 @@ router.get(
   validate(ContractIdParamSchema, 'params'),
   contractsController.redlineImportList,
 );
-// Note: no params Zod here — ContractIdParamSchema is strict to { id } and
-// would 400 on the extra :importId / :changeId. The controller coerces them.
+// Literal /approvers BEFORE /:importId so it isn't captured as an import id.
+router.get(
+  '/:id/redline-imports/approvers',
+  authedReadRateLimiter,
+  authoriseAnyOf(READ_ANY),
+  contractsController.redlineApprovers,
+);
+// Note: no params Zod on the :importId/:changeId routes — ContractIdParamSchema
+// is strict to { id } and would 400 on the extra params. Controller coerces.
 router.get(
   '/:id/redline-imports/:importId',
   authedReadRateLimiter,
   authoriseAnyOf(READ_ANY),
   contractsController.redlineImportGet,
 );
+// Decide is open to any contract reader at the route layer; the fn enforces the
+// real rule (a tagged change is locked to its approver; else any reviewer).
+router.patch(
+  '/:id/redline-imports/:importId/changes/:changeId/assign',
+  authedWriteRateLimiter,
+  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  contractsController.redlineChangeAssign,
+);
 router.patch(
   '/:id/redline-imports/:importId/changes/:changeId',
   authedWriteRateLimiter,
-  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  authoriseAnyOf(READ_ANY),
   contractsController.redlineChangeDecide,
 );
+// Merge is DRAFTER-ONLY — only contract.draft (drafter / platform_admin) may
+// turn accepted recommendations into a new version.
 router.post(
   '/:id/redline-imports/:importId/apply',
   authedWriteRateLimiter,
-  authoriseAnyOf(['contract.edit', 'contract.draft']),
+  authorise(['contract.draft']),
   contractsController.redlineImportApply,
 );
 

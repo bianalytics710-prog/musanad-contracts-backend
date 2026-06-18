@@ -668,16 +668,54 @@ export const contractsController = {
     }
   },
 
-  /** PATCH /:id/redline-imports/:importId/changes/:changeId — accept/reject. */
+  /** PATCH /:id/redline-imports/:importId/changes/:changeId — accept/reject + comment. */
   async redlineChangeDecide(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const changeId = Number((req.params as { changeId: string }).changeId);
-      const decision = String((req.body as { decision?: string }).decision ?? '');
-      const result = await redlineImport.decideChange(req.user!.id, changeId, decision);
+      const body = req.body as { decision?: string; comment?: string };
+      const result = await redlineImport.decideChange(
+        req.user!.id,
+        changeId,
+        String(body.decision ?? ''),
+        body.comment ?? null,
+      );
       res.status(200).json(result);
     } catch (error) {
       req.logger.error(
         { action: 'contract.redlineImport.decide', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** GET /:id/redline-imports/approvers — users taggable as an approver. */
+  async redlineApprovers(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await redlineImport.listAssignableApprovers(req.user!.id);
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.approvers', userId: req.user?.id, errorType: errorType(error) },
+        'Controller error',
+      );
+      next(error);
+    }
+  },
+
+  /** PATCH /:id/redline-imports/:importId/changes/:changeId/assign — tag/untag approver. */
+  async redlineChangeAssign(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const changeId = Number((req.params as { changeId: string }).changeId);
+      const assigneeId = (req.body as { assigneeId?: number }).assigneeId;
+      const result =
+        assigneeId != null
+          ? await redlineImport.assignChange(req.user!.id, changeId, Number(assigneeId))
+          : await redlineImport.unassignChange(req.user!.id, changeId);
+      res.status(200).json(result);
+    } catch (error) {
+      req.logger.error(
+        { action: 'contract.redlineImport.assign', userId: req.user?.id, errorType: errorType(error) },
         'Controller error',
       );
       next(error);
