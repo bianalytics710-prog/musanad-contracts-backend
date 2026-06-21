@@ -76,9 +76,20 @@ const SYSTEM_PROMPT =
   'Given a contract document text, identify each substantive clause and return ' +
   'them as a JSON array. Treat each numbered or titled section as one candidate. ' +
   'Skip preambles, signature blocks, party identification, recitals, and ' +
-  'schedules — only return actual operative clauses. Preserve the original ' +
-  'clause wording verbatim in bodyEn; do not paraphrase or rewrite. Identify ' +
-  'the regulatory category the clause belongs to using ONLY the controlled ' +
+  'schedules — only return actual operative clauses.\n\n' +
+  'BILINGUAL OUTPUT — the platform stores an English canonical version and an ' +
+  'Arabic version of every clause. Populate the fields accordingly:\n' +
+  '- titleEn / bodyEn must ALWAYS be in ENGLISH. If the source clause is in ' +
+  'Arabic, translate it faithfully and completely into English. Never leave ' +
+  'bodyEn empty and never put Arabic text in bodyEn.\n' +
+  '- titleAr / bodyAr must contain the ARABIC text. If the source clause is in ' +
+  'Arabic, copy it verbatim into bodyAr (and its heading into titleAr). If the ' +
+  'source is English-only with no Arabic present, set titleAr and bodyAr to ' +
+  'null.\n' +
+  'When the source is already English, use the original English wording ' +
+  'verbatim in bodyEn and do not invent an Arabic translation. Do not ' +
+  'paraphrase beyond what faithful translation requires. Identify the ' +
+  'regulatory category the clause belongs to using ONLY the controlled ' +
   'vocabulary provided.';
 
 const buildUserPrompt = (req: ExtractClausesRequest): string =>
@@ -90,10 +101,10 @@ const buildUserPrompt = (req: ExtractClausesRequest): string =>
     '  "candidates": [',
     '    {',
     '      "category": one of ' + KNOWN_CATEGORIES.join('|') + ',',
-    '      "titleEn": string (≤120 chars, short clause heading),',
-    '      "titleAr": string | null (Arabic title if present in source),',
-    '      "bodyEn": string (the full verbatim clause text in English),',
-    '      "bodyAr": string | null (Arabic body if present in source),',
+    '      "titleEn": string (≤120 chars, short clause heading IN ENGLISH — translate from Arabic if needed),',
+    '      "titleAr": string | null (the Arabic heading — verbatim if the source is Arabic; null if none),',
+    '      "bodyEn": string (the full clause text IN ENGLISH — translate faithfully from Arabic if needed, never empty),',
+    '      "bodyAr": string | null (the full clause text in Arabic — verbatim if the source is Arabic; null if none),',
     '      "variant": "standard" | "alternative" | "fallback" (default "standard"),',
     '      "legalCommentaryEn": string | null (≤500 chars, one-paragraph practitioner note — optional),',
     '      "regulatoryRefs": string[] (UAE federal law citations referenced by this clause, e.g. ["Federal Decree-Law 33/2021"])',
@@ -102,7 +113,8 @@ const buildUserPrompt = (req: ExtractClausesRequest): string =>
     '}',
     '',
     'Rules:',
-    '- bodyEn must be the ORIGINAL clause text, verbatim. Do not summarise, paraphrase, or rewrite.',
+    '- bodyEn is the ENGLISH clause text. If the source clause is in Arabic, translate it faithfully and in full; if it is already English, keep it verbatim. Never summarise or shorten, never leave bodyEn empty, and never place Arabic text in bodyEn.',
+    '- bodyAr is the ARABIC clause text: verbatim from the source when the source is Arabic, otherwise null.',
     '- If a clause is short (one sentence), still include it as a candidate.',
     '- If a section is purely formatting (e.g. just "SCHEDULE B"), skip it.',
     '- variant is your judgement call: "standard" for the common-case wording, "alternative" for a notably looser/tighter formulation, "fallback" for last-resort wording.',

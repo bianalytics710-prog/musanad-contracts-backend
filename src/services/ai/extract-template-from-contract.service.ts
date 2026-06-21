@@ -41,10 +41,22 @@ export interface ExtractTemplateRequest {
 
 export interface ExtractTemplateResponse {
   nameEn: string;
+  /** Arabic template name — populated when the source is Arabic/bilingual, else null. */
+  nameAr: string | null;
   descriptionEn: string;
+  /** Arabic description — populated when the source is Arabic/bilingual, else null. */
+  descriptionAr: string | null;
   contractType: string;
   language: 'en' | 'ar' | 'bilingual';
   bodyEnRedacted: string;
+  /**
+   * Redacted body in Arabic, carrying the SAME {{snake_case_key}} placeholders
+   * as bodyEnRedacted. Populated when the source is Arabic/bilingual so the
+   * editor's Arabic body field renders with content; null for English-only
+   * sources. bodyEnRedacted always carries the English (translated) body so
+   * downstream embedding/matching stays English-to-English.
+   */
+  bodyArRedacted: string | null;
   placeholders: TemplatePlaceholder[];
   regulatoryReference: string | null;
   /** Human-readable warnings to show on the review screen. */
@@ -110,7 +122,17 @@ const SYSTEM_PROMPT =
   '- Preserve markdown headings (# / ##), numbered clauses, paragraph structure, and the order of ' +
   'the document.\n' +
   '- Distinguish placeholders that the drafter MUST fill (required=true) from those that are ' +
-  'genuinely optional (required=false).';
+  'genuinely optional (required=false).\n\n' +
+  'BILINGUAL OUTPUT — this platform is bilingual (English + Arabic):\n' +
+  '- bodyEnRedacted must ALWAYS be the ENGLISH redacted body. If the source document is in ' +
+  'Arabic, translate it faithfully and completely into English first, then redact. Never leave ' +
+  'bodyEnRedacted empty and never put Arabic prose in it.\n' +
+  '- When the source document is in Arabic or bilingual, ALSO return bodyArRedacted: the FULL ' +
+  'Arabic redacted body, plus nameAr and descriptionAr. When the source is English-only, set ' +
+  'bodyArRedacted, nameAr and descriptionAr to null.\n' +
+  '- CRITICAL: use the EXACT SAME {{snake_case_key}} placeholder tokens (same keys, same spelling) ' +
+  'in both bodyEnRedacted and bodyArRedacted, so a single placeholder catalog applies to both ' +
+  'bodies. Keys are always lowercase ASCII snake_case regardless of document language.';
 
 const buildUserPrompt = (req: ExtractTemplateRequest): string =>
   [
@@ -119,12 +141,15 @@ const buildUserPrompt = (req: ExtractTemplateRequest): string =>
     '',
     'Read the document below carefully, then return a JSON object exactly matching:',
     '{',
-    '  "nameEn": string (≤120 chars, a template name reflecting THIS document — no party names),',
-    '  "descriptionEn": string (≤300 chars, what THIS template is for),',
+    '  "nameEn": string (≤120 chars, a template name IN ENGLISH reflecting THIS document — no party names),',
+    '  "nameAr": string | null (the template name in Arabic when the source is Arabic/bilingual; else null),',
+    '  "descriptionEn": string (≤300 chars, what THIS template is for, in English),',
+    '  "descriptionAr": string | null (the description in Arabic when the source is Arabic/bilingual; else null),',
     '  "contractType": one of ' + KNOWN_CONTRACT_TYPES.join('|') + ',',
     '  "language": "en" | "ar" | "bilingual",',
     '  "regulatoryReference": string | null (headline citation if the document carries one),',
-    '  "bodyEnRedacted": string (the FULL document body, with every entity-specific value swapped to {{snake_case_key}}),',
+    '  "bodyEnRedacted": string (the FULL document body IN ENGLISH — translate from Arabic if needed — with every entity-specific value swapped to {{snake_case_key}}),',
+    '  "bodyArRedacted": string | null (the FULL document body in Arabic with the SAME {{snake_case_key}} tokens, when the source is Arabic/bilingual; else null),',
     '  "placeholders": [',
     '    {',
     '      "key": "snake_case_key" (named after the role the document uses; must appear in bodyEnRedacted),',
@@ -137,7 +162,7 @@ const buildUserPrompt = (req: ExtractTemplateRequest): string =>
     '}',
     '',
     'Final checks before you respond:',
-    '- Every placeholder key must be unique, snake_case, and ACTUALLY appear in bodyEnRedacted.',
+    '- Every placeholder key must be unique, snake_case, and ACTUALLY appear in bodyEnRedacted (and, when you return bodyArRedacted, in bodyArRedacted too — identical tokens in both).',
     '- Every placeholder you emit must be grounded in a specific span of the source text.',
     '- If the document is short (<400 chars), still return a usable structure with whatever ' +
       'placeholders are genuinely present.',
@@ -209,11 +234,14 @@ const dropOrphans = (
 
 interface LlmExtraction {
   nameEn?: string | null;
+  nameAr?: string | null;
   descriptionEn?: string | null;
+  descriptionAr?: string | null;
   contractType?: string | null;
   language?: string | null;
   regulatoryReference?: string | null;
   bodyEnRedacted?: string | null;
+  bodyArRedacted?: string | null;
   placeholders?: unknown;
 }
 
@@ -288,14 +316,17 @@ const buildHeuristicFallback = (
     nameEn:
       'Template from ' +
       req.filename.replace(/\.[a-z0-9]+$/i, '').slice(0, 80),
+    nameAr: null,
     descriptionEn:
       'Imported from ' +
       req.filename +
       ' using heuristic redaction (OpenAI was unavailable). Review carefully before saving.',
+    descriptionAr: null,
     contractType: normaliseContractType(req.contractTypeHint),
     language: 'en',
     regulatoryReference: null,
     bodyEnRedacted: body,
+    bodyArRedacted: null,
     placeholders: kept,
     warnings: [
       'OpenAI not configured or unreachable — used keyword-based heuristic. Review the redacted body and placeholder list carefully.',
@@ -329,13 +360,25 @@ export const extractTemplateFromContract = async (
     return buildHeuristicFallback(req);
   }
 
+  const bodyAr =
+    typeof llm.bodyArRedacted === 'string' && llm.bodyArRedacted.trim().length >= 50
+      ? llm.bodyArRedacted.trim()
+      : null;
+
   const rawPh = normalisePlaceholders(llm.placeholders);
-  const { kept, orphaned } = dropOrphans(rawPh, body);
+  // A placeholder is legitimate if it appears in EITHER redacted body — the
+  // same {{token}} should be present in both, but we union to be tolerant.
+  const { kept, orphaned } = dropOrphans(rawPh, body + '\n' + (bodyAr ?? ''));
 
   const language =
     llm.language === 'ar' || llm.language === 'bilingual' ? llm.language : 'en';
 
   const warnings: string[] = [];
+  if (language !== 'en' && !bodyAr) {
+    warnings.push(
+      'The document looks Arabic but the AI did not return an Arabic body — the Arabic body field may be empty. Review before saving.',
+    );
+  }
   if (orphaned.length > 0) {
     warnings.push(
       'Discarded ' +
@@ -357,10 +400,18 @@ export const extractTemplateFromContract = async (
         ? llm.nameEn.trim().slice(0, 120)
         : 'Template from ' +
           req.filename.replace(/\.[a-z0-9]+$/i, '').slice(0, 80),
+    nameAr:
+      typeof llm.nameAr === 'string' && llm.nameAr.trim().length > 0
+        ? llm.nameAr.trim().slice(0, 200)
+        : null,
     descriptionEn:
       typeof llm.descriptionEn === 'string' && llm.descriptionEn.trim().length > 0
         ? llm.descriptionEn.trim().slice(0, 300)
         : 'Imported from ' + req.filename + '.',
+    descriptionAr:
+      typeof llm.descriptionAr === 'string' && llm.descriptionAr.trim().length > 0
+        ? llm.descriptionAr.trim().slice(0, 2000)
+        : null,
     contractType: normaliseContractType(llm.contractType ?? req.contractTypeHint),
     language: language as 'en' | 'ar' | 'bilingual',
     regulatoryReference:
@@ -369,6 +420,7 @@ export const extractTemplateFromContract = async (
         ? llm.regulatoryReference.trim()
         : null,
     bodyEnRedacted: body,
+    bodyArRedacted: bodyAr,
     placeholders: kept,
     warnings,
   };
